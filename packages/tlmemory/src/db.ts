@@ -190,8 +190,21 @@ export class MemoryDB {
     return (rows as Array<Record<string, unknown>>).map((row) => this.rowToNode(row))
   }
 
+  /**
+   * 人工剪枝：删除指定节点并级联移除其全部后代（沿 parent_id 外键链递归收敛），
+   * 每行删除均经 trg_nodes_ad 触发器同步清理 FTS5 索引，杜绝孤立句柄残留。
+   */
   public deleteNode(id: string): boolean {
-    const result = this.db.prepare('DELETE FROM nodes WHERE id = ?').run(Number(id))
+    const result = this.db
+      .prepare(`
+        WITH RECURSIVE subtree(id) AS (
+          SELECT id FROM nodes WHERE id = ?
+          UNION ALL
+          SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
+        )
+        DELETE FROM nodes WHERE id IN (SELECT id FROM subtree)
+      `)
+      .run(Number(id))
     return result.changes > 0
   }
 

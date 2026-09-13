@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "dsh-plugin-tlmemory",
   "version": "0.1.0",
   "description": "Cross-session and cross-project memory manager for dsh",
@@ -17,11 +17,13 @@
     "cordis": "^3.0.0"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.0"
+    "better-sqlite3": "^11.8.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.14",
     "cordis": "^3.0.0",
     "schemastery": "^3.18.0",
     "tsup": "^8.0.0",

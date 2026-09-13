@@ -18,8 +18,11 @@ import { MemoryServer } from './server.js'
 import type { SearchResult } from './types.js'
 
 // 阶段一交付物再导出（保证包构建产物完整性与回归断言通过）
+export { MemoryDB } from './db.js'
 export { MemoryExtractor } from './extractor.js'
 export { registerMemoryTools } from './tools.js'
+// 阶段三交付物：嵌入式 REST 与 WebSocket 实时中继服务（供主包与测试用例引用）
+export { MemoryServer } from './server.js'
 export type {
   MemoryNode,
   MemoryScope,
