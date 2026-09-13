@@ -25,7 +25,8 @@ export class MemoryDB {
   private db: Database.Database
 
   constructor(dbPath?: string) {
-    const resolvedPath = dbPath && dbPath !== ':memory:' ? dbPath : path.join(os.homedir(), '.dsh', 'tlmemory.db')
+    // 显式 ':memory:' 必须直达 SQLite 内存库，禁止落入默认磁盘路径分支
+    const resolvedPath = dbPath === ':memory:' ? ':memory:' : dbPath ?? path.join(os.homedir(), '.dsh', 'tlmemory.db')
     if (resolvedPath !== ':memory:') {
       fs.mkdirSync(path.dirname(resolvedPath), { recursive: true })
     }
