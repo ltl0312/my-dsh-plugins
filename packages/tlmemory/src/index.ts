@@ -1,24 +1,23 @@
-﻿import { Context } from 'cordis'
+// packages/tlmemory/src/index.ts
+// 插件入口与装配中心：集中导出阶段一交付的原子化反思提取引擎与主动记忆工具箱。
+// Cordis 上下文声明合并统一收敛于 types.ts，此处严禁重复声明以免属性签名冲突。
+import { Context } from 'cordis'
 import Schema from 'schemastery'
 
-// 1. 扩展 Cordis 上下文类型，注册宿主环境服务定义
-declare module 'cordis' {
-  interface Context {
-    logger?: {
-      info: (...args: unknown[]) => void
-      warn: (...args: unknown[]) => void
-      error: (...args: unknown[]) => void
-    }
-    tools?: {
-      register: (tool: {
-        name: string
-        description?: string
-        parameters?: unknown
-        execute: (args: any) => Promise<any> | any
-      }) => () => void
-    }
-  }
-}
+export { MemoryExtractor } from './extractor.js'
+export { registerMemoryTools } from './tools.js'
+
+export type {
+  MemoryNode,
+  MemoryScope,
+  MemoryCategory,
+  SearchOptions,
+  SearchResult,
+  RawReflectionItem,
+  ReflectionResponse,
+  SaveMemoryArgs,
+  QueryMemoryArgs,
+} from './types.js'
 
 export const name = 'tlmemory'
 export const inject = ['tools']
