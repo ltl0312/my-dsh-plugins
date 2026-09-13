@@ -1,0 +1,9 @@
+# cordis.patch.example.yml
+# DSH 宿主零侵入装配补丁模板：无需修改任何官方核心代码，
+# 将本文件内容合并至 $DSH_HOME/cordis.patch.yml（或特定 Profile 补丁）即可挂载 tlmemory 插件。
+- id: tlmemory-runtime
+  name: 'dsh-plugin-tlmemory'
+  config:
+    serverPort: 4890
+    maxRecallCount: 5
+    enableAutoReflection: true
