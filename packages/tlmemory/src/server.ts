@@ -61,6 +61,11 @@ export class MemoryServer {
     this.distPath = resolveWebDist()
   }
 
+  public get actualPort(): number {
+    const addr = this.server?.address()
+    return typeof addr === 'object' && addr !== null ? addr.port : 0
+  }
+
   public start(): void {
     if (this.server) return
 
@@ -140,6 +145,16 @@ export class MemoryServer {
     try {
       if (req.method === 'GET' && pathname === '/api/nodes') {
         const treeType = url.searchParams.get('treeType') ?? undefined
+        const nodes = this.db.getAllNodes(treeType)
+        this.sendJson(res, 200, { data: nodes })
+        return
+      }
+
+      // 记忆树读取契约：GET /api/memories?tree=global
+      // 与 /api/nodes 共享同一数据源，tree/treeType 参数均被接受（tree 优先）
+      if (req.method === 'GET' && pathname === '/api/memories') {
+        const treeType =
+          url.searchParams.get('tree') ?? url.searchParams.get('treeType') ?? undefined
         const nodes = this.db.getAllNodes(treeType)
         this.sendJson(res, 200, { data: nodes })
         return
