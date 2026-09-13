@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlmemory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cross-session and cross-project memory manager for dsh",
   "type": "module",
   "main": "./dist/index.cjs",
