@@ -1,17 +1,38 @@
 {
   "name": "dsh-plugin-tlmemory",
-  "version": "0.1.1",
-  "description": "Cross-session and cross-project memory manager for dsh",
+  "version": "0.2.0",
+  "description": "Cross-session and cross-project memory manager for dsh (silent turn-end sedimentation + native web client embedding)",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./client": "./web/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots",
+        "sessions",
+        "uiConversation"
+      ]
+    }
+  },
   "files": [
     "dist",
-    "web/dist"
+    "web/dist",
+    "web/client.js"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/build-client.mjs",
+    "build:client": "node scripts/build-client.mjs",
     "dev": "tsup --watch",
     "test": "vitest run"
   },
@@ -27,6 +48,7 @@
     "@types/node": "^20.0.0",
     "@types/ws": "^8.5.14",
     "cordis": "^3.0.0",
+    "esbuild": "^0.27.7",
     "schemastery": "^3.18.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",

@@ -36,6 +36,9 @@ importers:
       cordis:
         specifier: ^3.0.0
         version: 3.0.0
+      esbuild:
+        specifier: ^0.27.7
+        version: 0.27.7
       schemastery:
         specifier: ^3.18.0
         version: 3.18.0

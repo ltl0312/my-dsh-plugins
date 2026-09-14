@@ -1,6 +1,13 @@
 # cordis.patch.example.yml
-# DSH 宿主零侵入装配补丁模板：无需修改任何官方核心代码，
-# 将本文件内容合并至 $DSH_HOME/cordis.patch.yml（或特定 Profile 补丁）即可挂载 tlmemory 插件。
+# DSH 宿主零侵入装配补丁模板（v0.2.0 阶段六）：
+# 将本文件内容合并至目标 Profile 的 cordis.patch.yml 即可挂载 tlmemory 插件。
+#
+# 部署拓扑（推荐）：
+# 1. 常驻宿主（默认 profile default）：保持 serverEnabled=true，独占 4890 端口，
+#    对外提供 http://127.0.0.1:4890 记忆看板与 REST/WS 接口；
+# 2. GUI 宿主（profile web）：挂载同一插件并显式 serverEnabled=false，
+#    仅承担会话事件无感静默沉淀 + 客户端插件注册（侧边栏/主视口嵌入），
+#    看板仍指向常驻宿主 4890。两宿主共用 ~/.dsh/tlmemory.db（WAL 多进程安全）。
 - insert:
     - id: tlmemory-runtime
       name: "dsh-plugin-tlmemory"
@@ -8,3 +15,5 @@
         serverPort: 4890
         maxRecallCount: 5
         enableAutoReflection: true
+        # 多宿主并存时置 false 避免端口冲突；单宿主独立运行时可省略（缺省 true）
+        serverEnabled: false

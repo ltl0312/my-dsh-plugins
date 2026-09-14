@@ -60,8 +60,82 @@ export interface QueryMemoryArgs {
   limit?: number
 }
 
-// 扩展 Cordis 上下文接口，声明宿主服务
+// ---------------------------------------------------------------------------
+// DSH 会话事件契约（与 @deepseek-ai/dsh-session 的 SessionEvent 结构逐字段对齐）
+// 说明：宿主以追加式事件日志发布 'session/event'（firehose），持久化插件官方推荐
+// 订阅该事件流（dsh-session 文档：Persistence is a plugin concern — subscribe to
+// `session/event`）。事件统一形状为 { type, seq, time, data }，此处仅声明本插件
+// 消费的子集；结构采用最小化鸭子类型，避免对宿主包产生硬依赖。
+// ---------------------------------------------------------------------------
+
+/** DSH 内容块：模型可见消息统一由 ContentBlock[] 构成 */
+export interface SessionTextBlock {
+  type: 'text'
+  text: string
+}
+
+/** 消息来源：仅 kind === 'user' 表示真实人类输入（其余为插件注入上下文/工具结果） */
+export interface SessionMessageSource {
+  kind: 'user' | 'plugin' | 'model' | 'tool' | (string & {})
+}
+
+/** 会话事件统一信封 */
+export interface SessionEventEnvelope<T = unknown> {
+  type: string
+  seq: number
+  time: number
+  data: T
+}
+
+/** user/message 事件载荷（UserMessage 最小结构） */
+export interface UserMessageEventData {
+  content?: SessionTextBlock[]
+  source?: SessionMessageSource
+}
+
+/** assistant/message 事件载荷（携带 turn/step 定位与完整助手消息） */
+export interface AssistantMessageEventData {
+  turn: number
+  step: number
+  message?: {
+    content?: SessionTextBlock[]
+  }
+  usage?: unknown
+  interrupted?: true
+}
+
+/** turn/start 事件载荷 */
+export interface TurnStartEventData {
+  turn: number
+}
+
+/** turn/end 事件载荷：reason.kind 决定轮次结局（仅 completed 触发沉淀） */
+export interface TurnEndEventData {
+  turn: number
+  reason: {
+    kind: 'completed' | 'aborted' | 'blocked' | 'error' | 'max-tokens' | 'interrupted' | (string & {})
+  }
+}
+
+/** 轮次跟踪器结算产出：无感静默沉淀的输入素材 */
+export interface TurnTrackItem {
+  turn: number
+  /** 本轮真实人类输入（source.kind === 'user' 的消息文本聚合） */
+  userText: string
+  /** 本轮全部助手可见文本（assistant/message 的 text 块聚合） */
+  assistantText: string
+}
+
+// 扩展 Cordis 上下文接口，声明宿主服务与事件总线
 declare module 'cordis' {
+  interface Events {
+    /**
+     * 宿主会话事件流（firehose）：轮次/步骤生命周期、消息与工具事件均经此发布。
+     * 根上下文监听器可观察到全部会话；监听器抛错由宿主捕获隔离，绝不阻断提交。
+     */
+    'session/event'(session: unknown, event: SessionEventEnvelope): void
+  }
+
   interface Context {
     logger?: {
       info: (...args: unknown[]) => void
