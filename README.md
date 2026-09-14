@@ -65,12 +65,12 @@ cd web && pnpm build   # 前端 web/dist
 
 插件通过 cordis patch 零侵入挂载（无需改动 DSH 官方代码）：
 
-- **default 宿主**（常驻内存服务宿主，提供 4890 看板）：见
-  `cordis.patch.example.yml`，`serverEnabled` 缺省为 `true`；
-- **web 宿主**（GUI 宿主，承担会话沉淀 + 客户端插件注册）：`serverEnabled: false`
-  避免与 4890 常驻服务重复绑定端口，两侧共用 `~/.dsh/tlmemory.db`（SQLite WAL
-  支持多进程读写）。客户端插件由 DSH `ClientModuleRegistry` 依据包内
-  `dsh.client` 声明 + `exports["./client"]` 自动编入浏览器启动图（boot graph）。
+- **推荐（单一宿主自洽）**：在 GUI 宿主（profile `web`）`cordis.patch.yml`
+  insert 挂载，`serverEnabled: true`（缺省），GUI 宿主同时承担会话无感沉淀、
+  4890 看板服务与客户端插件注册（当前本地配置即为此拓扑）；
+- **多宿主并存**（旧拓扑）：常驻宿主独占 4890（`serverEnabled` 缺省 true），
+  GUI 宿主置 `serverEnabled: false` 仅承担沉淀与客户端注册，两侧共用
+  `~/.dsh/tlmemory.db`（SQLite WAL 多进程安全）。
 
 ### 验证运行与访问
 

@@ -1,13 +1,14 @@
 # cordis.patch.example.yml
 # DSH 宿主零侵入装配补丁模板（v0.2.0 阶段六）：
-# 将本文件内容合并至目标 Profile 的 cordis.patch.yml 即可挂载 tlmemory 插件。
+# 将本文件内容合并至 GUI 宿主 Profile（如 profiles/web）的 cordis.patch.yml
+# 即可挂载 tlmemory 插件（单一宿主自洽拓扑）。
 #
-# 部署拓扑（推荐）：
-# 1. 常驻宿主（默认 profile default）：保持 serverEnabled=true，独占 4890 端口，
-#    对外提供 http://127.0.0.1:4890 记忆看板与 REST/WS 接口；
-# 2. GUI 宿主（profile web）：挂载同一插件并显式 serverEnabled=false，
-#    仅承担会话事件无感静默沉淀 + 客户端插件注册（侧边栏/主视口嵌入），
-#    看板仍指向常驻宿主 4890。两宿主共用 ~/.dsh/tlmemory.db（WAL 多进程安全）。
+# 单一宿主拓扑（推荐）：GUI 宿主同时承担
+#   - 会话事件无感静默沉淀（turn/end 异步提炼写入 ~/.dsh/tlmemory.db）；
+#   - 内嵌 127.0.0.1:4890 记忆看板服务（serverEnabled: true，独占端口）；
+#   - 客户端插件注册（sidebar.footer.action 左侧导航 + conversation.view 主视口嵌入）。
+# 多宿主拓扑（旧）：另有常驻宿主独占 4890 时，本宿主置 serverEnabled: false
+# 仅承担沉淀与客户端注册；两侧共用同一 SQLite 文件（WAL 多进程安全）。
 - insert:
     - id: tlmemory-runtime
       name: "dsh-plugin-tlmemory"
@@ -15,5 +16,5 @@
         serverPort: 4890
         maxRecallCount: 5
         enableAutoReflection: true
-        # 多宿主并存时置 false 避免端口冲突；单宿主独立运行时可省略（缺省 true）
-        serverEnabled: false
+        # 单一宿主缺省 true；多宿主并存时置 false 避免 4890 端口冲突
+        serverEnabled: true

@@ -101,8 +101,11 @@
 
 | Profile | 变更 |
 | --- | --- |
-| `~/.dsh/profiles/default` | 既有 `dsh-plugin-tlmemory: file:...` 依赖 + `cordis.patch.yml` insert（常驻 4890） |
-| `~/.dsh/profiles/web` | `package.json` 增加 `file:` 依赖；`cordis.patch.yml` insert（`serverEnabled: false`）；`pnpm-workspace.yaml` 放行 `better-sqlite3: true`；`node_modules` 已离线链接并补齐原生二进制 |
+| `~/.dsh/profiles/default` | 既有 `dsh-plugin-tlmemory: file:...` 依赖 + `cordis.patch.yml` insert（旧拓扑常驻宿主，当前未运行） |
+| `~/.dsh/profiles/web` | `package.json` 增加 `file:` 依赖；`cordis.patch.yml` insert（`serverEnabled: true` 单一宿主自洽拓扑）；`pnpm-workspace.yaml` 放行 `better-sqlite3: true`；`node_modules` 已离线链接并补齐原生二进制 |
+
+> 已观测：web 宿主（GUI）重启后成功挂载 tlmemory（`~/.dsh/tlmemory.db` 被宿主独占锁定），
+> 客户端插件随 `dsh.client` 声明编入浏览器启动图。
 
 ## 5. 验证运行与访问
 
