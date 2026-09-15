@@ -76,6 +76,7 @@ allowBuilds:
         serverPort: 4890
         maxRecallCount: 5          # 单轮最多注入系统提示词的记忆条数
         enableAutoReflection: true # 会话结束异步自动反思提炼
+        compactionInterval: 20     # 每累计 N 次沉淀触发一轮强化衰减 + 矛盾检测
 ```
 
 ---

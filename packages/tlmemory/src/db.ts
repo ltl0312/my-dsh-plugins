@@ -726,6 +726,39 @@ export class MemoryDB {
       .run(Date.now(), ...numericIds)
   }
 
+  /**
+   * M3 强化衰减：长期未被命中（updated_at 早于衰减窗口）的叶子记忆
+   * reinforce_count 减半（下限 1）。updated_at 由召回强化与沉淀写入共同刷新，
+   * 因此该条件等价于「超过衰减窗口没有任何触碰」。返回受影响行数。
+   */
+  public decayStaleReinforce(olderThanMs: number): number {
+    const cutoff = Date.now() - olderThanMs
+    const result = this.db
+      .prepare(`
+        UPDATE nodes
+        SET reinforce_count = MAX(1, CAST(reinforce_count / 2 AS INTEGER))
+        WHERE is_leaf = 1 AND reinforce_count > 1 AND updated_at < ?
+      `)
+      .run(cutoff)
+    return result.changes
+  }
+
+  /**
+   * M3 矛盾检测批量取数：取指定时间点之后入库的 auto 来源、confirmed 状态的
+   * 记忆叶子（compaction 的「本批新记忆」）。
+   */
+  public listLeavesCreatedSince(sinceTs: number, limit = 10): MemoryNode[] {
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM nodes
+        WHERE is_leaf = 1 AND source = 'auto' AND status = 'confirmed' AND created_at >= ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `)
+      .all(sinceTs, limit) as Array<Record<string, unknown>>
+    return rows.map((row) => this.rowToNode(row))
+  }
+
   public close(): void {
     if (this.db.open) this.db.close()
   }

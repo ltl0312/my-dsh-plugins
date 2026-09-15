@@ -17,6 +17,7 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { MemoryDB } from './db.js'
 import { MemoryExtractor } from './extractor.js'
+import { MemoryCompactor } from './compactor.js'
 import { registerMemoryTools } from './tools.js'
 import { MemoryRecallEngine } from './recall.js'
 import { MemoryServer } from './server.js'
@@ -33,6 +34,7 @@ import type {
 // 阶段一交付物再导出（保证包构建产物完整性与回归断言通过）
 export { MemoryDB } from './db.js'
 export { MemoryExtractor } from './extractor.js'
+export { MemoryCompactor } from './compactor.js'
 export { registerMemoryTools } from './tools.js'
 export { MemoryRecallEngine } from './recall.js'
 // 阶段三/六交付物：嵌入式 REST 与 WebSocket 实时中继服务 + 轮次跟踪器
@@ -61,6 +63,8 @@ export interface Config {
   /** 是否启用内嵌 127.0.0.1 HTTP/WS 服务。多宿主并存时（GUI 宿主与常驻内存服务
    * 宿主共用同一 SQLite 文件）可置 false，避免 4890 端口重复绑定。 */
   serverEnabled?: boolean
+  /** M3 compaction 间隔：每累计 N 次静默沉淀触发一轮强化衰减 + 矛盾检测（默认 20） */
+  compactionInterval?: number
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -69,6 +73,9 @@ export const Config: Schema<Config> = Schema.object({
   maxRecallCount: Schema.number().default(5).description('单轮最大系统提示词注入记忆条数'),
   enableAutoReflection: Schema.boolean().default(true).description('是否开启会话结束异步自动反思提炼'),
   serverEnabled: Schema.boolean().default(true).description('是否启动内嵌 127.0.0.1 HTTP/WS 管理服务'),
+  compactionInterval: Schema.number()
+    .default(20)
+    .description('M3 compaction 间隔：每累计 N 次静默沉淀触发一轮强化衰减与矛盾检测'),
 })
 
 export const name = 'tlmemory'
@@ -161,6 +168,9 @@ export function apply(ctx: Context, config: Config): () => void {
   const recallEngine = new MemoryRecallEngine(db)
   const turnTracker = new TurnTracker()
   const extractor = new MemoryExtractor(ctx, db)
+  // M3 异步 compaction：强化衰减（确定性）+ 矛盾检测（LLM 成本按批摊薄），
+  // 在提炼链尾部串行执行，绝不与提炼并行、绝不阻塞会话流
+  const compactor = new MemoryCompactor(ctx, db, config.compactionInterval ?? 20)
 
   // 工程身份：解析当前仓库根目录 → scope 哈希 + 可读工程名，并登记进 projects 登记表。
   // 登记之后再打开看板，下拉框里出现的才是 my-dsh-plugins 这样的名字而非 repo:<hash>。
@@ -199,19 +209,29 @@ export function apply(ctx: Context, config: Config): () => void {
 
   const dispatchExtraction = (item: TurnTrackItem, scope: string): void => {
     const controller = new AbortController()
-    const run = extractionChain.then(() => {
-      if (disposed) return
-      activeExtractionAbort = controller
-      const timer = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS)
-      return extractor
-        .extractAndConsolidate(item, scope, { signal: controller.signal })
-        .then(() => server.notifyTreeChanged(scope))
-        .catch((err) => ctx.logger?.error?.('[tlmemory] 后台静默沉淀任务异常:', err))
-        .finally(() => {
-          clearTimeout(timer)
-          if (activeExtractionAbort === controller) activeExtractionAbort = null
-        })
-    })
+    const run = extractionChain
+      .then(() => {
+        if (disposed) return
+        activeExtractionAbort = controller
+        const timer = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS)
+        return extractor
+          .extractAndConsolidate(item, scope, { signal: controller.signal })
+          .then(() => server.notifyTreeChanged(scope))
+          .catch((err) => ctx.logger?.error?.('[tlmemory] 后台静默沉淀任务异常:', err))
+          .finally(() => {
+            clearTimeout(timer)
+            if (activeExtractionAbort === controller) activeExtractionAbort = null
+          })
+      })
+      .then(() => {
+        // M3：每累计 N 次沉淀，在链尾串行执行一轮 compaction
+        //（强化衰减 + 矛盾检测）。挂在同一链上保证与提炼互斥，注销 disposed 兜底。
+        if (disposed) return
+        if (!compactor.noteSedimented()) return
+        return compactor.compact().catch((err) =>
+          ctx.logger?.error?.('[tlmemory] compaction 任务异常:', err),
+        )
+      })
     extractionChain = run
   }
 
