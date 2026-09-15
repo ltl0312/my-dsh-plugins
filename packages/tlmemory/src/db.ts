@@ -7,7 +7,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
 import Database from 'better-sqlite3'
-import type { MemoryNode, SearchOptions, SearchResult } from './types.js'
+import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './types.js'
 
 /** 路径分段白名单正则：仅允许字母、数字、下划线、中文与连字符 */
 const SEGMENT_WHITELIST = /[^a-zA-Z0-9_\u4e00-\u9fa5\-]/g
@@ -55,6 +55,18 @@ export class MemoryDB {
       );
 
       CREATE INDEX IF NOT EXISTS idx_nodes_tree_path ON nodes(tree_type, path);
+
+      -- 工程作用域登记表：把不可读的 repo:<hash> 反解为「可读工程名 + 根目录」。
+      -- is_manual=1 表示用户在看板上手工命名过，自动登记（宿主启动时按 .git 根目录
+      -- 写入）不得覆盖它，否则用户命名每次重启都会被冲掉。
+      CREATE TABLE IF NOT EXISTS projects (
+        scope TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        root TEXT,
+        is_manual INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
 
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
         tree_type, path, name, content, keywords,
@@ -188,6 +200,143 @@ export class MemoryDB {
       ? this.db.prepare('SELECT * FROM nodes WHERE tree_type = ? ORDER BY tree_type, path, name').all(treeType)
       : this.db.prepare('SELECT * FROM nodes ORDER BY tree_type, path, name').all()
     return (rows as Array<Record<string, unknown>>).map((row) => this.rowToNode(row))
+  }
+
+  /** 精确作用域取节点（scope 即 tree_type 原文，例如 'global' / 'repo:1a2b3c4d5e6f'） */
+  public getNodesByScope(scope: string): MemoryNode[] {
+    return this.getAllNodes(scope)
+  }
+
+  /**
+   * 取工程树节点。传入 scope 时收敛到该工程；省略时返回**全部非全局**作用域，
+   * 由调用方（看板下拉框）自行聚焦到所选工程。
+   */
+  public getProjectNodes(scope?: string): MemoryNode[] {
+    if (scope) return this.getAllNodes(scope)
+    const rows = this.db
+      .prepare("SELECT * FROM nodes WHERE tree_type <> 'global' ORDER BY tree_type, path, name")
+      .all()
+    return (rows as Array<Record<string, unknown>>).map((row) => this.rowToNode(row))
+  }
+
+  /**
+   * 自动登记工程作用域（宿主装配时调用）。
+   * 若该 scope 已被用户手工命名（is_manual=1），保留用户命名不覆盖。
+   */
+  public registerProject(scope: string, name: string, root?: string | null): void {
+    const cleanScope = String(scope ?? '').trim()
+    if (!cleanScope) return
+    const cleanName = String(name ?? '').trim() || cleanScope
+    const now = Date.now()
+    this.db
+      .prepare(`
+        INSERT INTO projects (scope, name, root, is_manual, created_at, updated_at)
+        VALUES (?, ?, ?, 0, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          name = CASE WHEN projects.is_manual = 1 THEN projects.name ELSE excluded.name END,
+          root = COALESCE(excluded.root, projects.root),
+          updated_at = excluded.updated_at
+      `)
+      .run(cleanScope, cleanName, root ?? null, now, now)
+  }
+
+  /**
+   * 手工命名工程作用域：把历史遗留的 repo:<hash> 改成可读名字。
+   * 置 is_manual=1 后自动登记不再覆盖。
+   */
+  public renameProject(scope: string, name: string): boolean {
+    const cleanScope = String(scope ?? '').trim()
+    const cleanName = String(name ?? '').trim()
+    if (!cleanScope || !cleanName) return false
+    const now = Date.now()
+    const result = this.db
+      .prepare(`
+        INSERT INTO projects (scope, name, root, is_manual, created_at, updated_at)
+        VALUES (?, ?, NULL, 1, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          name = excluded.name,
+          is_manual = 1,
+          updated_at = excluded.updated_at
+      `)
+      .run(cleanScope, cleanName, now, now)
+    return result.changes > 0
+  }
+
+  /**
+   * 列出所有工程作用域：以「库里真实存在的记忆记录」为准（按 tree_type 去重聚合），
+   * 并补上仅在登记表中存在、尚无记忆的当前工程，保证下拉框总能选中正在用的工程。
+   */
+  public listProjects(): ProjectSummary[] {
+    const rows = this.db
+      .prepare(`
+        SELECT tree_type AS scope,
+               COUNT(*) AS node_count,
+               SUM(CASE WHEN is_leaf = 1 THEN 1 ELSE 0 END) AS leaf_count,
+               MAX(updated_at) AS updated_at
+        FROM nodes
+        WHERE tree_type <> 'global'
+        GROUP BY tree_type
+      `)
+      .all() as Array<{ scope: string; node_count: number; leaf_count: number; updated_at: number }>
+
+    const registry = this.db.prepare('SELECT scope, name, root FROM projects').all() as Array<{
+      scope: string
+      name: string
+      root: string | null
+    }>
+    const registryMap = new Map(registry.map((r) => [r.scope, r]))
+
+    const merged = new Map<string, ProjectSummary>()
+    for (const row of rows) {
+      const meta = registryMap.get(row.scope)
+      merged.set(row.scope, {
+        scope: row.scope,
+        name: meta?.name || row.scope,
+        root: meta?.root ?? null,
+        nodeCount: Number(row.node_count ?? 0),
+        leafCount: Number(row.leaf_count ?? 0),
+        updatedAt: Number(row.updated_at ?? 0),
+      })
+    }
+    for (const meta of registry) {
+      if (merged.has(meta.scope)) continue
+      merged.set(meta.scope, {
+        scope: meta.scope,
+        name: meta.name || meta.scope,
+        root: meta.root ?? null,
+        nodeCount: 0,
+        leafCount: 0,
+        updatedAt: 0,
+      })
+    }
+
+    return Array.from(merged.values()).sort((a, b) => {
+      if (b.leafCount !== a.leafCount) return b.leafCount - a.leafCount
+      return a.name.localeCompare(b.name)
+    })
+  }
+
+  /**
+   * 把「工程名或 scope 原文」解析为确定的 scope。
+   * 依次尝试：scope 原文命中登记表 → scope 原文在 nodes 中存在 → 登记名匹配（忽略大小写）。
+   * 解析不出来返回 null，由调用方决定 404 还是回退全量。
+   */
+  public findProjectScope(nameOrScope: string): string | null {
+    const key = String(nameOrScope ?? '').trim()
+    if (!key) return null
+
+    const byScope = this.db.prepare('SELECT scope FROM projects WHERE scope = ?').get(key) as
+      | { scope: string }
+      | undefined
+    if (byScope) return byScope.scope
+
+    const inNodes = this.db.prepare('SELECT 1 AS ok FROM nodes WHERE tree_type = ? LIMIT 1').get(key)
+    if (inNodes) return key
+
+    const byName = this.db
+      .prepare('SELECT scope FROM projects WHERE lower(name) = lower(?) ORDER BY updated_at DESC LIMIT 1')
+      .get(key) as { scope: string } | undefined
+    return byName ? byName.scope : null
   }
 
   /**

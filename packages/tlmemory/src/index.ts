@@ -40,6 +40,7 @@ export type {
   MemoryNode,
   MemoryScope,
   MemoryCategory,
+  ProjectSummary,
   SearchOptions,
   SearchResult,
   RawReflectionItem,
@@ -48,6 +49,7 @@ export type {
   QueryMemoryArgs,
   TurnTrackItem,
 } from './types.js'
+export type { CurrentProject } from './server.js'
 
 export interface Config {
   dbPath?: string
@@ -70,18 +72,34 @@ export const Config: Schema<Config> = Schema.object({
 export const name = 'tlmemory'
 export const inject = ['tools', 'llm', 'systemPrompt']
 
-/** 递归探测 .git 根目录并哈希截断生成项目作用域标识（repo:<12位sha256>） */
-function resolveProjectScope(): string {
+/** 工程身份三元组：不可读的 scope 哈希 + 可读工程名 + 物理根目录 */
+export interface ProjectIdentity {
+  scope: string
+  name: string
+  root: string
+}
+
+/**
+ * 解析当前进程所在的工程身份。
+ *
+ * scope 仍是「repo 根目录绝对路径」的 sha256 前 12 位，与历史版本逐字节一致 ——
+ * 这样既有记忆库的 tree_type 不会因为本次改造发生漂移；额外带出根目录 basename
+ * 作为可读工程名，交给 db.registerProject 落库，看板下拉框才能显示
+ * my-dsh-plugins / TLToolBox 这类人类可读的名字。
+ */
+export function resolveProjectIdentity(): ProjectIdentity {
+  const fallbackRoot = path.normalize(process.cwd())
+  let root = fallbackRoot
   let currentDir = process.cwd()
   while (currentDir !== path.parse(currentDir).root) {
     if (fs.existsSync(path.join(currentDir, '.git'))) {
-      const hash = crypto.createHash('sha256').update(path.normalize(currentDir)).digest('hex')
-      return `repo:${hash.slice(0, 12)}`
+      root = path.normalize(currentDir)
+      break
     }
     currentDir = path.dirname(currentDir)
   }
-  const fallbackHash = crypto.createHash('sha256').update(path.normalize(process.cwd())).digest('hex')
-  return `repo:${fallbackHash.slice(0, 12)}`
+  const hash = crypto.createHash('sha256').update(root).digest('hex')
+  return { scope: `repo:${hash.slice(0, 12)}`, name: path.basename(root) || 'unknown-project', root }
 }
 
 /** 事件载荷判型守卫：事件类型不匹配时返回 null，防御宿主未来新增同类事件名 */
@@ -100,7 +118,12 @@ export function apply(ctx: Context, config: Config): () => void {
   const recallEngine = new MemoryRecallEngine(db)
   const turnTracker = new TurnTracker()
   const extractor = new MemoryExtractor(ctx, db)
-  const projectScope = resolveProjectScope()
+
+  // 工程身份：解析当前仓库根目录 → scope 哈希 + 可读工程名，并登记进 projects 登记表。
+  // 登记之后再打开看板，下拉框里出现的才是 my-dsh-plugins 这样的名字而非 repo:<hash>。
+  const project = resolveProjectIdentity()
+  const projectScope = project.scope
+  db.registerProject(project.scope, project.name, project.root)
 
   let activeRecalledMemories: SearchResult[] = []
   let activePromptSectionText = ''
@@ -117,7 +140,7 @@ export function apply(ctx: Context, config: Config): () => void {
 
   // 阶段三：内嵌回环网络服务。禁用时（serverEnabled:false）不监听端口，
   // 看板由共享 SQLite 的另一宿主实例提供，本实例仅承担事件沉淀与召回职责。
-  const server = new MemoryServer(db, config.serverPort ?? 4890, ctx.logger)
+  const server = new MemoryServer(db, config.serverPort ?? 4890, ctx.logger, project)
   if (serverEnabled) {
     server.start()
   } else {

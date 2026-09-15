@@ -3,13 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light dark" />
+    <!-- 刻意不写 <meta name="color-scheme" content="light dark">：它等价于在根元素上声明
+         color-scheme: light dark，一旦系统偏好深色，内核就会把 iframe 画布涂成不透明深色
+         （实测 #121212），把宿主的主题背景整块盖住 —— 透明透传直接失效，且
+         getComputedStyle 里 backgroundColor 仍是 rgba(0,0,0,0)，只看计算样式查不出来。
+         需要 color-scheme 的滚动条 / 表单控件由 src/style.css 在**具体元素**上声明。 -->
     <title>TL·MEMORY</title>
     <style>
       /* 首帧兜底：宿主主题消息到达之前，至少先去掉浏览器默认的白底，
          否则跨源 iframe 会在宿主背景上闪一块白。完整令牌层见 src/style.css。
-         注意不要在这里给 :root 加 color-scheme —— 根元素背景透明时，画布会被
-         所用色彩方案的基础色涂满，反而盖住宿主的主题背景。 */
+         注意不要在这里给 :root 加 color-scheme（含上面的 meta 写法）—— 根元素背景
+         透明时，画布会被所用色彩方案的基础色涂满，反而盖住宿主的主题背景。 */
       html,
       body {
         margin: 0;

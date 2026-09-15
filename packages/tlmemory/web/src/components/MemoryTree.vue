@@ -21,10 +21,8 @@ function toggleCollapse(path: string) {
   }
 }
 
-/** 当前记忆树范围内的节点 */
-const filteredNodes = computed(() =>
-  store.nodes.filter((n) => (store.currentTree === 'global' ? n.tree_type === 'global' : n.tree_type !== 'global')),
-)
+/** 当前记忆树范围内的节点（作用域由 store 统一收敛：工程记忆 / 全局偏好） */
+const filteredNodes = computed(() => store.scopedNodes)
 
 /**
  * 预览条目：提前算好简介，避免模板里逐项重复解析 Markdown。

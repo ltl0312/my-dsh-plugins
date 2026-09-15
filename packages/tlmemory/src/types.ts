@@ -6,6 +6,28 @@
 export type MemoryScope = 'global' | 'project'
 export type MemoryCategory = 'preference' | 'architecture' | 'lesson'
 
+/**
+ * 工程记忆作用域的对外摘要（GET /api/projects 的条目）。
+ *
+ * tree_type 在生产环境是 `repo:<12位sha256>` 这样不可读的哈希，因此这里把
+ * 「可读工程名 + 物理根目录」一并带出，供看板的工程下拉框直接呈现。
+ * 名字来源优先级：用户手工命名（is_manual） > 装配时自动登记（.git 根目录名） > scope 原文。
+ */
+export interface ProjectSummary {
+  /** 作用域标识，即 SQLite 中的 tree_type（例如 repo:1a2b3c4d5e6f） */
+  scope: string
+  /** 可读工程名（默认取 .git 根目录的 basename） */
+  name: string
+  /** 工程根目录绝对路径；未登记过则为 null */
+  root: string | null
+  /** 该作用域下的全部节点数（含分类目录） */
+  nodeCount: number
+  /** 该作用域下的记忆叶子数（真正可阅读的条目） */
+  leafCount: number
+  /** 该作用域下最近一次写入时间戳（毫秒） */
+  updatedAt: number
+}
+
 export interface MemoryNode {
   id: string
   tree_type: string           // 'global' 或 'repo:<hash>'

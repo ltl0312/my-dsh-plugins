@@ -54,6 +54,14 @@
   --tlm-hit-border: rgba(9, 105, 218, 0.5);
   --tlm-code-bg: rgba(0, 0, 0, 0.055);
   --tlm-scrim: rgba(15, 20, 28, 0.24);
+  /* 图谱专用：连线基色、检索命中时的青色发光（浅色底用偏深的青才够对比）、
+     未命中节点的淡化系数。三项都成对出现在深色令牌里。 */
+  --tlm-edge: rgba(0, 0, 0, 0.16);
+  --tlm-edge-hit: rgba(8, 145, 178, 0.95);
+  --tlm-glow-fill: rgba(8, 145, 178, 0.12);
+  --tlm-glow-border: rgba(8, 145, 178, 0.85);
+  --tlm-glow-shadow: 0 0 16px rgba(8, 145, 178, 0.42);
+  --tlm-dim: 0.25;
   /* 抽屉需要足够不透明才读得清：仍然是叠色而非纯色，宿主底色隐约可见 */
   --tlm-drawer-bg: rgba(251, 252, 253, 0.92);
   --tlm-shadow: 0 18px 48px rgba(0, 0, 0, 0.16);
@@ -83,6 +91,13 @@
   --tlm-drawer-bg: rgba(19, 23, 30, 0.92);
   --tlm-shadow: 0 20px 52px rgba(0, 0, 0, 0.5);
   --tlm-focus: rgba(121, 184, 255, 0.6);
+  /* 图谱专用：深色底改用亮青，发光才有「自发光」观感 */
+  --tlm-edge: rgba(255, 255, 255, 0.16);
+  --tlm-edge-hit: rgba(34, 211, 238, 0.95);
+  --tlm-glow-fill: rgba(34, 211, 238, 0.16);
+  --tlm-glow-border: rgba(34, 211, 238, 0.9);
+  --tlm-glow-shadow: 0 0 18px rgba(34, 211, 238, 0.5);
+  --tlm-dim: 0.25;
 }
 
 /* 透明透传：这是「背景颜色与宿主主题实时自适应」的地基，不能被任何规则覆盖 */
@@ -137,7 +152,9 @@ body {
 .tlm-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  /* 中心列可能被拖得很窄：控件换行而不是横向溢出把整块布局顶破 */
+  flex-wrap: wrap;
+  gap: 8px 10px;
   flex: none;
   padding: 10px 12px;
   border-bottom: 1px solid var(--tlm-border-soft);
@@ -203,6 +220,96 @@ body {
   font-weight: 600;
 }
 
+/* --- 工程选择器与全局偏好胶囊 --------------------------------------------- */
+
+/* 下拉框与胶囊同高同圆角，视觉上并排成一列作用域控件 */
+.tlm-pickwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 200px;
+  padding: 0 4px 0 9px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: 999px;
+  background: var(--tlm-surface);
+  transition: background-color var(--tlm-motion), border-color var(--tlm-motion),
+    opacity var(--tlm-motion);
+}
+
+.tlm-pickwrap:hover {
+  background: var(--tlm-surface-hover);
+}
+
+/* 处于全局偏好态时弱化：保留已选工程，但明确它不是当前查看的树 */
+.tlm-pickwrap.is-idle {
+  opacity: 0.55;
+}
+
+.tlm-pick-icon {
+  display: block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-select {
+  appearance: none;
+  -webkit-appearance: none;
+  min-width: 0;
+  flex: 1;
+  padding: 4px 4px 4px 0;
+  border: none;
+  background: transparent;
+  color: var(--tlm-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.tlm-select:focus {
+  outline: none;
+}
+
+/* 原生下拉面板用系统配色：只在 <select> 自身声明 color-scheme，不碰 :root */
+.tlm-select option {
+  color-scheme: var(--tlm-scheme);
+  background: var(--tlm-drawer-bg);
+  color: var(--tlm-fg);
+}
+
+/* 全局偏好胶囊 */
+.tlm-pill {
+  appearance: none;
+  flex: none;
+  padding: 4px 12px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: 999px;
+  background: var(--tlm-surface);
+  color: var(--tlm-fg-muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--tlm-motion), color var(--tlm-motion),
+    border-color var(--tlm-motion);
+}
+
+.tlm-pill:hover {
+  color: var(--tlm-fg);
+  background: var(--tlm-surface-hover);
+}
+
+.tlm-pill[aria-pressed='true'] {
+  background: var(--tlm-accent);
+  border-color: var(--tlm-accent);
+  color: var(--tlm-accent-fg);
+  font-weight: 600;
+}
+
 /* --- 搜索 ----------------------------------------------------------------- */
 
 .tlm-searchbar {
@@ -236,17 +343,24 @@ body {
 
 /* --- 主体滚动区 ----------------------------------------------------------- */
 
+/* 主体区：纵向弹性容器。列表与图谱两视图用 v-show 互斥共存，因此都拉满整块高度 ——
+   图谱要的是「不滚动的满幅画布」，列表要的是「自己滚动的长文档」。 */
 .tlm-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .tlm-main-inner {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 10px 12px 16px;
 }
 
@@ -464,6 +578,249 @@ body {
 .tlm-leaf-empty {
   font-style: italic;
   opacity: 0.75;
+}
+
+/* --- 树状图谱（MemoryGraphTree） ----------------------------------------- */
+
+/* 画布：满幅 + 裁切超出视口的树体。底色仍是 transparent，宿主主题背景直接透上来。 */
+.tlm-graph {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--tlm-bg);
+  cursor: grab;
+  /* 拖拽平移期间不要选中卡片文字；触屏交给 pointer 事件自己处理 */
+  user-select: none;
+  touch-action: none;
+}
+
+.tlm-graph.is-panning {
+  cursor: grabbing;
+}
+
+/* 舞台绝对定位：transform 只改变绘制、不参与布局，因此父级（画布）尺寸恒定，
+   ResizeObserver 观测到的永远是视口自身的尺寸而非树体尺寸。 */
+.tlm-graph-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.tlm-graph-edges {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.tlm-graph-nodes {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* 连线：三次贝塞尔，默认一条细基线 */
+.tlm-glink {
+  fill: none;
+  stroke: var(--tlm-edge);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  transition: stroke var(--tlm-motion), stroke-width var(--tlm-motion), opacity var(--tlm-motion);
+}
+
+/* 命中叶子 → 根：整条父级路径连线加粗并染青 */
+.tlm-glink.is-hit {
+  stroke: var(--tlm-edge-hit);
+  stroke-width: 2.6;
+}
+
+.tlm-glink.is-dim {
+  opacity: var(--tlm-dim);
+}
+
+/* 节点卡片：一律半透明叠色，宿主底色参与成像 */
+.tlm-gnode {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: var(--tlm-radius-sm);
+  background: var(--tlm-surface);
+  color: var(--tlm-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  overflow: hidden;
+  transition: opacity var(--tlm-motion), background-color var(--tlm-motion),
+    border-color var(--tlm-motion), box-shadow var(--tlm-motion);
+}
+
+/* Level 0：根节点 */
+.tlm-gnode-root {
+  border-color: var(--tlm-border);
+  background: var(--tlm-surface-strong);
+  font-weight: 700;
+}
+
+.tlm-gnode-root .tlm-gnode-label {
+  font-family: var(--tlm-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--tlm-accent);
+}
+
+/* Level 1~N：中间目录节点（不可点，仅作骨架） */
+.tlm-gnode-dir {
+  color: var(--tlm-fg-muted);
+  font-weight: 600;
+}
+
+/* 叶子节点：可点击，进入 Markdown 详情抽屉 */
+.tlm-gnode-leaf {
+  cursor: pointer;
+}
+
+.tlm-gnode-leaf:hover {
+  background: var(--tlm-surface-hover);
+  border-color: var(--tlm-border);
+}
+
+.tlm-gnode-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tlm-gnode-count {
+  flex: none;
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  color: var(--tlm-fg-faint);
+}
+
+/* 检索命中：青色发光边框 + 外发光 */
+.tlm-gnode.is-hit {
+  border-color: var(--tlm-glow-border);
+  background: var(--tlm-glow-fill);
+  box-shadow: var(--tlm-glow-shadow);
+}
+
+.tlm-gnode.is-hit .tlm-gnode-label {
+  color: var(--tlm-fg-strong);
+  font-weight: 700;
+}
+
+/* 在命中路径上但自身未命中：只留青色描边，顺着它就能找到命中叶子 */
+.tlm-gnode.is-path {
+  border-color: var(--tlm-glow-border);
+}
+
+/* 未命中：整块淡化 */
+.tlm-gnode.is-dim {
+  opacity: var(--tlm-dim);
+}
+
+/* 实时召回微光（WebSocket MEMORY_HITS 广播，数秒后自动熄灭） */
+.tlm-gnode.is-live {
+  background: var(--tlm-hit);
+  border-color: var(--tlm-hit-border);
+}
+
+.tlm-gnode.is-hit.is-live {
+  background: var(--tlm-hit);
+}
+
+/* 画布工具条：缩放与一键居中 */
+.tlm-graph-tools {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: 999px;
+  background: var(--tlm-surface);
+}
+
+.tlm-gtool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: none;
+  height: 22px;
+  min-width: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tlm-fg-muted);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--tlm-motion), color var(--tlm-motion);
+}
+
+.tlm-gtool:hover {
+  background: var(--tlm-surface-hover);
+  color: var(--tlm-fg);
+}
+
+.tlm-gtool svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
+.tlm-gtool-readout {
+  flex: none;
+  min-width: 34px;
+  text-align: center;
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  color: var(--tlm-fg-faint);
+}
+
+/* 空态与操作提示 */
+.tlm-graph-blank {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tlm-graph-hint {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  z-index: 2;
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  color: var(--tlm-fg-faint);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tlm-glink,
+  .tlm-gnode {
+    transition: none;
+  }
 }
 
 /* --- 检索结果 ------------------------------------------------------------- */
@@ -735,7 +1092,11 @@ body {
 .tlm-iconbtn:focus-visible,
 .tlm-close:focus-visible,
 .tlm-btn:focus-visible,
-.tlm-leaf:focus-visible {
+.tlm-leaf:focus-visible,
+.tlm-select:focus-visible,
+.tlm-pill:focus-visible,
+.tlm-gnode-leaf:focus-visible,
+.tlm-gtool:focus-visible {
   outline: 2px solid var(--tlm-focus);
   outline-offset: 1px;
 }
@@ -916,28 +1277,28 @@ body {
 }
 
 /* 滚动条：跟随主题，避免在浅色宿主上出现深色滚动条 */
-.tlm-main,
+.tlm-main-inner,
 .tlm-drawer-body,
 .tlm-md .tlm-md-pre {
   scrollbar-width: thin;
   scrollbar-color: var(--tlm-border) transparent;
 }
 
-.tlm-main::-webkit-scrollbar,
+.tlm-main-inner::-webkit-scrollbar,
 .tlm-drawer-body::-webkit-scrollbar,
 .tlm-md .tlm-md-pre::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
-.tlm-main::-webkit-scrollbar-thumb,
+.tlm-main-inner::-webkit-scrollbar-thumb,
 .tlm-drawer-body::-webkit-scrollbar-thumb,
 .tlm-md .tlm-md-pre::-webkit-scrollbar-thumb {
   background: var(--tlm-border);
   border-radius: 4px;
 }
 
-.tlm-main::-webkit-scrollbar-track,
+.tlm-main-inner::-webkit-scrollbar-track,
 .tlm-drawer-body::-webkit-scrollbar-track,
 .tlm-md .tlm-md-pre::-webkit-scrollbar-track {
   background: transparent;

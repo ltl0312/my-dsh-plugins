@@ -11,6 +11,16 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { MemoryDB } from './db.js'
 
+/** 宿主当前所在工程的身份（由装配层注入，用于 /api/projects 标记默认选中项） */
+export interface CurrentProject {
+  scope: string
+  name: string
+  root: string
+}
+
+/** 请求体读取封顶：只用于极小的 JSON 控制报文（重命名等），超限直接截断拒绝 */
+const MAX_BODY_BYTES = 8 * 1024
+
 /** 回环绑定常量：严禁替换为 0.0.0.0 或省略（省略将默认绑定所有网卡） */
 const LOOPBACK_HOST = '127.0.0.1'
 
@@ -57,6 +67,7 @@ export class MemoryServer {
     private db: MemoryDB,
     private port: number = 4890,
     private logger?: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
+    private currentProject?: CurrentProject,
   ) {
     this.distPath = resolveWebDist()
   }
@@ -70,7 +81,7 @@ export class MemoryServer {
     if (this.server) return
 
     this.server = http.createServer((req, res) => {
-      this.handleHttp(req, res)
+      void this.handleHttp(req, res)
     })
 
     this.wss = new WebSocketServer({ noServer: true })
@@ -128,9 +139,9 @@ export class MemoryServer {
     }
   }
 
-  private handleHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
+  private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 
     if (req.method === 'OPTIONS') {
@@ -143,26 +154,93 @@ export class MemoryServer {
     const pathname = url.pathname
 
     try {
-      if (req.method === 'GET' && pathname === '/api/nodes') {
-        const treeType = url.searchParams.get('treeType') ?? undefined
-        const nodes = this.db.getAllNodes(treeType)
-        this.sendJson(res, 200, { data: nodes })
+      // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）
+      if (req.method === 'GET' && pathname === '/api/projects') {
+        this.sendJson(res, 200, {
+          data: this.db.listProjects(),
+          current: this.currentProject?.scope ?? null,
+          currentName: this.currentProject?.name ?? null,
+        })
         return
       }
 
-      // 记忆树读取契约：GET /api/memories?tree=global
-      // 与 /api/nodes 共享同一数据源，tree/treeType 参数均被接受（tree 优先）
-      if (req.method === 'GET' && pathname === '/api/memories') {
-        const treeType =
-          url.searchParams.get('tree') ?? url.searchParams.get('treeType') ?? undefined
-        const nodes = this.db.getAllNodes(treeType)
-        this.sendJson(res, 200, { data: nodes })
+      // 手工命名工程（把历史遗留的 repo:<hash> 改成可读名字）
+      if (req.method === 'PATCH' && pathname === '/api/projects') {
+        const body = await this.readJsonBody(req)
+        const scope = typeof body.scope === 'string' ? body.scope : ''
+        const name = typeof body.name === 'string' ? body.name : ''
+        if (!scope || !name.trim()) {
+          this.sendJson(res, 400, { error: 'scope 与 name 均为必填' })
+          return
+        }
+        this.sendJson(res, 200, { success: this.db.renameProject(scope, name), data: this.db.listProjects() })
+        return
+      }
+
+      // 记忆树读取契约（/api/nodes 与 /api/memories 共享同一套作用域语义）：
+      //   ?scope=global                    全局偏好树
+      //   ?scope=project&project=<工程名>   指定工程树
+      //   ?scope=project                    全部工程树（看板下拉框自行收敛）
+      //   不带参数 / ?scope=all              全部树（兼容既有行为）
+      // 亦兼容历史参数 ?tree= / ?treeType=（值可以是 'global' / 'project' / 原始 tree_type）
+      if (req.method === 'GET' && (pathname === '/api/nodes' || pathname === '/api/memories')) {
+        const scope = (url.searchParams.get('scope') ?? '').trim()
+        const projectParam = (url.searchParams.get('project') ?? '').trim()
+        const legacy = (url.searchParams.get('tree') ?? url.searchParams.get('treeType') ?? '').trim()
+
+        // 显式工程名 / scope 原文：收敛到唯一工程
+        if (projectParam) {
+          const resolved = this.db.findProjectScope(projectParam)
+          if (resolved === null) {
+            this.sendJson(res, 404, { error: `未找到工程 ${projectParam}` })
+            return
+          }
+          this.sendJson(res, 200, { data: this.db.getNodesByScope(resolved) })
+          return
+        }
+
+        if (scope === 'global' || legacy === 'global') {
+          this.sendJson(res, 200, { data: this.db.getNodesByScope('global') })
+          return
+        }
+
+        if (scope === 'project' || legacy === 'project') {
+          this.sendJson(res, 200, { data: this.db.getProjectNodes() })
+          return
+        }
+
+        const explicit = scope || legacy
+        if (explicit && explicit !== 'all') {
+          // 允许直接传原始 tree_type（例如 repo:1a2b3c4d5e6f）
+          this.sendJson(res, 200, { data: this.db.getNodesByScope(explicit) })
+          return
+        }
+
+        this.sendJson(res, 200, { data: this.db.getAllNodes() })
         return
       }
 
       if (req.method === 'GET' && pathname === '/api/search') {
         const query = url.searchParams.get('q') || ''
-        const treeType = url.searchParams.get('treeType') ?? undefined
+        const scope = (url.searchParams.get('scope') ?? '').trim()
+        const projectParam = (url.searchParams.get('project') ?? '').trim()
+        const legacy = (url.searchParams.get('tree') ?? url.searchParams.get('treeType') ?? '').trim()
+
+        let treeType: string | undefined
+        if (projectParam) {
+          const resolved = this.db.findProjectScope(projectParam)
+          if (resolved === null) {
+            this.sendJson(res, 404, { error: `未找到工程 ${projectParam}` })
+            return
+          }
+          treeType = resolved
+        } else if (scope === 'global' || legacy === 'global') {
+          treeType = 'global'
+        } else {
+          const explicit = scope || legacy
+          if (explicit && explicit !== 'all' && explicit !== 'project') treeType = explicit
+        }
+
         const hits = this.db.search(query, { treeType })
         this.sendJson(res, 200, { data: hits })
         return
@@ -179,6 +257,35 @@ export class MemoryServer {
     } catch (e) {
       this.sendJson(res, 500, { error: (e as Error).message })
     }
+  }
+
+  /** 读取并解析极小 JSON 请求体；超限或畸形一律收敛为空对象（由调用方按缺字段拒绝） */
+  private readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+    return new Promise((resolve) => {
+      let raw = ''
+      let aborted = false
+      req.on('data', (chunk: Buffer) => {
+        if (aborted) return
+        raw += chunk.toString('utf8')
+        if (raw.length > MAX_BODY_BYTES) {
+          aborted = true
+          raw = ''
+        }
+      })
+      req.on('end', () => {
+        if (aborted || raw.trim() === '') {
+          resolve({})
+          return
+        }
+        try {
+          const parsed = JSON.parse(raw)
+          resolve(parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {})
+        } catch {
+          resolve({})
+        }
+      })
+      req.on('error', () => resolve({}))
+    })
   }
 
   private serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): void {
