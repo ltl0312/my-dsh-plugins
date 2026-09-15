@@ -236,7 +236,8 @@ watch(
         </g>
       </svg>
 
-      <!-- 节点层 -->
+      <!-- 节点层：所有节点都是规整卡片（内边距 + 圆角 + 微边框 + 层级阴影），
+           标题 + 计数徽标；叶子可点进详情抽屉 -->
       <div class="tlm-graph-nodes">
         <template v-for="item in layout.nodes" :key="item.id">
           <button
@@ -250,7 +251,7 @@ watch(
             @click="onNodeClick(item)"
           >
             <span class="tlm-gnode-label">{{ item.label }}</span>
-            <span class="tlm-gnode-count">×{{ item.count }}</span>
+            <span class="tlm-gnode-badge" title="断言强化次数">×{{ item.count }}</span>
           </button>
 
           <div
@@ -262,7 +263,7 @@ watch(
             :title="`${item.label} · ${item.count} 条记忆`"
           >
             <span class="tlm-gnode-label">{{ item.label }}</span>
-            <span class="tlm-gnode-count">{{ item.count }}</span>
+            <span class="tlm-gnode-badge">{{ item.count }}</span>
           </div>
         </template>
       </div>

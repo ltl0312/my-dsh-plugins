@@ -223,8 +223,17 @@ export function shouldRelinquishColumn(event: object): boolean {
  */
 export type ThemeMode = 'light' | 'dark'
 
-/** 宿主 → 看板：推送当前配色模式 */
+/** 宿主 → 看板：推送当前配色模式（规范协议，见 THEME_CHANGE_MESSAGE_TYPE） */
 export const THEME_MESSAGE_TYPE = 'dsh-tlmemory:theme'
+
+/**
+ * 宿主 → 看板：推送当前配色模式（规范协议）。
+ *
+ * 消息形如 { type: 'dsh-theme-change', theme: 'dark' | 'light' }；看板侧两种
+ * 形态都接收（旧 { type: 'dsh-tlmemory:theme', mode } 保留一个兼容周期，
+ * 覆盖「宿主 HMR 已换新 client.js、iframe 里还是旧 web/dist」的混合窗口）。
+ */
+export const THEME_CHANGE_MESSAGE_TYPE = 'dsh-theme-change'
 
 /** 看板 → 宿主：就绪握手（宿主据此补推一次主题，避免首帧丢失） */
 export const READY_MESSAGE_TYPE = 'dsh-tlmemory:ready'
@@ -243,30 +252,52 @@ export const THEME_VALUE_ATTRIBUTES: readonly string[] = ['data-theme', 'data-ds
 
 /**
  * 主题观察属性集：宿主切换配色时必然改动其中之一。
- * `class` 用于兼容 class 形态的深色模式（如 `body.dark`）。
+ * `class` 用于兼容 class 形态的深色模式（如 `body.dark`）；
+ * `style` 用于捕获宿主 boot 脚本对内联 color-scheme 的改写（浅色态唯一显式信号）。
  */
 export const THEME_WATCH_ATTRIBUTES: readonly string[] = [
   DARK_THEME_ATTRIBUTE,
   LIGHT_THEME_ATTRIBUTE,
   ...THEME_VALUE_ATTRIBUTES,
   'class',
+  'style',
 ]
 
 /** 系统配色媒体查询（宿主未声明主题时的回落依据） */
 export const THEME_MEDIA_QUERY = '(prefers-color-scheme: dark)'
 
-/** 主题推送消息体 */
+/** class 形态的主题标记：宿主可能直接在顶层元素挂 dark / light 类 */
+export const THEME_CLASS_DARK = 'dark'
+
+/** class 形态的主题标记（浅色） */
+export const THEME_CLASS_LIGHT = 'light'
+
+/** 旧协议消息体（兼容周期内继续发送，见 THEME_CHANGE_MESSAGE_TYPE 注释） */
 export interface ThemeMessage {
   type: typeof THEME_MESSAGE_TYPE
   mode: ThemeMode
 }
 
+/** 规范协议消息体：宿主 → 看板的主题推送 */
+export interface ThemeChangeMessage {
+  type: typeof THEME_CHANGE_MESSAGE_TYPE
+  theme: ThemeMode
+}
+
 /**
- * 构造主题推送消息体。
+ * 构造旧协议消息体（兼容发送）。
  * @param mode - 当前配色模式
  */
-export function themeMessage(mode: ThemeMode): ThemeMessage {
+export function legacyThemeMessage(mode: ThemeMode): ThemeMessage {
   return { type: THEME_MESSAGE_TYPE, mode }
+}
+
+/**
+ * 构造规范协议消息体 { type: 'dsh-theme-change', theme }。
+ * @param mode - 当前配色模式
+ */
+export function themeMessage(mode: ThemeMode): ThemeChangeMessage {
+  return { type: THEME_CHANGE_MESSAGE_TYPE, theme: mode }
 }
 
 /**

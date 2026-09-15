@@ -22,13 +22,16 @@
       }
     </style>
     <script>
-      // 内联执行（先于 bundle）：按系统配色预置 data-theme，避免首帧用错令牌。
-      // 宿主真正推送的主题模式会在 postMessage 到达后覆盖此值。
+      // 内联执行（先于 bundle）：按「本地偏好 > 系统配色」预置 data-theme，避免首帧
+      // 用错令牌。强制浅/深时首帧即正确；auto 态由宿主 postMessage 到达后覆盖。
       // 只写 data-theme，不碰 color-scheme（原因见上面的样式注释）。
       ;(function () {
         var mode = 'light'
         try {
-          if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+          var pref = window.localStorage && window.localStorage.getItem('tlmemory:theme-preference')
+          if (pref === 'dark' || pref === 'light') {
+            mode = pref
+          } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
             mode = 'dark'
           }
         } catch (error) {

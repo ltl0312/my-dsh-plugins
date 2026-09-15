@@ -155,15 +155,6 @@ html[${ACTIVE_ATTRIBUTE}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-act
   background: transparent;
   color: var(--dsw-alias-label-primary, inherit);
   font-family: var(--dsw-font-family, inherit);
-  color-scheme: light dark;
-}
-
-.tlmemory-panel[data-theme='light'] {
-  color-scheme: light;
-}
-
-.tlmemory-panel[data-theme='dark'] {
-  color-scheme: dark;
 }
 
 /* 标题栏：左侧「回退 + 标题组」，右侧整段留空。
@@ -288,7 +279,12 @@ html[${ACTIVE_ATTRIBUTE}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-act
 
 /* iframe 自身透明：浏览器默认给 iframe 一层不透明白底，会盖住宿主背景；
    allowtransparency / background 属性与 inline style 由 frame.ts 在挂载时补齐
-   （内联样式优先级高于本表，故这里只需兜住默认值）。 */
+   （内联样式优先级高于本表，故这里只需兜住默认值）。
+   ★ color-scheme 必须显式 normal：iframe 元素上任何非 normal 值（含 light dark /
+   dark，含从 .tlmemory-panel 继承来的值）都会让 Chromium 把 iframe 画布涂成
+   不透明白（矩阵实验实证：none/normal = 透传，light dark/dark = (255,255,255)），
+   宿主的主题背景从此再也透不上来。滚动条 / 表单控件的配色由 iframe 文档内部的
+   .tlm-app / .tlm-drawer 在元素级声明（实验证明不影响画布）。 */
 .tlmemory-frame {
   display: block;
   width: 100%;
@@ -297,7 +293,7 @@ html[${ACTIVE_ATTRIBUTE}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-act
   min-height: 0;
   border: none;
   background: transparent !important;
-  color-scheme: light dark;
+  color-scheme: normal;
 }
 
 .tlmemory-overlay {

@@ -404,14 +404,19 @@ describe('客户端样式表', () => {
     expect(css).toMatch(/\.tlmemory-overlay\s*\{[^}]*var\(--dsw-alias-bg-base/)
   })
 
-  it('主题感知：面板外框带 data-theme 驱动的 color-scheme', () => {
+  it('★ iframe 的 color-scheme 必须为 normal（非 normal 值会让 Chromium 涂白画布）', () => {
     ensureClientStyles(document)
     const css = document.querySelector<HTMLStyleElement>(STYLE_SELECTOR)!.textContent ?? CLIENT_CSS
 
-    expect(css).toContain(".tlmemory-panel[data-theme='light']")
-    expect(css).toContain(".tlmemory-panel[data-theme='dark']")
-    expect(css).toContain('color-scheme: light')
-    expect(css).toContain('color-scheme: dark')
+    // .tlmemory-frame 显式 normal：既豁免自身，也阻断从 panel 继承
+    const frameBlock = css.match(/\.tlmemory-frame\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(frameBlock).toContain('color-scheme: normal')
+    // panel 自身块不得声明 color-scheme（会被 iframe 继承后涂白画布）
+    const panelBlock = css.match(/\.tlmemory-panel\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(panelBlock).not.toContain('color-scheme')
+    // 历史回归位：panel[data-theme] 的 color-scheme 覆盖规则必须已删除
+    expect(css).not.toContain(".tlmemory-panel[data-theme='light']")
+    expect(css).not.toContain(".tlmemory-panel[data-theme='dark']")
   })
 
   it('标题栏：右侧留出宿主安全区，状态胶囊为紧凑次级标签', () => {

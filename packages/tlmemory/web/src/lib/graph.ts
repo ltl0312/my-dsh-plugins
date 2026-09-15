@@ -15,11 +15,12 @@ export type GraphNodeKind = 'root' | 'dir' | 'leaf'
 /** 合成根节点（Level 0）的固定 id：不与数据库自增 id 冲突 */
 export const GRAPH_ROOT_ID = '__tlmemory_root__'
 
-/** 各层节点的卡片尺寸（Level 0 略大，观感上确立「根」的层级） */
+/** 各层节点的卡片尺寸（Level 0 略大，观感上确立「根」的层级）。
+ *  尺寸必须容纳卡片固定内边距（左右各 12px）+ 标题 + 计数徽标，见 style.css 的 .tlm-gnode。 */
 export const GRAPH_NODE_SIZE: Record<GraphNodeKind, { width: number; height: number }> = {
-  root: { width: 176, height: 48 },
-  dir: { width: 148, height: 36 },
-  leaf: { width: 176, height: 46 },
+  root: { width: 200, height: 54 },
+  dir: { width: 164, height: 42 },
+  leaf: { width: 208, height: 52 },
 }
 
 /** 同层兄弟节点之间的水平间距 */

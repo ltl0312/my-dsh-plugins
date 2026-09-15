@@ -38,6 +38,7 @@ import {
   createPanelState,
   dashboardUrl,
   isDashboardOrigin,
+  legacyThemeMessage,
   parseDashboardMessage,
   probeDashboardHealth,
   themeMessage,
@@ -46,7 +47,7 @@ import {
 } from './logic.js'
 import { ENTRY_ICON, mountSidebarEntry } from './sidebar-entry.js'
 import { mountCenterPanel } from './panel-mount.js'
-import { applyFrameColorScheme, applyFrameTransparency } from './frame.js'
+import { applyFrameTransparency } from './frame.js'
 import { detectThemeMode, watchThemeMode } from './theme.js'
 import { ensureClientStyles, removeClientStyles } from './styles.js'
 
@@ -57,7 +58,7 @@ export { ENTRY_ICON, mountSidebarEntry, sidebarRoot, newSessionButton } from './
 export { mountCenterPanel, conversationColumn } from './panel-mount.js'
 export { ensureClientStyles, removeClientStyles, CLIENT_CSS, STYLE_SELECTOR } from './styles.js'
 export { detectThemeMode, watchThemeMode } from './theme.js'
-export { applyFrameTransparency, applyFrameColorScheme, TRANSPARENT_BACKGROUND } from './frame.js'
+export { applyFrameTransparency, TRANSPARENT_BACKGROUND } from './frame.js'
 export { ACTIVE_ATTRIBUTE, VIEW_ATTRIBUTE }
 
 /**
@@ -108,9 +109,11 @@ function useThemeMode(): ThemeMode {
  * 加载态与离线态都以视口内遮罩呈现，不弹窗、不开新窗口。
  *
  * 主题链路（看板是跨源 iframe，CSS 无法继承）：
- *   1. 宿主侧读出当前配色（theme.ts），iframe 就绪与主题变更时 postMessage 推送；
+ *   1. 宿主侧读出当前配色（theme.ts，data-* 标记 / 内联 color-scheme / class 令牌三类来源），
+ *      iframe 就绪与主题变更时 postMessage 推送（规范协议 dsh-theme-change + 旧协议兼容双发）；
  *   2. iframe 主动发就绪握手，宿主收到即补推一次，覆盖「推送早于监听注册」的时序；
- *   3. iframe 与承载层自身的 color-scheme 由父侧直接设置（影响滚动条等内核绘制）。
+ *   3. iframe 元素的 color-scheme 保持 normal（styles.ts 声明），绝不设 light/dark ——
+ *      任何非 normal 值都会让 Chromium 涂白 iframe 画布，破坏透明透传。
  */
 function MemoryDashboardPanel(props: { state: PanelState }): ReactElement {
   const { state } = props
@@ -130,25 +133,33 @@ function MemoryDashboardPanel(props: { state: PanelState }): ReactElement {
     themeRef.current = theme
   }, [theme])
 
-  /** 向看板推送当前配色；主题值走 ref，回调因此可以不随主题变化重建。 */
+  /**
+   * 向看板推送当前配色；主题值走 ref，回调因此可以不随主题变化重建。
+   *
+   * 双发两个协议形态：规范协议 { type: 'dsh-theme-change', theme } 与旧协议
+   * { type: 'dsh-tlmemory:theme', mode }。iframe 里的 web/dist 与宿主 client.js
+   * 的更新时机并不保证同步（HMR 只热换宿主半边，iframe 要等自身重载），
+   * 双发让混合版本窗口内的任何一侧都能听懂对方。
+   */
   const pushTheme = React.useCallback(() => {
     const target = frameRef.current?.contentWindow
     if (target === null || target === undefined) return
     try {
       target.postMessage(themeMessage(themeRef.current), DASHBOARD_ORIGIN)
+      target.postMessage(legacyThemeMessage(themeRef.current), DASHBOARD_ORIGIN)
     } catch {
       // 跨源目标被拒绝（理论上不会，源固定为回环地址）不应打断看板渲染。
     }
   }, [])
 
-  // iframe 元素每次重载都会重建（key=reloadNonce），因此透明属性与配色方案
-  // 必须在这两个依赖上重放，而不是只在挂载时执行一次。
+  // iframe 元素每次重载都会重建（key=reloadNonce），因此透明属性必须在该依赖上
+  // 重放，而不是只在挂载时执行一次。刻意不设置 iframe 元素的 color-scheme：
+  // 任何非 normal 值都会让 Chromium 把 iframe 画布涂成不透明白（见 frame.ts）。
   React.useEffect(() => {
     const frame = frameRef.current
     if (frame === null || frame === undefined) return
     applyFrameTransparency(frame)
-    applyFrameColorScheme(frame, theme)
-  }, [reloadNonce, theme])
+  }, [reloadNonce])
 
   // 看板文档加载完成即推主题：此时看板的监听端已就绪，首帧不会用错配色。
   React.useEffect(() => {

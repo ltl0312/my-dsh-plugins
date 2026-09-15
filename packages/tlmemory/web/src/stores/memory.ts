@@ -46,6 +46,8 @@ export const useMemoryStore = defineStore('memory', () => {
   /** 当前选中的工程 scope（tree_type 原文）；空串表示尚未确定，后端会回退为全部工程 */
   const currentProjectScope = ref<string>('')
   const projects = ref<ProjectDto[]>([])
+  /** /api/projects 是否已结算（成功或失败）：决定顶栏显示「加载中」还是真实空态 */
+  const projectsLoading = ref(true)
   const viewMode = ref<ViewMode>('list')
   const nodes = ref<MemoryNodeDto[]>([])
   const activeHitIds = ref<Set<string>>(new Set())
@@ -55,9 +57,35 @@ export const useMemoryStore = defineStore('memory', () => {
   /** 详情抽屉当前展示的记忆项；null 表示抽屉关闭 */
   const selectedNode = ref<MemoryNodeDto | null>(null)
 
+  /**
+   * 工程下拉的选项清单。
+   *
+   * /api/projects 失败或滞后（首帧竞态）时，从已加载的节点按 tree_type 反推工程
+   * 清单 —— 下方明明有节点数据，顶栏却出现「暂无工程记忆」禁用态就是误报，
+   * 这里兜底保证「有节点必有可选项」。反推项拿不到服务端的可读工程名，用
+   * scope 哈希前缀代称；/api/projects 恢复后由正规清单整体替换。
+   */
+  const projectOptions = computed<ProjectDto[]>(() => {
+    if (projects.value.length > 0) return projects.value
+    const map = new Map<string, ProjectDto>()
+    for (const node of nodes.value) {
+      const scope = node.tree_type
+      if (!scope || scope === 'global') continue
+      let entry = map.get(scope)
+      if (entry === undefined) {
+        const name = scope.startsWith('repo:') ? `工程 ${scope.slice(5, 13)}` : scope
+        entry = { scope, name, root: null, nodeCount: 0, leafCount: 0, updatedAt: 0 }
+        map.set(scope, entry)
+      }
+      entry.nodeCount += 1
+      if (Number(node.is_leaf) === 1) entry.leafCount += 1
+    }
+    return Array.from(map.values())
+  })
+
   /** 当前选中的工程（未选中或工程已消失时为 null） */
   const currentProject = computed<ProjectDto | null>(
-    () => projects.value.find((item) => item.scope === currentProjectScope.value) ?? null,
+    () => projectOptions.value.find((item) => item.scope === currentProjectScope.value) ?? null,
   )
 
   /**
@@ -95,16 +123,20 @@ export const useMemoryStore = defineStore('memory', () => {
 
   /** 拉取工程清单；首次加载时把默认选中项锁定到宿主当前所在工程 */
   async function fetchProjects() {
+    projectsLoading.value = true
     try {
       const res = await fetch('/api/projects')
       const json = await res.json()
       projects.value = json.data || []
-      // 用户已选过则以用户选择为准，否则用后端上报的当前工程，最后退回叶子最多的工程
+      // 用户已选过则以用户选择为准，否则用后端上报的当前工程（默认选中项的
+      // 最终兜底在 bootstrap 里做，那里还能看到节点反推的工程清单）。
       if (!currentProjectScope.value) {
-        currentProjectScope.value = json.current || projects.value[0]?.scope || ''
+        currentProjectScope.value = json.current || ''
       }
     } catch (e) {
       console.error('拉取工程列表失败:', e)
+    } finally {
+      projectsLoading.value = false
     }
   }
 
@@ -118,10 +150,19 @@ export const useMemoryStore = defineStore('memory', () => {
     }
   }
 
-  /** 首次加载：工程清单与节点树并行拉取 */
+  /** 首次加载：工程清单与节点树并行拉取，最后统一确定默认选中工程 */
   async function bootstrap() {
-    await fetchProjects()
-    await fetchNodes()
+    const scopeBefore = currentProjectScope.value
+    await Promise.all([fetchProjects(), fetchNodes()])
+    if (!currentProjectScope.value) {
+      // 后端未上报当前工程：退回到清单第一项（含节点反推的兜底项）。
+      currentProjectScope.value = projectOptions.value[0]?.scope ?? ''
+    }
+    // 并行首拉时作用域尚未确定（空 scope = 全工程查询）。默认工程确定后若发生过
+    // 变化，按最终作用域重拉一次节点，保证顶栏选中与下方树一致。
+    if (!scopeBefore && currentProjectScope.value) {
+      await fetchNodes()
+    }
   }
 
   /** 切换工程：立即切换到工程记忆并重新拉取该工程的树与检索结果 */
@@ -203,6 +244,9 @@ export const useMemoryStore = defineStore('memory', () => {
     return activeHitIds.value.has(id)
   }
 
+  /** MEMORY_HITS 微光的自动熄灭定时器：新广播到来时重置，避免旧定时器提前熄灭新高亮 */
+  let hitTimer: ReturnType<typeof setTimeout> | undefined
+
   function setupWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}`
@@ -213,12 +257,21 @@ export const useMemoryStore = defineStore('memory', () => {
     }
 
     ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data)
+      // 服务端只发 JSON，但握手脚本 / 代理异常时可能流入任意文本：解析失败静默忽略。
+      let payload: { type?: unknown; hitNodeIds?: unknown } | null = null
+      try {
+        payload = JSON.parse(String(event.data))
+      } catch {
+        return
+      }
+      if (payload === null || typeof payload !== 'object') return
       if (payload.type === 'MEMORY_HITS') {
-        activeHitIds.value = new Set(payload.hitNodeIds || [])
+        const ids = Array.isArray(payload.hitNodeIds) ? payload.hitNodeIds : []
+        activeHitIds.value = new Set(ids.map(String))
+        if (hitTimer !== undefined) clearTimeout(hitTimer)
         // 微光感知：5 秒后自动熄灭，避免残留高亮干扰
-        setTimeout(() => {
-          activeHitIds.value.clear()
+        hitTimer = setTimeout(() => {
+          activeHitIds.value = new Set()
         }, 5000)
       } else if (payload.type === 'TREE_CHANGED') {
         void fetchNodes()
@@ -240,6 +293,8 @@ export const useMemoryStore = defineStore('memory', () => {
     currentTree,
     currentProjectScope,
     projects,
+    projectsLoading,
+    projectOptions,
     viewMode,
     nodes,
     activeHitIds,

@@ -147,6 +147,7 @@ window.__ModuleLoader__.load({
         return typeof detail === "string" && SIBLING_PANEL_NAMES.includes(detail);
       }
       var THEME_MESSAGE_TYPE = "dsh-tlmemory:theme";
+      var THEME_CHANGE_MESSAGE_TYPE = "dsh-theme-change";
       var READY_MESSAGE_TYPE = "dsh-tlmemory:ready";
       var DARK_THEME_ATTRIBUTE = "data-ds-dark-theme";
       var LIGHT_THEME_ATTRIBUTE = "data-ds-light-theme";
@@ -155,11 +156,17 @@ window.__ModuleLoader__.load({
         DARK_THEME_ATTRIBUTE,
         LIGHT_THEME_ATTRIBUTE,
         ...THEME_VALUE_ATTRIBUTES,
-        "class"
+        "class",
+        "style"
       ];
       var THEME_MEDIA_QUERY = "(prefers-color-scheme: dark)";
-      function themeMessage(mode) {
+      var THEME_CLASS_DARK = "dark";
+      var THEME_CLASS_LIGHT = "light";
+      function legacyThemeMessage(mode) {
         return { type: THEME_MESSAGE_TYPE, mode };
+      }
+      function themeMessage(mode) {
+        return { type: THEME_CHANGE_MESSAGE_TYPE, theme: mode };
       }
       function parseDashboardMessage(data) {
         if (typeof data !== "object" || data === null) return void 0;
@@ -377,25 +384,51 @@ window.__ModuleLoader__.load({
         frame.style.background = TRANSPARENT_BACKGROUND;
         frame.style.backgroundColor = TRANSPARENT_BACKGROUND;
       }
-      function applyFrameColorScheme(frame, mode) {
-        frame.style.colorScheme = mode;
-      }
     
       // src/client/theme.ts
       var OBSERVED_ATTRIBUTES = [...THEME_WATCH_ATTRIBUTES];
-      function modeFromElement(element) {
-        if (element === null) return void 0;
+      function modeFromThemeAttributes(element) {
         if (element.hasAttribute(DARK_THEME_ATTRIBUTE)) return "dark";
         if (element.hasAttribute(LIGHT_THEME_ATTRIBUTE)) return "light";
+        return void 0;
+      }
+      function modeFromThemeValueAttributes(element) {
         for (const name of THEME_VALUE_ATTRIBUTES) {
           const value = element.getAttribute(name);
           if (value === "dark" || value === "light") return value;
         }
         return void 0;
       }
+      function modeFromInlineColorScheme(element) {
+        if (!(element instanceof HTMLElement) || element.style === void 0) return void 0;
+        const inlineScheme = element.style.colorScheme;
+        if (inlineScheme === "dark") return "dark";
+        if (inlineScheme === "light") return "light";
+        return void 0;
+      }
+      function modeFromClassTokens(element) {
+        try {
+          if (element.classList.contains(THEME_CLASS_DARK)) return "dark";
+          if (element.classList.contains(THEME_CLASS_LIGHT)) return "light";
+        } catch {
+        }
+        return void 0;
+      }
       function detectThemeMode(doc) {
-        const declared = modeFromElement(doc.body) ?? modeFromElement(doc.documentElement);
-        if (declared !== void 0) return declared;
+        const elements = [doc.body, doc.documentElement];
+        const layers = [
+          modeFromThemeAttributes,
+          modeFromThemeValueAttributes,
+          modeFromInlineColorScheme,
+          modeFromClassTokens
+        ];
+        for (const layer of layers) {
+          for (const element of elements) {
+            if (element === null) continue;
+            const mode = layer(element);
+            if (mode !== void 0) return mode;
+          }
+        }
         const query = doc.defaultView?.matchMedia?.(THEME_MEDIA_QUERY);
         return query?.matches === true ? "dark" : "light";
       }
@@ -558,15 +591,6 @@ window.__ModuleLoader__.load({
       background: transparent;
       color: var(--dsw-alias-label-primary, inherit);
       font-family: var(--dsw-font-family, inherit);
-      color-scheme: light dark;
-    }
-    
-    .tlmemory-panel[data-theme='light'] {
-      color-scheme: light;
-    }
-    
-    .tlmemory-panel[data-theme='dark'] {
-      color-scheme: dark;
     }
     
     /* \u6807\u9898\u680F\uFF1A\u5DE6\u4FA7\u300C\u56DE\u9000 + \u6807\u9898\u7EC4\u300D\uFF0C\u53F3\u4FA7\u6574\u6BB5\u7559\u7A7A\u3002
@@ -691,7 +715,12 @@ window.__ModuleLoader__.load({
     
     /* iframe \u81EA\u8EAB\u900F\u660E\uFF1A\u6D4F\u89C8\u5668\u9ED8\u8BA4\u7ED9 iframe \u4E00\u5C42\u4E0D\u900F\u660E\u767D\u5E95\uFF0C\u4F1A\u76D6\u4F4F\u5BBF\u4E3B\u80CC\u666F\uFF1B
        allowtransparency / background \u5C5E\u6027\u4E0E inline style \u7531 frame.ts \u5728\u6302\u8F7D\u65F6\u8865\u9F50
-       \uFF08\u5185\u8054\u6837\u5F0F\u4F18\u5148\u7EA7\u9AD8\u4E8E\u672C\u8868\uFF0C\u6545\u8FD9\u91CC\u53EA\u9700\u515C\u4F4F\u9ED8\u8BA4\u503C\uFF09\u3002 */
+       \uFF08\u5185\u8054\u6837\u5F0F\u4F18\u5148\u7EA7\u9AD8\u4E8E\u672C\u8868\uFF0C\u6545\u8FD9\u91CC\u53EA\u9700\u515C\u4F4F\u9ED8\u8BA4\u503C\uFF09\u3002
+       \u2605 color-scheme \u5FC5\u987B\u663E\u5F0F normal\uFF1Aiframe \u5143\u7D20\u4E0A\u4EFB\u4F55\u975E normal \u503C\uFF08\u542B light dark /
+       dark\uFF0C\u542B\u4ECE .tlmemory-panel \u7EE7\u627F\u6765\u7684\u503C\uFF09\u90FD\u4F1A\u8BA9 Chromium \u628A iframe \u753B\u5E03\u6D82\u6210
+       \u4E0D\u900F\u660E\u767D\uFF08\u77E9\u9635\u5B9E\u9A8C\u5B9E\u8BC1\uFF1Anone/normal = \u900F\u4F20\uFF0Clight dark/dark = (255,255,255)\uFF09\uFF0C
+       \u5BBF\u4E3B\u7684\u4E3B\u9898\u80CC\u666F\u4ECE\u6B64\u518D\u4E5F\u900F\u4E0D\u4E0A\u6765\u3002\u6EDA\u52A8\u6761 / \u8868\u5355\u63A7\u4EF6\u7684\u914D\u8272\u7531 iframe \u6587\u6863\u5185\u90E8\u7684
+       .tlm-app / .tlm-drawer \u5728\u5143\u7D20\u7EA7\u58F0\u660E\uFF08\u5B9E\u9A8C\u8BC1\u660E\u4E0D\u5F71\u54CD\u753B\u5E03\uFF09\u3002 */
     .tlmemory-frame {
       display: block;
       width: 100%;
@@ -700,7 +729,7 @@ window.__ModuleLoader__.load({
       min-height: 0;
       border: none;
       background: transparent !important;
-      color-scheme: light dark;
+      color-scheme: normal;
     }
     
     .tlmemory-overlay {
@@ -828,6 +857,7 @@ window.__ModuleLoader__.load({
           if (target === null || target === void 0) return;
           try {
             target.postMessage(themeMessage(themeRef.current), DASHBOARD_ORIGIN);
+            target.postMessage(legacyThemeMessage(themeRef.current), DASHBOARD_ORIGIN);
           } catch {
           }
         }, []);
@@ -835,8 +865,7 @@ window.__ModuleLoader__.load({
           const frame = frameRef.current;
           if (frame === null || frame === void 0) return;
           applyFrameTransparency(frame);
-          applyFrameColorScheme(frame, theme);
-        }, [reloadNonce, theme]);
+        }, [reloadNonce]);
         import_react.default.useEffect(() => {
           if (frameLoaded) pushTheme();
         }, [frameLoaded, theme, pushTheme]);
