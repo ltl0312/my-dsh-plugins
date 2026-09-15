@@ -182,6 +182,8 @@ describe('dsh-plugin-tlmemory 装配与无感静默沉淀', () => {
     emit({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     disposer()
     disposer()
+    // P2-4：db.close 推迟到在途提炼链收尾之后，注销日志随之异步落账
+    await new Promise((resolve) => setTimeout(resolve, 20))
     expect(ctx.logger.info.mock.calls.some((c) => c.some((a) => typeof a === 'string' && a.includes('已彻底安全注销')))).toBe(true)
   })
 

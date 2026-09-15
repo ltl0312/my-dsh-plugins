@@ -122,7 +122,9 @@ export function dashboardUrl(origin: string = DASHBOARD_ORIGIN): string {
 }
 
 /**
- * 探测看板服务是否在线：GET /api/nodes 且返回 2xx 视为在线。
+ * 探测看板服务是否在线：GET /api/health（两字节级响应）且返回 2xx 视为在线。
+ * P2-1：此前用 GET /api/nodes 当探针，记忆树到几千节点后每 15s 一次全表
+ * dump + JSON 序列化，纯为判断在线与否 —— 现切到服务端专用轻量探针端点。
  * 任何网络/CORS/超时异常一律视为离线，绝不向上抛错（浏览器侧静默降级）。
  */
 export async function probeDashboardHealth(
@@ -134,7 +136,7 @@ export async function probeDashboardHealth(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const res = await fetcher(`${origin.replace(/\/+$/, '')}/api/nodes`, { signal: controller.signal })
+    const res = await fetcher(`${origin.replace(/\/+$/, '')}/api/health`, { signal: controller.signal })
     return res.status >= 200 && res.status < 300
   } catch {
     return false

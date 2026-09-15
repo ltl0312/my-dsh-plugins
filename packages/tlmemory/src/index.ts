@@ -26,6 +26,7 @@ import type {
   SearchResult,
   TurnEndEventData,
   TurnStartEventData,
+  TurnTrackItem,
   UserMessageEventData,
 } from './types.js'
 
@@ -115,6 +116,28 @@ function eventDataOf<T>(
   return event.type === type ? (event.data as T) : null
 }
 
+/** P2-4 单次提炼任务的超时上限：宿主 LLM 流异常挂起时强制中止，后台任务不再永久悬挂 */
+const EXTRACTION_TIMEOUT_MS = 60_000
+
+/**
+ * M2 决策表述探测：与干活信号（tool_use 块）并列的零成本门控信号。
+ * 命中「决定 / 约定 / 以后一律 / 规则 / 偏好」等沉淀价值表述的回合，
+ * 即便没有工具调用也值得付费提炼。
+ */
+const DECISION_PHRASE_PATTERN =
+  /(决定|约定|敲定|以后(都|一律|统一|默认|不再)|一律|统一使用|必须|切记|不要再|规则|偏好|习惯|踩坑|避坑)/
+
+/**
+ * M2 写路径门控第一层（LLM 调用之前，零成本）：
+ * 只有「本轮 agent 真的干了活（出现过工具调用块）」或「人类输入/助手结论中
+ * 带有决策表述」的回合才派发 LLM 提炼 —— 成本从每回合一次降为
+ * 有价值回合一次，闲聊与纯问答回合零开销。
+ */
+function shouldConsolidate(item: TurnTrackItem): boolean {
+  if (item.hasToolActivity) return true
+  return DECISION_PHRASE_PATTERN.test(`${item.userText}\n${item.assistantText}`)
+}
+
 /**
  * 从会话对象防御式提取 workspace 目录线索。
  * 宿主 session 对象结构未在官方契约中冻结，这里按常见命名做鸭子类型探测，
@@ -165,6 +188,31 @@ export function apply(ctx: Context, config: Config): () => void {
       db.registerProject(identity.scope, identity.name, identity.root)
     }
     return identity.scope
+  }
+
+  // P2-4 沉淀链路限流：多轮快速结算时多个提炼任务并行无上限（token 费用 +
+  // SQLite 写竞争），这里把并行度收敛为 1（链式串行），并为每次调用挂
+  // 60s AbortController 超时 —— 宿主 LLM 流异常挂起时后台任务不再永久悬挂。
+  let extractionChain: Promise<void> = Promise.resolve()
+  let activeExtractionAbort: AbortController | null = null
+  let disposed = false
+
+  const dispatchExtraction = (item: TurnTrackItem, scope: string): void => {
+    const controller = new AbortController()
+    const run = extractionChain.then(() => {
+      if (disposed) return
+      activeExtractionAbort = controller
+      const timer = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS)
+      return extractor
+        .extractAndConsolidate(item, scope, { signal: controller.signal })
+        .then(() => server.notifyTreeChanged(scope))
+        .catch((err) => ctx.logger?.error?.('[tlmemory] 后台静默沉淀任务异常:', err))
+        .finally(() => {
+          clearTimeout(timer)
+          if (activeExtractionAbort === controller) activeExtractionAbort = null
+        })
+    })
+    extractionChain = run
   }
 
   let activeRecalledMemories: SearchResult[] = []
@@ -233,15 +281,13 @@ export function apply(ctx: Context, config: Config): () => void {
         // 清空注入缓存，避免上一轮记忆残留进下一轮提示词
         activePromptSectionText = ''
 
-        if (item && (config.enableAutoReflection ?? true)) {
-          // 主响应流已完成结算，setImmediate 进入后台执行：
+        if (item && (config.enableAutoReflection ?? true) && shouldConsolidate(item)) {
+          // 主响应流已完成结算，进入后台执行：M2 干活信号门控通过后
+          // 才付费调用 LLM（见 shouldConsolidate），链式串行 + 超时中止（P2-4），
           // 提炼失败仅记日志，绝不阻塞、绝不打扰会话对话流
-          setImmediate(() => {
-            extractor
-              .extractAndConsolidate(item, sessionScope)
-              .then(() => server.notifyTreeChanged(sessionScope))
-              .catch((err) => ctx.logger?.error?.('[tlmemory] 后台静默沉淀任务异常:', err))
-          })
+          dispatchExtraction(item, sessionScope)
+        } else if (item) {
+          ctx.logger?.info?.('[tlmemory] 本轮无干活信号与决策表述，跳过 LLM 提炼（零成本门控）')
         }
       }
     } catch (err) {
@@ -252,12 +298,20 @@ export function apply(ctx: Context, config: Config): () => void {
 
   return () => {
     ctx.logger?.info?.('[tlmemory] 正在执行全量副作用注销...')
+    // P2-4：先中止在途提炼任务（60s 超时控制器 + 显式 abort），db.close 推迟到
+    // 提炼链收尾之后 —— 避免 close 后仍触发写入报错。
+    disposed = true
+    activeExtractionAbort?.abort()
     unregisterSection()
     unregisterTools()
     unregisterSessionEvent()
     turnTracker.reset()
     server.stop()
-    db.close()
-    ctx.logger?.info?.('[tlmemory] 插件已彻底安全注销')
+    void extractionChain
+      .catch(() => {})
+      .then(() => {
+        db.close()
+        ctx.logger?.info?.('[tlmemory] 插件已彻底安全注销')
+      })
   }
 }

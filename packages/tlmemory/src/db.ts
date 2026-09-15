@@ -19,7 +19,14 @@ const REINFORCE_SCORE_CAP = 10
 /** 短词 LIKE 回退检索的固定基线分（LIKE 无相关性排序语义，取正值小基线） */
 const LIKE_FALLBACK_SCORE = 1
 
-function sanitizeSegment(seg: unknown): string {
+/**
+ * P2-12 统一路径分段净化函数（单一事实来源）：
+ * 仅允许字母、数字、下划线、中文与连字符，拦截路径穿越与通配符注入。
+ * tools.ts（tlmemory_save 工具链路）与 extractor.ts（静默沉淀链路）必须复用本函数，
+ * 严禁再各自内联正则 —— 此前 tools.ts 的副本缺连字符 `-`，含连字符的规则名
+ * 经工具链路会被剥成连写词，且三份正则必然漂移。
+ */
+export function sanitizeSegment(seg: unknown): string {
   return String(seg ?? '').replace(SEGMENT_WHITELIST, '').trim()
 }
 
@@ -87,6 +94,8 @@ export class MemoryDB {
         keywords TEXT,
         reinforce_count INTEGER NOT NULL DEFAULT 1,
         is_pinned INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'manual',
+        status TEXT NOT NULL DEFAULT 'confirmed',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE (tree_type, path, name)
@@ -126,6 +135,16 @@ export class MemoryDB {
         VALUES (new.id, new.tree_type, new.path, new.name, new.content, new.keywords);
       END;
     `)
+
+    // M1 增量迁移：既有库（schema v1，无 source/status 列）平滑补列，
+    // 全部存量节点回填为 manual 来源 + confirmed 状态（历史数据视为已确认）。
+    const columns = (this.db.pragma('table_info(nodes)') as Array<{ name: string }>).map((c) => c.name)
+    if (!columns.includes('source')) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+    }
+    if (!columns.includes('status')) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed'")
+    }
   }
 
   /**
@@ -149,6 +168,7 @@ export class MemoryDB {
     name: string,
     content: string,
     keywords: string[],
+    options: { source?: string; status?: string } = {},
   ): MemoryNode {
     return this.withTransaction(() => {
       const cleanSegments = (Array.isArray(pathSegments) ? pathSegments : [])
@@ -166,10 +186,23 @@ export class MemoryDB {
       let fullPath = ''
       for (const seg of fallbackSegments) {
         fullPath += `/${seg}`
-        parentId = this.upsertDirectory(treeType, parentId, `${fullPath}/`, seg)
+        // P2-6：目录创建走 ensureDirectory（已存在即复用，不递增强化计数）。
+        // 此前走 upsertDirectory → upsertNode 的 ON CONFLICT 分支，每次沉淀
+        // 都让目录 reinforce_count 无意义地虚增，还会用 NULL 覆盖 content 字段。
+        parentId = this.ensureDirectory(treeType, parentId, `${fullPath}/`, seg, 'auto')
       }
 
-      return this.upsertNode(treeType, parentId, `${fullPath}/`, cleanName, 1, cleanContent, cleanKeywords)
+      return this.upsertNode(
+        treeType,
+        parentId,
+        `${fullPath}/`,
+        cleanName,
+        1,
+        cleanContent,
+        cleanKeywords,
+        options.source ?? 'auto',
+        options.status ?? 'confirmed',
+      )
     })
   }
 
@@ -207,14 +240,14 @@ export class MemoryDB {
       let fullPath = ''
       for (const seg of fallbackSegments) {
         fullPath += `/${seg}`
-        parentId = this.ensureDirectory(cleanType, parentId, `${fullPath}/`, seg)
+        parentId = this.ensureDirectory(cleanType, parentId, `${fullPath}/`, seg, 'manual')
       }
 
       const now = Date.now()
       const result = this.db
         .prepare(`
-          INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, created_at, updated_at)
-          VALUES (?, ?, ?, ?, 1, ?, ?, 1, 0, ?, ?)
+          INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?, 1, 0, 'manual', 'confirmed', ?, ?)
           ON CONFLICT(tree_type, path, name) DO UPDATE SET
             content = excluded.content,
             keywords = excluded.keywords,
@@ -231,7 +264,13 @@ export class MemoryDB {
    * 与 upsertDirectory 的差异：目录已存在时直接复用，避免手工编辑路径
    * 反复触发 ON CONFLICT 强化分支导致目录 reinforce_count 虚增。
    */
-  private ensureDirectory(treeType: string, parentId: number | null, dirPath: string, name: string): number {
+  private ensureDirectory(
+    treeType: string,
+    parentId: number | null,
+    dirPath: string,
+    name: string,
+    source: string = 'manual',
+  ): number {
     const existing = this.db
       .prepare('SELECT id FROM nodes WHERE tree_type = ? AND path = ? AND name = ?')
       .get(treeType, dirPath, name) as { id: number } | undefined
@@ -240,16 +279,11 @@ export class MemoryDB {
     const now = Date.now()
     const result = this.db
       .prepare(`
-        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 0, NULL, NULL, 1, 0, ?, ?)
+        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 0, NULL, NULL, 1, 0, ?, 'confirmed', ?, ?)
       `)
-      .run(treeType, parentId, dirPath, name, now, now)
+      .run(treeType, parentId, dirPath, name, source, now, now)
     return Number(result.lastInsertRowid)
-  }
-
-  private upsertDirectory(treeType: string, parentId: number | null, dirPath: string, name: string): number {
-    const row = this.upsertNode(treeType, parentId, dirPath, name, 0, null, null)
-    return Number(row.id)
   }
 
   private upsertNode(
@@ -260,20 +294,28 @@ export class MemoryDB {
     isLeaf: number,
     content: string | null,
     keywords: string | null,
+    source: string = 'auto',
+    status: string = 'confirmed',
   ): MemoryNode {
     const now = Date.now()
     const result = this.db
       .prepare(`
-        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
         ON CONFLICT(tree_type, path, name) DO UPDATE SET
+          -- P2-6：同步 is_leaf。叶子与既有目录同名同路径冲突（LLM 生成分段与
+          -- 名称撞车）时，INSERT 走冲突更新后该行必须转为叶子，否则内容写进去了
+          -- 但看板/召回永远把它当目录。
+          is_leaf = excluded.is_leaf,
           content = excluded.content,
           keywords = excluded.keywords,
           reinforce_count = reinforce_count + 1,
           updated_at = excluded.updated_at
+          -- M1：冲突更新不动 source / status —— 既有行的审核结论（含 pending
+          -- 待确认）不被后续重沉淀无声改写。
         RETURNING *
       `)
-      .get(treeType, parentId, nodePath, name, isLeaf, content, keywords, now, now) as Record<string, unknown>
+      .get(treeType, parentId, nodePath, name, isLeaf, content, keywords, source, status, now, now) as Record<string, unknown>
     return this.rowToNode(result)
   }
 
@@ -300,7 +342,9 @@ export class MemoryDB {
     // 将查询包裹为短语查询，规避 FTS5 语法注入并兼容中英文混排 Trigram 匹配
     const matchQuery = `"${cleanQuery.replace(/"/g, '""')}"`
 
-    const where: string[] = ['memory_fts MATCH ?']
+    // M1 待确认区隔离：pending 记忆不参与任何检索召回（切断脏记忆自我强化的
+    // 注入通道）；看板的树读取（getNodes*）不受影响，由看板展示待确认徽标。
+    const where: string[] = ["memory_fts MATCH ?", "n.status <> 'pending'"]
     const params: unknown[] = [matchQuery]
     if (treeType) {
       where.push('n.tree_type = ?')
@@ -343,7 +387,8 @@ export class MemoryDB {
     const { treeType, pathPrefix, limit = 5 } = options
     const like = `%${escapeLikePattern(cleanQuery)}%`
 
-    const where: string[] = ['(n.name LIKE ? OR n.content LIKE ? OR n.keywords LIKE ?)']
+    // M1 待确认区隔离：与 FTS 路径一致，pending 不进 LIKE 兜底召回
+    const where: string[] = ['(n.name LIKE ? OR n.content LIKE ? OR n.keywords LIKE ?)', "n.status <> 'pending'"]
     const params: unknown[] = [like, like, like]
     if (treeType) {
       where.push('n.tree_type = ?')
@@ -522,8 +567,12 @@ export class MemoryDB {
   /**
    * 人工剪枝：删除指定节点并级联移除其全部后代（沿 parent_id 外键链递归收敛），
    * 每行删除均经 trg_nodes_ad 触发器同步清理 FTS5 索引，杜绝孤立句柄残留。
+   * P2-8：非法 id（非整数 / 非正数）直接返回 false —— 此前 Number('abc') 为
+   * NaN，better-sqlite3 绑定 NaN 抛异常被服务端转成 500，错误语义失真。
    */
   public deleteNode(id: string): boolean {
+    const numericId = Number(id)
+    if (!Number.isInteger(numericId) || numericId <= 0) return false
     const result = this.db
       .prepare(`
         WITH RECURSIVE subtree(id) AS (
@@ -533,7 +582,7 @@ export class MemoryDB {
         )
         DELETE FROM nodes WHERE id IN (SELECT id FROM subtree)
       `)
-      .run(Number(id))
+      .run(numericId)
     return result.changes > 0
   }
 
@@ -650,6 +699,21 @@ export class MemoryDB {
   }
 
   /**
+   * M1 待确认区审核：把节点状态在 confirmed / pending 之间切换（看板「确认 /
+   * 拒绝」入口），语义校验不通过的沉淀条目经用户确认后重新进入召回。
+   * 非法状态值与不存在的 id 返回 false（→ 服务端 400 / 404 语义）。
+   */
+  public setStatus(id: string, status: string): boolean {
+    if (status !== 'confirmed' && status !== 'pending') return false
+    const numericId = Number(id)
+    if (!Number.isInteger(numericId) || numericId <= 0) return false
+    const result = this.db
+      .prepare('UPDATE nodes SET status = ? WHERE id = ?')
+      .run(status, numericId)
+    return result.changes > 0
+  }
+
+  /**
    * 召回强化：命中的记忆叶子断言计数 +1（记忆被检索调用即视为被强化）。
    * 供召回引擎在最终命中集合上调用；非法 id 自动过滤，全非法输入零开销返回。
    */
@@ -678,6 +742,8 @@ export class MemoryDB {
       keywords: row.keywords == null ? null : String(row.keywords),
       reinforce_count: Number(row.reinforce_count ?? 0),
       is_pinned: Number(row.is_pinned ?? 0),
+      source: String(row.source ?? 'manual'),
+      status: String(row.status ?? 'confirmed'),
       created_at: Number(row.created_at ?? 0),
       updated_at: Number(row.updated_at ?? 0),
     }

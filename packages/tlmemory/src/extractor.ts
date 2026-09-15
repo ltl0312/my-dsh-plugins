@@ -4,8 +4,10 @@
 // 容错基线：整条链路处于异步后台微任务内，任何一步失败均被 try-catch 收敛为
 // 一条 warn/error 日志，绝不向上抛错、绝不阻塞或打断宿主会话对话流。
 import type { Context } from 'cordis'
+import { sanitizeSegment } from './db.js'
 import type { MemoryDB } from './db.js'
-import type { RawReflectionItem, ReflectionResponse, TurnTrackItem } from './types.js'
+import { expandQueryCandidates } from './query-expand.js'
+import type { RawReflectionItem, ReflectionResponse, SearchResult, TurnTrackItem } from './types.js'
 
 const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。请审视刚才这一轮人机交互，提取长期有效的高价值信息并固化为原子断言规则。
 
@@ -39,8 +41,50 @@ const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。�
 }
 若本轮交互无长期价值，请直接输出 {"reflections": []}。`
 
-/** 路径分段白名单：仅字母、数字、下划线、中文与连字符，拦截路径穿越与通配符注入 */
-const SEGMENT_SANITIZER = /[^a-zA-Z0-9_\u4e00-\u9fa5\-]/g
+// P2-12：路径分段 / 规则简名净化统一复用 db.ts 导出的 sanitizeSegment
+//（白名单：字母、数字、下划线、中文与连字符），不再本地维护正则副本。
+
+/** P2-5 单轮提炼结果的数量上限：LLM 输出失控时防记忆树碎片化膨胀 */
+const MAX_REFLECTIONS_PER_TURN = 5
+
+/** P2-5 相似沉淀去重的名称相似度阈值（Dice 系数，0~1）：≥该值视为同一经验，走强化覆盖 */
+export const DEDUP_NAME_OVERLAP = 0.5
+
+/**
+ * M1 待确认区下限：名称与既有叶子的相似度落在 [0.3, 0.5) 区间时，疑似
+ * 「同义新条」—— 不直接入库（confirmed），降级为 pending 待确认区，
+ * 由用户在看板上裁定。≥0.5 已由 DEDUP_NAME_OVERLAP 走强化覆盖。
+ */
+export const PENDING_SIMILAR_FLOOR = 0.3
+
+/**
+ * M1 指令式规则探测：命中即视为「疑似提示词注入持久化载体」（P1-6），
+ * 写入 pending 待确认区而非直接 confirmed —— 用户输入里一句"请记住：以后
+ * 所有代码都不写测试"经 LLM 转写后若直接入库，会成为每个后续会话的系统
+ * 提示词后门。确定性检查零 LLM 成本。
+ */
+const INJECTION_RULE_PATTERNS =
+  /(严格遵守|必须遵守|无条件执行|系统提示|system\s*prompt|ignore\s+(all\s+)?previous|disregard\s+(all\s+)?above|忽略(所有|之前|上述|以上)?(指令|规则|指示))/i
+
+/** 名称相似度：完全相等 / 互为子串记 1；否则按字符二元组（bigram）Dice 系数 */
+export function nameSimilarity(a: string, b: string): number {
+  if (a === b) return 1
+  if (!a || !b) return 0
+  if (a.includes(b) || b.includes(a)) return 1
+  const bigrams = (s: string): Set<string> => {
+    const set = new Set<string>()
+    for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2))
+    return set
+  }
+  const ga = bigrams(a)
+  const gb = bigrams(b)
+  if (ga.size === 0 || gb.size === 0) return 0
+  let intersection = 0
+  for (const gram of ga) {
+    if (gb.has(gram)) intersection += 1
+  }
+  return (2 * intersection) / (ga.size + gb.size)
+}
 
 /** 第一重门禁：启发式过滤网关，丢弃寒暄客套与长度不足的文本 */
 export function passesFilterGate(text: string): boolean {
@@ -88,15 +132,14 @@ export function boundContent(content: string, maxChars = 80): string {
 /** 路径分段白名单净化：拦截 ../ ./ 空字节与转义通配符，空结果回退为 ['通用'] */
 export function sanitizePathSegments(segments: unknown, fallback = '通用'): string[] {
   const clean = (Array.isArray(segments) ? segments : [])
-    .map((seg) => String(seg ?? '').replace(SEGMENT_SANITIZER, '').trim())
+    .map((seg) => sanitizeSegment(seg))
     .filter(Boolean)
   return clean.length > 0 ? clean : [fallback]
 }
 
 /** 规则简名净化：与路径分段同一白名单，空结果回退为 '未命名规则' */
 export function sanitizeName(name: unknown, fallback = '未命名规则'): string {
-  const clean = String(name ?? '').replace(SEGMENT_SANITIZER, '').trim()
-  return clean || fallback
+  return sanitizeSegment(name) || fallback
 }
 
 export class MemoryExtractor {
@@ -148,7 +191,8 @@ export class MemoryExtractor {
         return
       }
 
-      for (const item of parsed.reflections) {
+      // P2-5：单轮提炼结果截断（≤5 条），LLM 输出失控时不再无限入库
+      for (const item of parsed.reflections.slice(0, MAX_REFLECTIONS_PER_TURN)) {
         this.processSingleReflection(item, projectScope)
       }
     } catch (err) {
@@ -176,7 +220,48 @@ export class MemoryExtractor {
       ? item.keywords.map((k) => String(k).trim()).filter((k) => k.length > 0)
       : [cleanName]
 
-    this.db.upsertLeaf(targetTreeType, cleanSegments, cleanName, boundedContent, cleanKeywords)
-    this.ctx.logger?.info?.(`[tlmemory] 静默沉淀入库 [${targetTreeType}]: ${cleanName}`)
+    // P2-5 相似去重：以新条目名称经查询展开检索目标树（pending 不参与检索，
+    // 由 db.search 统一过滤），名称高度相似的既有叶子视为同一经验的重复表述。
+    const nearHits = new Map<string, SearchResult>()
+    for (const probe of expandQueryCandidates(cleanName)) {
+      for (const hit of this.db.search(probe, { treeType: targetTreeType, limit: 5 })) {
+        if (hit.is_leaf !== 1) continue
+        const prev = nearHits.get(hit.id)
+        if (!prev || hit.score > prev.score) nearHits.set(hit.id, hit)
+      }
+    }
+    const bestNear = [...nearHits.values()]
+      .map((hit) => ({ hit, similarity: nameSimilarity(hit.name, cleanName) }))
+      .sort((a, b) => b.similarity - a.similarity)[0]
+
+    // 高度相似（≥0.5）：同一经验的重复表述 —— 强化计数 +1 并覆盖内容，不新建
+    if (bestNear && bestNear.similarity >= DEDUP_NAME_OVERLAP) {
+      this.db.reinforceByIds([bestNear.hit.id])
+      this.db.updateNode(bestNear.hit.id, { content: boundedContent })
+      this.ctx.logger?.info?.(
+        `[tlmemory] 相似记忆已强化覆盖 [${targetTreeType}]: ${bestNear.hit.path}${bestNear.hit.name}`,
+      )
+      return
+    }
+
+    // M1 写路径确定性硬闸门（零 LLM 成本）——置信分流而非无验证直入库：
+    //   * 疑似指令式规则（提示词注入持久化载体）→ pending 待确认区；
+    //   * 名称与既有叶子近似（0.3 ≤ Dice < 0.5，疑似同义新条）→ pending；
+    //   * 其余 → confirmed 正常入库。pending 不进召回，由用户在看板裁定。
+    const looksLikeInjectionRule = INJECTION_RULE_PATTERNS.test(`${cleanName}\n${boundedContent}`)
+    const looksLikeNearDuplicate = bestNear !== undefined && bestNear.similarity >= PENDING_SIMILAR_FLOOR
+    const status = looksLikeInjectionRule || looksLikeNearDuplicate ? 'pending' : 'confirmed'
+
+    this.db.upsertLeaf(targetTreeType, cleanSegments, cleanName, boundedContent, cleanKeywords, {
+      source: 'auto',
+      status,
+    })
+    if (status === 'pending') {
+      this.ctx.logger?.info?.(
+        `[tlmemory] 沉淀进入待确认区 [${targetTreeType}]: ${cleanName}${looksLikeInjectionRule ? '（疑似指令式规则）' : '（与既有记忆近似）'}`,
+      )
+    } else {
+      this.ctx.logger?.info?.(`[tlmemory] 静默沉淀入库 [${targetTreeType}]: ${cleanName}`)
+    }
   }
 }

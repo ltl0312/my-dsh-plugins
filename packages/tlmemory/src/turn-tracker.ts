@@ -32,6 +32,34 @@ export function extractTextFromBlocks(content: unknown): string {
   return parts.join('\n')
 }
 
+/**
+ * M2 干活信号：检测助手消息中是否出现过工具调用块。
+ * 宿主未冻结工具块的 type 命名，这里按常见形态做鸭子类型枚举
+ * （tool_use / tool_call / toolCall / function_call 等），命中即视为本轮
+ * 「干了活」—— 写路径门控据此决定是否值得付费调用 LLM 提炼。
+ */
+const TOOL_BLOCK_TYPES = new Set([
+  'tool_use',
+  'tool-use',
+  'tool_use_request',
+  'tool_call',
+  'tool-call',
+  'toolcall',
+  'tool_invocation',
+  'function_call',
+  'function-call',
+  'toolcall_request',
+])
+
+export function extractHasToolActivity(content: unknown): boolean {
+  if (!Array.isArray(content)) return false
+  return content.some((block) => {
+    if (!block || typeof block !== 'object') return false
+    const type = String((block as { type?: unknown }).type ?? '').toLowerCase()
+    return TOOL_BLOCK_TYPES.has(type)
+  })
+}
+
 /** 追加进有界缓冲：超限从尾部截断（保留头部语义，尾部多为渲染噪声） */
 function appendBounded(buffer: string, chunk: string, max: number): string {
   const next = buffer ? `${buffer}\n${chunk}` : chunk
@@ -43,6 +71,7 @@ export class TurnTracker {
   private currentTurn: number | null = null
   private userTexts = ''
   private assistantTexts = ''
+  private toolActivity = false
   private readonly maxBufferChars: number
 
   constructor(maxBufferChars: number = MAX_TURN_BUFFER_CHARS) {
@@ -54,6 +83,7 @@ export class TurnTracker {
     if (this.currentTurn !== null && this.currentTurn !== turn) {
       this.userTexts = ''
       this.assistantTexts = ''
+      this.toolActivity = false
     }
     this.currentTurn = turn
   }
@@ -69,8 +99,9 @@ export class TurnTracker {
     this.userTexts = appendBounded(this.userTexts, text, this.maxBufferChars)
   }
 
-  /** 助手可见文本进入本轮缓冲（assistant/message 事件驱动） */
+  /** 助手可见文本进入本轮缓冲（assistant/message 事件驱动），并累计干活信号 */
   addAssistantMessage(content: unknown): void {
+    if (extractHasToolActivity(content)) this.toolActivity = true
     const text = extractTextFromBlocks(content).trim()
     if (!text) return
     this.assistantTexts = appendBounded(this.assistantTexts, text, this.maxBufferChars)
@@ -85,16 +116,18 @@ export class TurnTracker {
   endTurn(turn: number, reasonKind: string): TurnTrackItem | null {
     const userText = this.userTexts.trim()
     const assistantText = this.assistantTexts.trim()
+    const hasToolActivity = this.toolActivity
 
     this.currentTurn = null
     this.userTexts = ''
     this.assistantTexts = ''
+    this.toolActivity = false
 
     if (reasonKind !== 'completed') return null
     if (userText.length < MIN_USER_TEXT_CHARS || assistantText.length < MIN_ASSISTANT_TEXT_CHARS) {
       return null
     }
-    return { turn, userText, assistantText }
+    return { turn, userText, assistantText, hasToolActivity }
   }
 
   /** 插件卸载 / 会话翻篇时的兜底清理 */
@@ -102,5 +135,6 @@ export class TurnTracker {
     this.currentTurn = null
     this.userTexts = ''
     this.assistantTexts = ''
+    this.toolActivity = false
   }
 }

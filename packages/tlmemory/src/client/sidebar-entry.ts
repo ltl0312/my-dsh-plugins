@@ -33,6 +33,14 @@ export const ENTRY_PART_ATTRIBUTES = {
   label: 'data-dsh-tlmemory-label',
 } as const
 
+/**
+ * P2-10 灾难性重建的兜底巡查间隔：
+ * 放置成功后 body 级整树观察降级为侧栏父级的窄范围观察（长会话里宿主每次
+ * hover / 流式输出都不再触发回调）；若整个外壳面板被替换导致窄观察目标脱离
+ * 文档（不再产生突变事件），由这条低频定时器发现并重新拉起 body 级观察。
+ */
+const RECHECK_INTERVAL_MS = 2000
+
 /** 挂载侧栏入口行所需的外部面 */
 export interface SidebarEntryOptions {
   /** 幂等键与样式作用域属性名，如 `data-dsh-tlmemory-entry` */
@@ -159,6 +167,19 @@ export function mountSidebarEntry(options: SidebarEntryOptions): () => void {
     if (!root.contains(entry)) placed = placeEntry(root, entry, options)
   })
 
+  // P2-10：观察目标可在「body 级兜底」与「侧栏父级窄范围」之间切换。
+  // 同一观察者实例重新 observe，避免多实例叠加。
+  let observeTarget: Node | undefined
+  const armWaitObserver = (target: Node): void => {
+    if (observeTarget === target) return
+    observeTarget = target
+    waitObserver.disconnect()
+    waitObserver.observe(target, { childList: true, subtree: true })
+  }
+  const armBodyWaitObserver = (): void => {
+    armWaitObserver(doc.body ?? doc.documentElement)
+  }
+
   const tryPlace = (): void => {
     if (root !== undefined && !root.isConnected) {
       // shell 整个重建了侧栏面板：根观察者已随旧树消失，重置后重新查询。
@@ -174,9 +195,18 @@ export function mountSidebarEntry(options: SidebarEntryOptions): () => void {
       placed = false
     }
     root ??= sidebarRoot(doc)
-    if (root === undefined) return
+    if (root === undefined) {
+      // 放置失败阶段：保持 body 级观察等待外壳渲染
+      armBodyWaitObserver()
+      return
+    }
     placed = placeEntry(root, entry, options)
-    if (placed) rootObserver.observe(root, { childList: true, subtree: true })
+    if (placed) {
+      rootObserver.observe(root, { childList: true, subtree: true })
+      // P2-10：放置成功后把兜底观察降级为侧栏父级的窄范围，
+      // 只有入口被顶掉 / 侧栏局部重排时才会触发回调
+      armWaitObserver(root.parentElement ?? doc.body ?? doc.documentElement)
+    }
   }
 
   // body 级观察者作为「整树重建」兜底：只有它能发现新的侧栏面板挂载。
@@ -184,7 +214,15 @@ export function mountSidebarEntry(options: SidebarEntryOptions): () => void {
   const waitObserver = new MutationObserver(() => {
     tryPlace()
   })
-  waitObserver.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true })
+  armBodyWaitObserver()
+
+  // P2-10：窄观察目标整棵脱离文档时不再产生突变事件（灾难性整树重建），
+  // 低频巡查发现入口失联后重新拉起 body 级观察并尝试重放置
+  const recheckTimer = setInterval(() => {
+    if (entry.isConnected) return
+    armBodyWaitObserver()
+    tryPlace()
+  }, RECHECK_INTERVAL_MS)
 
   // 反映面板打开状态（当前入口高亮）。注意：给 dataset.active 赋 undefined 会
   // 写出 data-active="undefined" 造成永久高亮，必须用 removeAttribute。
@@ -198,6 +236,7 @@ export function mountSidebarEntry(options: SidebarEntryOptions): () => void {
   tryPlace()
 
   return () => {
+    clearInterval(recheckTimer)
     waitObserver.disconnect()
     rootObserver.disconnect()
     unsubscribeActive()

@@ -21,6 +21,10 @@ export interface MemoryNodeDto {
   keywords: string | null
   reinforce_count: number
   is_pinned: number
+  /** 来源标记：'auto'（静默沉淀）/'manual'（看板或工具手工写入） */
+  source?: string
+  /** 审核状态：'pending' 待确认（不参与召回）/ 'confirmed' 正常入库 */
+  status?: string
   /** 检索结果附带的重合度评分（/api/search 返回 SearchResult 时存在） */
   score?: number
 }
@@ -54,6 +58,8 @@ export const useMemoryStore = defineStore('memory', () => {
   const searchQuery = ref('')
   const searchResults = ref<MemoryNodeDto[]>([])
   const wsConnected = ref(false)
+  /** 最近一次操作的可读错误提示（P2-7：此前 4xx/5xx 完全静默）；空串表示无错误 */
+  const actionError = ref('')
   /** 详情抽屉当前展示的记忆项；null 表示抽屉关闭 */
   const selectedNode = ref<MemoryNodeDto | null>(null)
 
@@ -219,11 +225,26 @@ export const useMemoryStore = defineStore('memory', () => {
     selectedNode.value = null
   }
 
-  async function deleteNode(id: string) {
-    await fetch(`/api/nodes/${id}`, { method: 'DELETE' })
+  async function deleteNode(id: string): Promise<boolean> {
+    actionError.value = ''
+    try {
+      const res = await fetch(`/api/nodes/${id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        // P2-7：失败不再静默 —— 给出可读提示（actionError 驱动顶栏错误条）
+        const detail = await res.json().catch(() => null)
+        actionError.value = `删除记忆失败（HTTP ${res.status}）${detail?.error ? `：${detail.error}` : ''}`
+        console.error('删除记忆失败:', res.status, detail)
+        return false
+      }
+    } catch (e) {
+      actionError.value = '删除记忆失败：网络异常'
+      console.error('删除记忆失败:', e)
+      return false
+    }
     await fetchNodes()
     await fetchProjects()
     await refreshSearch()
+    return true
   }
 
   /**
@@ -302,14 +323,93 @@ export const useMemoryStore = defineStore('memory', () => {
     }
   }
 
-  async function performSearch(query: string) {
-    if (!query.trim()) {
-      searchResults.value = []
-      return
+  /** 检索防抖间隔（P2-7：快速输入不再每次按键都打一次 /api/search） */
+  const SEARCH_DEBOUNCE_MS = 300
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | undefined
+  /** 在途检索请求的 AbortController：新请求到来即中止旧请求，防止旧响应覆盖新响应 */
+  let searchAbort: AbortController | null = null
+
+  /** 实际发起检索：竞态保护 + 状态码检查（被新请求中止时静默退出） */
+  async function performSearchNow(query: string): Promise<void> {
+    searchAbort?.abort()
+    const controller = new AbortController()
+    searchAbort = controller
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&${scopeQuery.value}`, {
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+      if (!res.ok) {
+        console.error(`检索失败: HTTP ${res.status}`)
+        actionError.value = `检索失败（HTTP ${res.status}）`
+        return
+      }
+      const json = await res.json()
+      if (controller.signal.aborted) return
+      actionError.value = ''
+      searchResults.value = json.data || []
+    } catch (e) {
+      // 请求被新检索取代（AbortError）属正常竞态，静默；真正的网络异常才提示
+      if ((e as Error)?.name === 'AbortError') return
+      console.error('检索失败:', e)
+      actionError.value = '检索失败：网络异常'
     }
-    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&${scopeQuery.value}`)
-    const json = await res.json()
-    searchResults.value = json.data || []
+  }
+
+  /**
+   * P2-7：对外检索入口 —— 300ms 防抖 + AbortController 竞态保护。
+   * 快速输入时旧响应不可能再覆盖新响应；Promise 在防抖后的真实请求结算后 resolve。
+   */
+  /** M1 待确认区审核：确认（confirmed）后重新参与召回；拒绝由调用方转译为删除 */
+  async function setNodeStatus(id: string, status: 'confirmed' | 'pending'): Promise<boolean> {
+    actionError.value = ''
+    try {
+      const res = await fetch(`/api/nodes/${id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null)
+        actionError.value = `更新审核状态失败（HTTP ${res.status}）${detail?.error ? `：${detail.error}` : ''}`
+        console.error('更新审核状态失败:', res.status, detail)
+        return false
+      }
+    } catch (e) {
+      actionError.value = '更新审核状态失败：网络异常'
+      console.error('更新审核状态失败:', e)
+      return false
+    }
+    // 本地同步三处视图状态，避免整树重拉造成闪烁
+    const apply = (list: MemoryNodeDto[]) => {
+      const target = list.find((item) => item.id === id)
+      if (target !== undefined) target.status = status
+      return list
+    }
+    nodes.value = apply(nodes.value)
+    searchResults.value = apply(searchResults.value)
+    if (selectedNode.value?.id === id) selectedNode.value = { ...selectedNode.value, status }
+    return true
+  }
+
+  async function performSearch(query: string): Promise<void> {
+    if (searchDebounceTimer !== undefined) {
+      clearTimeout(searchDebounceTimer)
+      searchDebounceTimer = undefined
+    }
+    if (!query.trim()) {
+      searchAbort?.abort()
+      searchAbort = null
+      actionError.value = ''
+      searchResults.value = []
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => {
+      searchDebounceTimer = setTimeout(() => {
+        searchDebounceTimer = undefined
+        void performSearchNow(query).finally(resolve)
+      }, SEARCH_DEBOUNCE_MS)
+    })
   }
 
   /**
@@ -323,13 +423,28 @@ export const useMemoryStore = defineStore('memory', () => {
   /** MEMORY_HITS 微光的自动熄灭定时器：新广播到来时重置，避免旧定时器提前熄灭新高亮 */
   let hitTimer: ReturnType<typeof setTimeout> | undefined
 
+  /** P2-11 重连退避区间：3s 起步指数翻倍，30s 封顶（服务长期下线时不再无限 3s 空转） */
+  const WS_RECONNECT_MIN_MS = 3000
+  const WS_RECONNECT_MAX_MS = 30000
+
+  let wsInstance: WebSocket | undefined
+  let wsReconnectDelay = WS_RECONNECT_MIN_MS
+  let wsReconnectTimer: ReturnType<typeof setTimeout> | undefined
+
   function setupWebSocket() {
+    // 幂等防重入：已有连接在建 / 打开时不再叠一份（重连定时器与手动调用竞争）
+    if (wsInstance && (wsInstance.readyState === WebSocket.OPEN || wsInstance.readyState === WebSocket.CONNECTING)) {
+      return
+    }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}`
     const ws = new WebSocket(wsUrl)
+    wsInstance = ws
 
     ws.onopen = () => {
       wsConnected.value = true
+      // 连接恢复：退避立即重置
+      wsReconnectDelay = WS_RECONNECT_MIN_MS
     }
 
     ws.onmessage = (event) => {
@@ -341,6 +456,8 @@ export const useMemoryStore = defineStore('memory', () => {
         return
       }
       if (payload === null || typeof payload !== 'object') return
+      // 收到任何合法广播即证明链路健康，重置退避
+      wsReconnectDelay = WS_RECONNECT_MIN_MS
       if (payload.type === 'MEMORY_HITS') {
         const ids = Array.isArray(payload.hitNodeIds) ? payload.hitNodeIds : []
         activeHitIds.value = new Set(ids.map(String))
@@ -357,12 +474,37 @@ export const useMemoryStore = defineStore('memory', () => {
 
     ws.onclose = () => {
       wsConnected.value = false
-      setTimeout(setupWebSocket, 3000)
+      wsInstance = undefined
+      // P2-11：指数退避重连（3s → 6s → 12s → 24s → 30s 封顶），
+      // 收到消息 / 探测恢复时重置（见 onopen / onmessage）
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = undefined
+        setupWebSocket()
+      }, wsReconnectDelay)
+      wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_RECONNECT_MAX_MS)
     }
 
     ws.onerror = () => {
       ws.close()
     }
+  }
+
+  /** P2-11：看板卸载时清理 —— 取消挂起重连定时器并关闭连接（App.vue onBeforeUnmount 调用） */
+  function disposeWebSocket() {
+    if (wsReconnectTimer !== undefined) {
+      clearTimeout(wsReconnectTimer)
+      wsReconnectTimer = undefined
+    }
+    wsReconnectDelay = WS_RECONNECT_MIN_MS
+    const ws = wsInstance
+    wsInstance = undefined
+    if (ws !== undefined) {
+      ws.onclose = null
+      ws.onerror = null
+      ws.onmessage = null
+      ws.close()
+    }
+    wsConnected.value = false
   }
 
   return {
@@ -384,6 +526,7 @@ export const useMemoryStore = defineStore('memory', () => {
     scopedNodes,
     isSearching,
     searchHitIds,
+    actionError,
     fetchProjects,
     fetchNodes,
     bootstrap,
@@ -398,8 +541,10 @@ export const useMemoryStore = defineStore('memory', () => {
     updateNode,
     createNode,
     renameProject,
+    setNodeStatus,
     isActiveHit,
     setupWebSocket,
+    disposeWebSocket,
     openDetail,
     closeDetail,
   }

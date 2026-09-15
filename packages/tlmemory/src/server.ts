@@ -167,6 +167,13 @@ export class MemoryServer {
     const pathname = url.pathname
 
     try {
+      // P2-1 轻量健康探针：客户端每 15s 轮询一次只为判断在线与否，
+      // 绝不应拉全量节点表（几千节点 = 全表 dump + JSON 序列化的纯浪费）
+      if (req.method === 'GET' && pathname === '/api/health') {
+        this.sendJson(res, 200, { ok: true })
+        return
+      }
+
       // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）
       if (req.method === 'GET' && pathname === '/api/projects') {
         this.sendJson(res, 200, {
@@ -179,7 +186,8 @@ export class MemoryServer {
 
       // 手工命名工程（把历史遗留的 repo:<hash> 改成可读名字）
       if (req.method === 'PATCH' && pathname === '/api/projects') {
-        const body = await this.readJsonBody(req)
+        const body = await this.readBodyOr413(req, res)
+        if (body === null) return
         const scope = typeof body.scope === 'string' ? body.scope : ''
         const name = typeof body.name === 'string' ? body.name : ''
         if (!scope || !name.trim()) {
@@ -262,7 +270,8 @@ export class MemoryServer {
       // 工程重命名（projectKey + newName 形态；与 PATCH /api/projects 等价兼容，
       // 看板工程下拉框的「重命名」入口走此端点）
       if (req.method === 'POST' && pathname === '/api/projects/rename') {
-        const body = await this.readJsonBody(req)
+        const body = await this.readBodyOr413(req, res)
+        if (body === null) return
         const key =
           typeof body.projectKey === 'string' && body.projectKey.trim()
             ? body.projectKey.trim()
@@ -290,7 +299,8 @@ export class MemoryServer {
       // scope=global 落全局偏好树；scope=project 时按 project（scope 原文或可读名）收敛，
       // 全新工程标识自动登记，保证下拉框即刻可见。成功返回 201 与完整节点。
       if (req.method === 'POST' && pathname === '/api/nodes') {
-        const body = await this.readJsonBody(req)
+        const body = await this.readBodyOr413(req, res)
+        if (body === null) return
         const scope = typeof body.scope === 'string' ? body.scope.trim() : ''
         const project = typeof body.project === 'string' ? body.project.trim() : ''
         const title = typeof body.title === 'string' ? body.title.trim() : ''
@@ -334,7 +344,8 @@ export class MemoryServer {
       // FTS5 由 trg_nodes_au 触发器自动同步；唯一冲突转译为 409。
       if (req.method === 'PUT' && pathname.startsWith('/api/nodes/')) {
         const id = pathname.slice('/api/nodes/'.length)
-        const body = await this.readJsonBody(req)
+        const body = await this.readBodyOr413(req, res)
+        if (body === null) return
         const patch: { title?: string; content?: string; path?: string } = {}
         if (typeof body.title === 'string') patch.title = body.title
         if (typeof body.content === 'string') patch.content = body.content
@@ -354,6 +365,28 @@ export class MemoryServer {
         } catch (e) {
           this.sendJson(res, 409, { error: (e as Error).message })
         }
+        return
+      }
+
+      // M1 待确认区审核（看板「确认 / 拒绝」入口）：把沉淀条目在
+      // confirmed / pending 之间切换。确认后重新参与召回；拒绝语义由前端转译为删除。
+      if (req.method === 'PATCH' && pathname.startsWith('/api/nodes/') && pathname.endsWith('/status')) {
+        const id = pathname.slice('/api/nodes/'.length, -'/status'.length)
+        const body = await this.readBodyOr413(req, res)
+        if (body === null) return
+        const status = typeof body.status === 'string' ? body.status.trim() : ''
+        if (status !== 'confirmed' && status !== 'pending') {
+          this.sendJson(res, 400, { error: "status 仅接受 'confirmed' / 'pending'" })
+          return
+        }
+        const ok = this.db.setStatus(id, status)
+        if (!ok) {
+          this.sendJson(res, 404, { error: `记忆节点 ${id} 不存在或状态值非法` })
+          return
+        }
+        const node = this.db.getNode(id)
+        if (node) this.notifyTreeChanged(node.tree_type)
+        this.sendJson(res, 200, { success: true, data: node })
         return
       }
 
@@ -377,33 +410,62 @@ export class MemoryServer {
     }
   }
 
-  /** 读取并解析极小 JSON 请求体；超限或畸形一律收敛为空对象（由调用方按缺字段拒绝） */
-  private readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  /**
+   * P2-9：读取 JSON 请求体并按**字节**计数（此前按 UTF-16 code unit 计数，
+   * 中文正文下与真实字节上限差 3 倍）。tooLarge=true 表示超过上限，
+   * 由调用方回 413 并销毁连接 —— 超限请求不得伪装成「缺字段 400」。
+   */
+  private readJsonBody(req: http.IncomingMessage): Promise<{ body: Record<string, unknown>; tooLarge: boolean }> {
     return new Promise((resolve) => {
       let raw = ''
-      let aborted = false
+      let bytes = 0
+      let tooLarge = false
+      let settled = false
+      const settle = (large: boolean, body: Record<string, unknown> = {}): void => {
+        if (settled) return
+        settled = true
+        resolve({ body, tooLarge: large })
+      }
       req.on('data', (chunk: Buffer) => {
-        if (aborted) return
+        if (tooLarge) return
+        bytes += chunk.length
         raw += chunk.toString('utf8')
-        if (raw.length > MAX_BODY_BYTES) {
-          aborted = true
+        if (bytes > MAX_BODY_BYTES) {
+          tooLarge = true
           raw = ''
+          settle(true)
         }
       })
       req.on('end', () => {
-        if (aborted || raw.trim() === '') {
-          resolve({})
+        if (tooLarge || raw.trim() === '') {
+          settle(tooLarge)
           return
         }
         try {
           const parsed = JSON.parse(raw)
-          resolve(parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {})
+          settle(false, parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {})
         } catch {
-          resolve({})
+          settle(false)
         }
       })
-      req.on('error', () => resolve({}))
+      req.on('error', () => settle(false))
     })
+  }
+
+  /**
+   * readJsonBody 的统一入口：超限时直接回 413 并销毁连接（响应写完后才销毁，
+   * 保证客户端能读到状态码），返回 null 表示调用方必须立即终止处理。
+   */
+  private async readBodyOr413(req: http.IncomingMessage, res: http.ServerResponse): Promise<Record<string, unknown> | null> {
+    const { body, tooLarge } = await this.readJsonBody(req)
+    if (!tooLarge) return body
+    res.setHeader('Connection', 'close')
+    res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ error: `请求体超过 ${MAX_BODY_BYTES} 字节上限` }), () => {
+      // 响应落盘后再关闭连接：超限客户端不值得继续占用
+      req.destroy()
+    })
+    return null
   }
 
   private serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): void {

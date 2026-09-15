@@ -9,10 +9,15 @@ const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', 
 })
 const { window } = dom
 const g = globalThis
+// 注意：绝不能把 setTimeout / setInterval / clearTimeout / clearInterval 换成
+// jsdom 的实现 —— jsdom 内部计时器（Window.js timerInitializationSteps）引用的
+// 裸 setTimeout 在桩替换后会指回 window.setTimeout，造成同步无限递归
+// （P2-10 客户端加了低频巡查 setInterval 后首次暴露）。客户端插件用 Node 原生
+// 计时器语义完全等价；结尾统一走 Disposer 清理，不留活定时器阻塞进程退出。
 for (const key of [
   'document', 'MutationObserver', 'CustomEvent', 'HTMLElement', 'Element', 'Node',
   'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame',
-  'AbortController', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout',
+  'AbortController',
 ]) {
   if (window[key] !== undefined) {
     // navigator 之类在 Node 上是只读 getter，统一用 defineProperty 覆盖。

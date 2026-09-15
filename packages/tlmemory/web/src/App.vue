@@ -67,6 +67,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disposeThemeBridge?.()
+  // P2-11：卸载时取消挂起的 WS 重连定时器并关闭连接，不留空转轮询
+  store.disposeWebSocket()
 })
 </script>
 
@@ -174,6 +176,14 @@ onBeforeUnmount(() => {
         aria-label="全文搜索记忆"
         @input="store.performSearch(store.searchQuery)"
       />
+    </div>
+
+    <!-- P2-7 操作错误提示条：删除/检索等 4xx/5xx 不再完全静默 -->
+    <div v-if="store.actionError" class="tlm-errorbar" role="alert">
+      <span>{{ store.actionError }}</span>
+      <button type="button" class="tlm-errorbar-close" aria-label="关闭错误提示" @click="store.actionError = ''">
+        ×
+      </button>
     </div>
 
     <main class="tlm-main">

@@ -115,6 +115,13 @@ function requestDelete(node: MemoryNodeDto) {
               />
             </svg>
             <span class="tlm-leaf-name">{{ item.node.name }}</span>
+            <span
+              v-if="item.node.status === 'pending'"
+              class="tlm-badge-pending"
+              title="待确认：该条自动沉淀尚未通过审核，不参与召回"
+            >
+              待确认
+            </span>
             <span class="tlm-reinforce">×{{ item.node.reinforce_count }}</span>
             <button
               type="button"

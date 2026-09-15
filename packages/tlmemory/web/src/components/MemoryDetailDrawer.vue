@@ -148,6 +148,25 @@ function legacyCopy(text: string): boolean {
   }
 }
 
+/** M1 待确认区审核：提交中标记 + 确认/拒绝动作（拒绝 = 删除该记忆） */
+const reviewing = ref(false)
+
+async function review(status: 'confirmed' | 'pending') {
+  if (props.node === null || reviewing.value) return
+  reviewing.value = true
+  const ok = await store.setNodeStatus(props.node.id, status)
+  reviewing.value = false
+  if (ok && status === 'confirmed') close()
+}
+
+async function rejectPending() {
+  if (props.node === null || reviewing.value) return
+  reviewing.value = true
+  const ok = await store.deleteNode(props.node.id)
+  reviewing.value = false
+  if (ok) close()
+}
+
 /** Esc 关闭：编辑态先取消编辑，阅读态直接收起抽屉（焦点在正文任意位置都能触发） */
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && open.value) {
@@ -241,6 +260,23 @@ watch(
         <!-- 阅读态：Markdown 全文（已收口渲染，见 lib/markdown.ts）；
              编辑态：标题输入 + 自适应 Markdown Textarea -->
         <div ref="body" class="tlm-drawer-body">
+          <!-- M1 待确认区审核横幅：pending 条目不参与召回，用户在此裁定去留 -->
+          <div v-if="!editing && node.status === 'pending'" class="tlm-pending-banner" role="status">
+            <span>该条记忆由自动沉淀产生、尚未通过审核，当前不参与召回。</span>
+            <span class="tlm-pending-actions">
+              <button
+                type="button"
+                class="tlm-btn is-primary"
+                :disabled="reviewing"
+                @click="review('confirmed')"
+              >
+                {{ reviewing ? '处理中…' : '确认收录' }}
+              </button>
+              <button type="button" class="tlm-btn" :disabled="reviewing" @click="rejectPending">
+                拒绝
+              </button>
+            </span>
+          </div>
           <template v-if="editing">
             <div class="tlm-edit-form">
               <label class="tlm-field">

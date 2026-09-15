@@ -76,7 +76,7 @@ describe('probeDashboardHealth 健康探测', () => {
   it('2xx 视为在线', async () => {
     const fetcher = vi.fn().mockResolvedValue({ status: 200 })
     await expect(probeDashboardHealth(DASHBOARD_ORIGIN, 100, fetcher)).resolves.toBe(true)
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:4890/api/nodes', expect.any(Object))
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:4890/api/health', expect.any(Object))
   })
 
   it('网络失败/CORS 拒绝静默降级为离线，绝不抛错', async () => {

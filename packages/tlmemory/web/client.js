@@ -99,7 +99,7 @@ window.__ModuleLoader__.load({
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-          const res = await fetcher(`${origin.replace(/\/+$/, "")}/api/nodes`, { signal: controller.signal });
+          const res = await fetcher(`${origin.replace(/\/+$/, "")}/api/health`, { signal: controller.signal });
           return res.status >= 200 && res.status < 300;
         } catch {
           return false;
@@ -192,6 +192,7 @@ window.__ModuleLoader__.load({
         icon: "data-dsh-tlmemory-icon",
         label: "data-dsh-tlmemory-label"
       };
+      var RECHECK_INTERVAL_MS = 2e3;
       function sidebarRoot(doc) {
         const column = doc.querySelector(SIDEBAR_COLUMN_SELECTOR);
         if (column === null) return void 0;
@@ -263,6 +264,16 @@ window.__ModuleLoader__.load({
           }
           if (!root.contains(entry)) placed = placeEntry(root, entry, options);
         });
+        let observeTarget;
+        const armWaitObserver = (target) => {
+          if (observeTarget === target) return;
+          observeTarget = target;
+          waitObserver.disconnect();
+          waitObserver.observe(target, { childList: true, subtree: true });
+        };
+        const armBodyWaitObserver = () => {
+          armWaitObserver(doc.body ?? doc.documentElement);
+        };
         const tryPlace = () => {
           if (root !== void 0 && !root.isConnected) {
             rootObserver.disconnect();
@@ -276,14 +287,25 @@ window.__ModuleLoader__.load({
             placed = false;
           }
           root ?? (root = sidebarRoot(doc));
-          if (root === void 0) return;
+          if (root === void 0) {
+            armBodyWaitObserver();
+            return;
+          }
           placed = placeEntry(root, entry, options);
-          if (placed) rootObserver.observe(root, { childList: true, subtree: true });
+          if (placed) {
+            rootObserver.observe(root, { childList: true, subtree: true });
+            armWaitObserver(root.parentElement ?? doc.body ?? doc.documentElement);
+          }
         };
         const waitObserver = new MutationObserver(() => {
           tryPlace();
         });
-        waitObserver.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
+        armBodyWaitObserver();
+        const recheckTimer = setInterval(() => {
+          if (entry.isConnected) return;
+          armBodyWaitObserver();
+          tryPlace();
+        }, RECHECK_INTERVAL_MS);
         const syncActive = () => {
           if (options.state.isOpen()) entry.setAttribute("data-active", "");
           else entry.removeAttribute("data-active");
@@ -292,6 +314,7 @@ window.__ModuleLoader__.load({
         syncActive();
         tryPlace();
         return () => {
+          clearInterval(recheckTimer);
           waitObserver.disconnect();
           rootObserver.disconnect();
           unsubscribeActive();
@@ -300,6 +323,7 @@ window.__ModuleLoader__.load({
       }
     
       // src/client/panel-mount.ts
+      var RECHECK_INTERVAL_MS2 = 2e3;
       function conversationColumn(doc) {
         return doc.querySelector(CONVERSATION_COLUMN_SELECTOR) ?? void 0;
       }
@@ -322,7 +346,10 @@ window.__ModuleLoader__.load({
             disposeContainer();
           }
           const column = conversationColumn(doc);
-          if (column === void 0) return;
+          if (column === void 0) {
+            armBodyWaitObserver();
+            return;
+          }
           container = doc.createElement("div");
           container.dataset[options.viewDatasetKey] = "";
           container.setAttribute("data-dsh-plugin", options.plugin);
@@ -332,11 +359,27 @@ window.__ModuleLoader__.load({
           } catch {
             unmount = void 0;
           }
+          armWaitObserver(column.parentElement ?? doc.body ?? doc.documentElement);
         };
         const waitObserver = new MutationObserver(() => {
           ensure();
         });
-        waitObserver.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true });
+        let observeTarget;
+        const armWaitObserver = (target) => {
+          if (observeTarget === target) return;
+          observeTarget = target;
+          waitObserver.disconnect();
+          waitObserver.observe(target, { childList: true, subtree: true });
+        };
+        const armBodyWaitObserver = () => {
+          armWaitObserver(doc.body ?? doc.documentElement);
+        };
+        armBodyWaitObserver();
+        const recheckTimer = setInterval(() => {
+          if (container !== void 0 && container.isConnected) return;
+          armBodyWaitObserver();
+          ensure();
+        }, RECHECK_INTERVAL_MS2);
         const applyActive = () => {
           if (options.state.isOpen()) {
             for (const attribute of SIBLING_ACTIVE_ATTRIBUTES) {
@@ -375,6 +418,7 @@ window.__ModuleLoader__.load({
         return () => {
           doc.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
           doc.removeEventListener("click", onClickSidebarRow, true);
+          clearInterval(recheckTimer);
           waitObserver.disconnect();
           unsubscribeRefresh?.();
           unsubscribeState();

@@ -45,6 +45,14 @@ export interface CenterPanelOptions {
   doc?: Document
 }
 
+/**
+ * P2-10 灾难性重建的兜底巡查间隔：
+ * 容器放置成功后 body 级整树观察降级为中心列父级的窄范围观察（长会话里
+ * 宿主每次 hover / 流式输出都不再触发回调）；若整个外壳面板被替换导致窄
+ * 观察目标脱离文档，由这条低频定时器发现并重新拉起 body 级观察。
+ */
+const RECHECK_INTERVAL_MS = 2000
+
 /** 找到中心列，未渲染时返回 undefined */
 export function conversationColumn(doc: Document): HTMLElement | undefined {
   return doc.querySelector<HTMLElement>(CONVERSATION_COLUMN_SELECTOR) ?? undefined
@@ -78,7 +86,11 @@ export function mountCenterPanel(options: CenterPanelOptions): () => void {
       disposeContainer()
     }
     const column = conversationColumn(doc)
-    if (column === undefined) return
+    if (column === undefined) {
+      // P2-10 放置失败阶段：保持 body 级观察等待外壳渲染
+      armBodyWaitObserver()
+      return
+    }
     container = doc.createElement('div')
     // dataset 键（camelCase）→ 真实属性 data-dsh-tlmemory-view，与样式表选择器对应。
     container.dataset[options.viewDatasetKey] = ''
@@ -90,6 +102,9 @@ export function mountCenterPanel(options: CenterPanelOptions): () => void {
       // 面板树挂载失败：容器留在 DOM 内（空容器在未激活时不显示），不影响外壳。
       unmount = undefined
     }
+    // P2-10：放置成功后把兜底观察降级为中心列父级的窄范围，
+    // 只有容器被顶掉 / 中心列局部重排时才会触发回调
+    armWaitObserver(column.parentElement ?? doc.body ?? doc.documentElement)
   }
 
   // 外壳在启动结算后才挂载中心列，用观察者等待其出现并跟踪整树重建。
@@ -97,7 +112,26 @@ export function mountCenterPanel(options: CenterPanelOptions): () => void {
   const waitObserver = new MutationObserver(() => {
     ensure()
   })
-  waitObserver.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true })
+  // P2-10：观察目标可在「body 级兜底」与「中心列父级窄范围」之间切换。
+  let observeTarget: Node | undefined
+  const armWaitObserver = (target: Node): void => {
+    if (observeTarget === target) return
+    observeTarget = target
+    waitObserver.disconnect()
+    waitObserver.observe(target, { childList: true, subtree: true })
+  }
+  const armBodyWaitObserver = (): void => {
+    armWaitObserver(doc.body ?? doc.documentElement)
+  }
+  armBodyWaitObserver()
+
+  // P2-10：窄观察目标整棵脱离文档时不再产生突变事件（灾难性整树重建），
+  // 低频巡查发现容器失联后重新拉起 body 级观察并尝试重注入
+  const recheckTimer = setInterval(() => {
+    if (container !== undefined && container.isConnected) return
+    armBodyWaitObserver()
+    ensure()
+  }, RECHECK_INTERVAL_MS)
 
   const applyActive = (): void => {
     if (options.state.isOpen()) {
@@ -146,6 +180,7 @@ export function mountCenterPanel(options: CenterPanelOptions): () => void {
   return () => {
     doc.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate)
     doc.removeEventListener('click', onClickSidebarRow, true)
+    clearInterval(recheckTimer)
     waitObserver.disconnect()
     unsubscribeRefresh?.()
     unsubscribeState()

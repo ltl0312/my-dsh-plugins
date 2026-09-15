@@ -1864,3 +1864,61 @@ body {
     transition: none;
   }
 }
+
+/* P2-7 操作错误提示条（删除 / 检索等 4xx、5xx 不再完全静默） */
+.tlm-errorbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 12px 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--tlm-surface-strong);
+  border: 1px solid var(--tlm-danger);
+  color: var(--tlm-danger);
+  font-size: 12px;
+}
+
+.tlm-errorbar-close {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+/* M1 待确认区：列表徽标 + 详情抽屉审核横幅 */
+.tlm-badge-pending {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.5;
+  background: var(--tlm-surface-strong);
+  border: 1px solid var(--tlm-danger);
+  color: var(--tlm-danger);
+}
+
+.tlm-pending-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  background: var(--tlm-surface);
+  border: 1px solid var(--tlm-danger);
+  color: var(--tlm-danger);
+}
+
+.tlm-pending-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

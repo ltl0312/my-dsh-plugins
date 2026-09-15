@@ -1,5 +1,6 @@
 // packages/tlmemory/src/tools.ts
 import type { Context } from "cordis";
+import { sanitizeSegment } from "./db.js";
 import type { MemoryDB } from "./db.js";
 import { expandQueryCandidates } from "./query-expand.js";
 import type { SearchResult } from "./types.js";
@@ -76,13 +77,10 @@ export function registerMemoryTools(
     }) {
       const targetTree =
         args.tree_scope === "global" ? "global" : resolveCurrentScope();
-      const sanitizedSegments = args.path_segments.map((s) =>
-        s.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, ""),
-      );
-      const sanitizedName = args.rule_name.replace(
-        /[^a-zA-Z0-9_\u4e00-\u9fa5]/g,
-        "",
-      );
+      // P2-12：净化统一复用 db.ts 的 sanitizeSegment（此前内联正则缺连字符
+      // `-`，含连字符的规则名经工具链路会被剥成连写词）
+      const sanitizedSegments = args.path_segments.map((s) => sanitizeSegment(s));
+      const sanitizedName = sanitizeSegment(args.rule_name);
       const boundedContent = args.content.slice(0, 80);
 
       const node = db.upsertLeaf(

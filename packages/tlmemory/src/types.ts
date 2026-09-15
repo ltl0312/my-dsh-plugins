@@ -28,6 +28,12 @@ export interface ProjectSummary {
   updatedAt: number
 }
 
+/** 记忆条目的审核状态：confirmed 正常入库可召回；pending 待确认区（不进召回） */
+export type MemoryStatus = 'confirmed' | 'pending'
+
+/** 记忆条目的来源：auto 静默沉淀 / manual 看板或工具手工写入 */
+export type MemorySource = 'auto' | 'manual' | (string & {})
+
 export interface MemoryNode {
   id: string
   tree_type: string           // 'global' 或 'repo:<hash>'
@@ -39,6 +45,10 @@ export interface MemoryNode {
   keywords: string | null     // 关键词，空格分隔
   reinforce_count: number     // 强化权重计数
   is_pinned: number           // 是否强制置顶 (0/1)
+  /** 来源标记：'auto'（静默沉淀）/'manual'（看板/工具手工），审计与撤回的基础 */
+  source: string
+  /** 审核状态：'pending' 为待确认区（不参与召回），'confirmed' 为正常入库 */
+  status: string
   created_at: number
   updated_at: number
 }
@@ -146,6 +156,12 @@ export interface TurnTrackItem {
   userText: string
   /** 本轮全部助手可见文本（assistant/message 的 text 块聚合） */
   assistantText: string
+  /**
+   * M2 干活信号：本轮助手消息中是否出现过工具调用块（tool_use 系）。
+   * 写路径门控用它决定是否值得付费调用 LLM 提炼 —— 没干活且没有决策表述的
+   * 回合直接跳过，LLM 成本从「每回合一次」降为「有价值的回合才一次」。
+   */
+  hasToolActivity: boolean
 }
 
 // 扩展 Cordis 上下文接口，声明宿主服务与事件总线
