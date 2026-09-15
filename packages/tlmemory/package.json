@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlmemory",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "license": "MIT",
   "description": "Cross-session and cross-project memory manager for dsh (silent turn-end sedimentation + native web client embedding)",
   "type": "module",
