@@ -14,6 +14,7 @@ import { useMemoryStore } from './stores/memory'
 import MemoryTree from './components/MemoryTree.vue'
 import MemoryGraphTree from './components/MemoryGraphTree.vue'
 import MemoryDetailDrawer from './components/MemoryDetailDrawer.vue'
+import MemoryCreateModal from './components/MemoryCreateModal.vue'
 import ProjectPicker from './components/ProjectPicker.vue'
 import {
   currentThemeMode,
@@ -27,6 +28,9 @@ const store = useMemoryStore()
 
 /** 主题桥的卸载函数（组件销毁时摘掉 postMessage 监听） */
 let disposeThemeBridge: (() => void) | undefined
+
+/** 「+ 新建记忆」表单弹窗的显隐 */
+const showCreate = ref(false)
 
 /** 是否处于全文检索态：列表模式下用它决定展示检索结果还是完整目录 */
 const searching = computed(() => store.isSearching)
@@ -110,6 +114,14 @@ onBeforeUnmount(() => {
           🌲 树状图谱
         </button>
       </div>
+
+      <!-- 新建记忆：弹出轻量级表单（归属工程 / 路径目录 / 标题 / Markdown 正文） -->
+      <button type="button" class="tlm-create-btn" title="手工新增一条记忆" @click="showCreate = true">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <path d="M8 3.2v9.6M3.2 8h9.6" />
+        </svg>
+        新建记忆
+      </button>
 
       <!-- 主题按钮：跟随宿主（自动）→ 浅色 → 深色 循环；localStorage 持久化。
            深浅切换的显式入口 —— 宿主页面半边异常（旧脚本推错主题）时的手动兜底。 -->
@@ -212,5 +224,8 @@ onBeforeUnmount(() => {
 
     <!-- 详情抽屉：完整渲染所选记忆的 Markdown 全文 -->
     <MemoryDetailDrawer :node="store.selectedNode" @close="store.closeDetail()" />
+
+    <!-- 新建记忆弹窗：提交 POST /api/nodes，成功后自动定位新节点 -->
+    <MemoryCreateModal :open="showCreate" @close="showCreate = false" />
   </div>
 </template>

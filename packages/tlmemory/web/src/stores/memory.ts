@@ -226,6 +226,82 @@ export const useMemoryStore = defineStore('memory', () => {
     await refreshSearch()
   }
 
+  /**
+   * 在线编辑保存：PUT /api/nodes/:id。
+   * 成功后同步三处视图：树列表（fetchNodes）、工程计数（fetchProjects）、
+   * 检索命中（refreshSearch），并把抽屉当前节点替换为服务端回传的更新后节点，
+   * Markdown 渲染区无缝切换回阅读态。
+   */
+  async function updateNode(
+    id: string,
+    patch: { title?: string; content?: string },
+  ): Promise<MemoryNodeDto | null> {
+    try {
+      const res = await fetch(`/api/nodes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      })
+      if (!res.ok) return null
+      const json = await res.json()
+      const updated = (json.data ?? null) as MemoryNodeDto | null
+      if (updated !== null && selectedNode.value?.id === updated.id) {
+        selectedNode.value = updated
+      }
+      await Promise.all([fetchNodes(), fetchProjects()])
+      await refreshSearch()
+      return updated
+    } catch (e) {
+      console.error('保存记忆失败:', e)
+      return null
+    }
+  }
+
+  /** 手工新增记忆：POST /api/nodes，成功后刷新树与工程清单并返回新节点（供自动定位） */
+  async function createNode(payload: {
+    scope: 'project' | 'global'
+    project?: string
+    path: string
+    title: string
+    content: string
+  }): Promise<MemoryNodeDto | null> {
+    try {
+      const res = await fetch('/api/nodes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) return null
+      const json = await res.json()
+      const created = (json.data ?? null) as MemoryNodeDto | null
+      await Promise.all([fetchNodes(), fetchProjects()])
+      await refreshSearch()
+      return created
+    } catch (e) {
+      console.error('新增记忆失败:', e)
+      return null
+    }
+  }
+
+  /** 工程重命名：PATCH /api/projects，成功后刷新工程清单（下拉框与树根名随之更新） */
+  async function renameProject(scope: string, name: string): Promise<boolean> {
+    try {
+      const res = await fetch('/api/projects', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, name }),
+      })
+      if (!res.ok) return false
+      const json = await res.json()
+      const ok = Boolean(json.success)
+      if (ok) await fetchProjects()
+      return ok
+    } catch (e) {
+      console.error('工程重命名失败:', e)
+      return false
+    }
+  }
+
   async function performSearch(query: string) {
     if (!query.trim()) {
       searchResults.value = []
@@ -319,6 +395,9 @@ export const useMemoryStore = defineStore('memory', () => {
     refreshSearch,
     performSearch,
     deleteNode,
+    updateNode,
+    createNode,
+    renameProject,
     isActiveHit,
     setupWebSocket,
     openDetail,

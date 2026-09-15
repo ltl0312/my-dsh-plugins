@@ -31,6 +31,7 @@
     "build:client": "node scripts/build-client.mjs",
     "dev": "tsup --watch",
     "test": "vitest run",
+    "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
     "smoke:client": "node scripts/smoke-client.mjs"
   },
   "peerDependencies": {

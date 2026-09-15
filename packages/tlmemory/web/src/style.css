@@ -158,7 +158,8 @@ body {
    .tlm-drawer 需要单独声明 —— 它经 Teleport 挂在 body 下，不在 .tlm-app 子树内，
    拿不到继承值。 */
 .tlm-app,
-.tlm-drawer {
+.tlm-drawer,
+.tlm-modal-card {
   color-scheme: var(--tlm-scheme);
 }
 
@@ -1552,5 +1553,314 @@ body {
 
   .tlm-group-head {
     min-height: 36px;
+  }
+}
+
+/* ============================================================
+   编辑 / 新建 / 重命名交互层
+   顶栏「新建记忆」按钮、工程重命名图标按钮、抽屉编辑态表单、
+   新建记忆弹窗与重命名弹层。配色全部走 --tlm-* 令牌。
+   ============================================================ */
+
+/* 顶栏「+ 新建记忆」主操作按钮 */
+.tlm-create-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 4px 11px;
+  border: 1px solid var(--tlm-hit-border);
+  border-radius: 999px;
+  background: var(--tlm-hit);
+  color: var(--tlm-accent);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background var(--tlm-motion), border-color var(--tlm-motion);
+}
+
+.tlm-create-btn:hover {
+  background: var(--tlm-surface-strong);
+  border-color: var(--tlm-accent);
+}
+
+.tlm-create-btn svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+/* 工程选择器右侧的「重命名」图标按钮：与主题按钮同观感的圆形小按钮 */
+.tlm-rename-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: 999px;
+  background: var(--tlm-surface);
+  color: var(--tlm-fg-muted);
+  cursor: pointer;
+  transition: color var(--tlm-motion), background var(--tlm-motion);
+}
+
+.tlm-rename-btn:hover {
+  color: var(--tlm-accent);
+  background: var(--tlm-surface-hover);
+}
+
+.tlm-rename-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* 抽屉顶部「编辑」按钮：铅笔图标 + 文字的轻量胶囊 */
+.tlm-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--tlm-border);
+  border-radius: 8px;
+  background: var(--tlm-surface);
+  color: var(--tlm-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background var(--tlm-motion);
+}
+
+.tlm-edit-btn:hover {
+  background: var(--tlm-surface-hover);
+}
+
+.tlm-edit-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* 主操作按钮变体（保存 / 创建 / 确认） */
+.tlm-btn.is-primary {
+  border-color: transparent;
+  background: var(--tlm-accent);
+  color: var(--tlm-accent-fg);
+}
+
+.tlm-btn.is-primary:hover {
+  filter: brightness(1.08);
+}
+
+.tlm-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* 抽屉编辑态表单 */
+.tlm-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tlm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tlm-field-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tlm-field-label {
+  color: var(--tlm-fg-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.tlm-input,
+.tlm-textarea {
+  appearance: none;
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--tlm-border);
+  border-radius: var(--tlm-radius-sm);
+  background: var(--tlm-surface);
+  color: var(--tlm-fg-strong);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 19px;
+  transition: border-color var(--tlm-motion);
+}
+
+.tlm-input:focus,
+.tlm-textarea:focus {
+  outline: none;
+  border-color: var(--tlm-focus);
+}
+
+.tlm-textarea {
+  min-height: 120px;
+  resize: vertical;
+  overflow-y: auto;
+  font-family: var(--tlm-mono);
+  font-size: 11.5px;
+}
+
+.tlm-checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding-bottom: 6px;
+  color: var(--tlm-fg-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tlm-checkbox-row input {
+  accent-color: var(--tlm-accent);
+}
+
+.tlm-form-error {
+  margin: 0;
+  color: var(--tlm-danger);
+  font-size: 11.5px;
+  line-height: 17px;
+}
+
+/* 弹窗（新建记忆）与弹层（工程重命名） */
+.tlm-modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: var(--tlm-scrim);
+}
+
+.tlm-modal-card {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 81;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 92vw);
+  max-height: 88vh;
+  border: 1px solid var(--tlm-border);
+  border-radius: var(--tlm-radius);
+  background: var(--tlm-drawer-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--tlm-shadow);
+}
+
+.tlm-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--tlm-border-soft);
+}
+
+.tlm-modal-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--tlm-fg-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tlm-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  padding: 14px;
+  overflow-y: auto;
+}
+
+.tlm-modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: none;
+  padding: 10px 14px;
+  border-top: 1px solid var(--tlm-border-soft);
+  background: var(--tlm-surface);
+}
+
+/* 工程重命名弹层：锚定在选择器下方的小卡片 */
+.tlm-rename-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 240px;
+  padding: 12px;
+  border: 1px solid var(--tlm-border);
+  border-radius: var(--tlm-radius);
+  background: var(--tlm-drawer-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--tlm-shadow);
+}
+
+.tlm-rename-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 弹窗过渡：淡入淡出 + 轻微缩放 */
+.tlm-fade-enter-active,
+.tlm-fade-leave-active {
+  transition: opacity var(--tlm-motion);
+}
+
+.tlm-fade-enter-from,
+.tlm-fade-leave-to {
+  opacity: 0;
+}
+
+.tlm-pop-enter-active,
+.tlm-pop-leave-active {
+  transition: opacity var(--tlm-motion), transform var(--tlm-motion);
+}
+
+.tlm-pop-enter-from,
+.tlm-pop-leave-to {
+  opacity: 0;
+}
+
+.tlm-modal-card.tlm-pop-enter-from,
+.tlm-modal-card.tlm-pop-leave-to {
+  transform: translate(-50%, -50%) scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tlm-fade-enter-active,
+  .tlm-fade-leave-active,
+  .tlm-pop-enter-active,
+  .tlm-pop-leave-active {
+    transition: none;
   }
 }

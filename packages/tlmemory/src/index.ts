@@ -33,6 +33,7 @@ import type {
 export { MemoryDB } from './db.js'
 export { MemoryExtractor } from './extractor.js'
 export { registerMemoryTools } from './tools.js'
+export { MemoryRecallEngine } from './recall.js'
 // 阶段三/六交付物：嵌入式 REST 与 WebSocket 实时中继服务 + 轮次跟踪器
 export { MemoryServer } from './server.js'
 export { TurnTracker } from './turn-tracker.js'
@@ -82,15 +83,19 @@ export interface ProjectIdentity {
 /**
  * 解析当前进程所在的工程身份。
  *
+ * 工作区根目录来源优先级：显式入参（DSH 会话传入的 workspaceDir）>
+ * 环境变量 DSH_WORKSPACE_DIR > 从 process.cwd() 向上回溯 .git 根目录。
+ *
  * scope 仍是「repo 根目录绝对路径」的 sha256 前 12 位，与历史版本逐字节一致 ——
  * 这样既有记忆库的 tree_type 不会因为本次改造发生漂移；额外带出根目录 basename
  * 作为可读工程名，交给 db.registerProject 落库，看板下拉框才能显示
- * my-dsh-plugins / TLToolBox 这类人类可读的名字。
+ * my-dsh-plugins / TLToolBox 这类人类可读的名字，杜绝裸哈希 repo:<hash> 充当展示名。
  */
-export function resolveProjectIdentity(): ProjectIdentity {
+export function resolveProjectIdentity(workspaceDir?: string): ProjectIdentity {
   const fallbackRoot = path.normalize(process.cwd())
   let root = fallbackRoot
-  let currentDir = process.cwd()
+  const explicit = workspaceDir ?? process.env.DSH_WORKSPACE_DIR
+  let currentDir = explicit ? path.normalize(explicit) : fallbackRoot
   while (currentDir !== path.parse(currentDir).root) {
     if (fs.existsSync(path.join(currentDir, '.git'))) {
       root = path.normalize(currentDir)

@@ -21,6 +21,31 @@ function escapeLikePattern(input: string): string {
   return input.replace(/[\\%_]/g, (m) => `\\${m}`)
 }
 
+/**
+ * 手工录入名称净化（编辑 / 新建入口专用）：剥离路径分隔符、控制字符与反斜杠，
+ * 折叠空白；与沉淀链路的严格白名单不同，这里保留空格等常规可读字符，
+ * 避免「客户端深浅主题切换规程」这类标题被静默改写成不可读形态。
+ */
+function sanitizeManualName(input: unknown): string {
+  return String(input ?? '')
+    .replace(/[\u0000-\u001f\u007f/\\]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120)
+}
+
+/**
+ * 解析手工输入的目录路径串（如 '/DSH客户端插件/样式优化/'）为净化后的分段数组；
+ * 同时兼容字符串数组形态（逐段以 '/' 拼接后再解析）。
+ */
+function parsePathSegments(input: unknown): string[] {
+  const raw = Array.isArray(input) ? input.map(String).join('/') : String(input ?? '')
+  return raw
+    .split('/')
+    .map((seg) => sanitizeManualName(seg))
+    .filter(Boolean)
+}
+
 export class MemoryDB {
   private db: Database.Database
 
@@ -120,6 +145,78 @@ export class MemoryDB {
     }
 
     return this.upsertNode(treeType, parentId, `${fullPath}/`, cleanName, 1, cleanContent, cleanKeywords)
+  }
+
+  /**
+   * 手工新增记忆叶子（看板「新建记忆」表单提交入口）。
+   * 与 upsertLeaf（静默沉淀链路）的三点差异：
+   * 1. content 保留完整 Markdown 原文，不做 80 字原子化截断；
+   * 2. 名称 / 路径分段走 sanitizeManualName（保留空格等可读字符）而非严格白名单；
+   * 3. 同 (tree_type, path, name) 冲突时覆盖内容但不递增强化计数（手工纠错语义）。
+   * 空标题 / 空正文 / 空作用域直接抛错，由服务端转译为 400。
+   */
+  public createLeaf(
+    treeType: string,
+    pathSegments: string[] | string,
+    name: string,
+    content: string,
+    keywords: string[] = [],
+  ): MemoryNode {
+    const cleanType = String(treeType ?? '').trim()
+    if (!cleanType) throw new Error('记忆作用域（scope/project）不能为空')
+    const cleanName = sanitizeManualName(name)
+    if (!cleanName) throw new Error('记忆标题不能为空')
+    const cleanContent = String(content ?? '').trim()
+    if (!cleanContent) throw new Error('记忆正文不能为空')
+    const cleanKeywords = (Array.isArray(keywords) ? keywords : [])
+      .map((k) => sanitizeManualName(k))
+      .filter(Boolean)
+      .join(' ')
+
+    const segments = parsePathSegments(pathSegments)
+    const fallbackSegments = segments.length > 0 ? segments : ['未分类']
+
+    let parentId: number | null = null
+    let fullPath = ''
+    for (const seg of fallbackSegments) {
+      fullPath += `/${seg}`
+      parentId = this.ensureDirectory(cleanType, parentId, `${fullPath}/`, seg)
+    }
+
+    const now = Date.now()
+    const result = this.db
+      .prepare(`
+        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 1, ?, ?, 1, 0, ?, ?)
+        ON CONFLICT(tree_type, path, name) DO UPDATE SET
+          content = excluded.content,
+          keywords = excluded.keywords,
+          updated_at = excluded.updated_at
+        RETURNING *
+      `)
+      .get(cleanType, parentId, `${fullPath}/`, cleanName, cleanContent, cleanKeywords, now, now) as Record<string, unknown>
+    return this.rowToNode(result)
+  }
+
+  /**
+   * 查找或创建分类目录节点（不递增强化计数）。
+   * 与 upsertDirectory 的差异：目录已存在时直接复用，避免手工编辑路径
+   * 反复触发 ON CONFLICT 强化分支导致目录 reinforce_count 虚增。
+   */
+  private ensureDirectory(treeType: string, parentId: number | null, dirPath: string, name: string): number {
+    const existing = this.db
+      .prepare('SELECT id FROM nodes WHERE tree_type = ? AND path = ? AND name = ?')
+      .get(treeType, dirPath, name) as { id: number } | undefined
+    if (existing) return Number(existing.id)
+
+    const now = Date.now()
+    const result = this.db
+      .prepare(`
+        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 0, NULL, NULL, 1, 0, ?, ?)
+      `)
+      .run(treeType, parentId, dirPath, name, now, now)
+    return Number(result.lastInsertRowid)
   }
 
   private upsertDirectory(treeType: string, parentId: number | null, dirPath: string, name: string): number {
@@ -355,6 +452,127 @@ export class MemoryDB {
       `)
       .run(Number(id))
     return result.changes > 0
+  }
+
+  /** 读取单个节点（编辑保存回显与服务端 404 判定共用） */
+  public getNode(id: string): MemoryNode | null {
+    const numericId = Number(id)
+    if (!Number.isInteger(numericId) || numericId <= 0) return null
+    const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(numericId) as
+      | Record<string, unknown>
+      | undefined
+    return row ? this.rowToNode(row) : null
+  }
+
+  /**
+   * 在线编辑记忆节点（看板详情抽屉「保存」入口）。
+   * 支持 title（标题）、content（正文）与 path（目录迁移）的任意组合；
+   * 更新语句命中 trg_nodes_au 触发器，FTS5 分词索引自动同步重建。
+   * 目录迁移时同步修正全部后代节点的物化路径前缀，并剪枝遗留的空目录链。
+   * 返回更新后的完整节点；目标 id 不存在返回 null；同目录同名冲突抛 Error。
+   */
+  public updateNode(
+    id: string,
+    patch: { title?: string; content?: string; path?: string },
+  ): MemoryNode | null {
+    const numericId = Number(id)
+    if (!Number.isInteger(numericId) || numericId <= 0) return null
+    const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(numericId) as
+      | Record<string, unknown>
+      | undefined
+    if (!row) return null
+    const current = this.rowToNode(row)
+
+    const newName = patch.title !== undefined ? sanitizeManualName(patch.title) : current.name
+    if (!newName) throw new Error('记忆标题不能为空')
+    const newContent = patch.content !== undefined ? String(patch.content ?? '').trim() : current.content
+    if (current.is_leaf === 1 && String(newContent ?? '').trim() === '') {
+      throw new Error('记忆正文不能为空')
+    }
+
+    let targetPath = current.path
+    let targetParentId: string | null = current.parent_id
+    const originalPath = current.path
+    const originalParentId = current.parent_id
+
+    if (patch.path !== undefined) {
+      const segments = parsePathSegments(patch.path)
+      const fallbackSegments = segments.length > 0 ? segments : ['未分类']
+      let parentId: number | null = null
+      let fullPath = ''
+      for (const seg of fallbackSegments) {
+        fullPath += `/${seg}`
+        parentId = this.ensureDirectory(current.tree_type, parentId, `${fullPath}/`, seg)
+      }
+      targetPath = `${fullPath}/`
+      targetParentId = parentId == null ? null : String(parentId)
+    }
+
+    // UNIQUE(tree_type, path, name) 冲突前置显式检查，给出可读错误而非 SQLite 原生报错
+    const conflict = this.db
+      .prepare('SELECT id FROM nodes WHERE tree_type = ? AND path = ? AND name = ? AND id <> ?')
+      .get(current.tree_type, targetPath, newName, numericId) as { id: number } | undefined
+    if (conflict) throw new Error('同目录下已存在同名记忆，请换一个标题')
+
+    this.db
+      .prepare('UPDATE nodes SET parent_id = ?, path = ?, name = ?, content = ?, updated_at = ? WHERE id = ?')
+      .run(
+        targetParentId == null ? null : Number(targetParentId),
+        targetPath,
+        newName,
+        newContent,
+        Date.now(),
+        numericId,
+      )
+
+    // 目录迁移：沿旧物化路径前缀重写全部后代节点（FTS 由触发器自动重索引）
+    if (targetPath !== originalPath) {
+      this.db
+        .prepare(
+          `UPDATE nodes SET path = ? || substr(path, ?)
+           WHERE tree_type = ? AND path LIKE ? ESCAPE '\\' AND id <> ?`,
+        )
+        .run(
+          targetPath,
+          originalPath.length + 1,
+          current.tree_type,
+          `${escapeLikePattern(originalPath)}%`,
+          numericId,
+        )
+      // 旧目录链空壳剪枝（自原父节点向上逐层收敛，仅删除零子代的目录）
+      this.pruneEmptyDirectoryChain(originalParentId)
+    }
+
+    const updated = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(numericId) as Record<string, unknown>
+    return this.rowToNode(updated)
+  }
+
+  /** 自底向上剪枝零子代目录链：迁移 / 重命名遗留的空目录逐层收敛删除 */
+  private pruneEmptyDirectoryChain(parentId: string | null): void {
+    let cursor: string | null = parentId
+    while (cursor !== null) {
+      const row = this.db.prepare('SELECT id, parent_id, is_leaf FROM nodes WHERE id = ?').get(Number(cursor)) as
+        | { id: number; parent_id: number | null; is_leaf: number }
+        | undefined
+      if (!row || Number(row.is_leaf) === 1) break
+      const hasChild = this.db.prepare('SELECT 1 AS ok FROM nodes WHERE parent_id = ? LIMIT 1').get(row.id)
+      if (hasChild) break
+      this.db.prepare('DELETE FROM nodes WHERE id = ?').run(row.id)
+      cursor = row.parent_id == null ? null : String(row.parent_id)
+    }
+  }
+
+  /**
+   * 召回强化：命中的记忆叶子断言计数 +1（记忆被检索调用即视为被强化）。
+   * 供召回引擎在最终命中集合上调用；非法 id 自动过滤，全非法输入零开销返回。
+   */
+  public reinforceByIds(ids: Array<string | number>): void {
+    const numericIds = [...new Set(ids.map((id) => Number(id)).filter((n) => Number.isInteger(n) && n > 0))]
+    if (numericIds.length === 0) return
+    const placeholders = numericIds.map(() => '?').join(', ')
+    this.db
+      .prepare(`UPDATE nodes SET reinforce_count = reinforce_count + 1, updated_at = ? WHERE id IN (${placeholders})`)
+      .run(Date.now(), ...numericIds)
   }
 
   public close(): void {

@@ -18,8 +18,8 @@ export interface CurrentProject {
   root: string
 }
 
-/** 请求体读取封顶：只用于极小的 JSON 控制报文（重命名等），超限直接截断拒绝 */
-const MAX_BODY_BYTES = 8 * 1024
+/** 请求体读取封顶：新建 / 编辑记忆的 Markdown 正文可达数十 KB，其余控制报文极小 */
+const MAX_BODY_BYTES = 256 * 1024
 
 /** 回环绑定常量：严禁替换为 0.0.0.0 或省略（省略将默认绑定所有网卡） */
 const LOOPBACK_HOST = '127.0.0.1'
@@ -141,7 +141,7 @@ export class MemoryServer {
 
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 
     if (req.method === 'OPTIONS') {
@@ -243,6 +243,104 @@ export class MemoryServer {
 
         const hits = this.db.search(query, { treeType })
         this.sendJson(res, 200, { data: hits })
+        return
+      }
+
+      // 工程重命名（projectKey + newName 形态；与 PATCH /api/projects 等价兼容，
+      // 看板工程下拉框的「重命名」入口走此端点）
+      if (req.method === 'POST' && pathname === '/api/projects/rename') {
+        const body = await this.readJsonBody(req)
+        const key =
+          typeof body.projectKey === 'string' && body.projectKey.trim()
+            ? body.projectKey.trim()
+            : typeof body.scope === 'string'
+              ? body.scope.trim()
+              : ''
+        const newName =
+          typeof body.newName === 'string' && body.newName.trim()
+            ? body.newName.trim()
+            : typeof body.name === 'string'
+              ? body.name.trim()
+              : ''
+        if (!key || !newName) {
+          this.sendJson(res, 400, { error: 'projectKey 与 newName 均为必填' })
+          return
+        }
+        const resolved = this.db.findProjectScope(key) ?? key
+        const success = this.db.renameProject(resolved, newName)
+        if (success) this.notifyTreeChanged(resolved)
+        this.sendJson(res, 200, { success, data: this.db.listProjects() })
+        return
+      }
+
+      // 手工新增记忆节点（看板「+ 新建记忆」表单提交）：
+      // scope=global 落全局偏好树；scope=project 时按 project（scope 原文或可读名）收敛，
+      // 全新工程标识自动登记，保证下拉框即刻可见。成功返回 201 与完整节点。
+      if (req.method === 'POST' && pathname === '/api/nodes') {
+        const body = await this.readJsonBody(req)
+        const scope = typeof body.scope === 'string' ? body.scope.trim() : ''
+        const project = typeof body.project === 'string' ? body.project.trim() : ''
+        const title = typeof body.title === 'string' ? body.title.trim() : ''
+        const content = typeof body.content === 'string' ? body.content : ''
+        const pathInput = typeof body.path === 'string' ? body.path : '/'
+        const keywords = Array.isArray(body.keywords) ? body.keywords.map(String) : []
+
+        if (!title || !content.trim()) {
+          this.sendJson(res, 400, { error: 'title 与 content 均为必填' })
+          return
+        }
+
+        let treeType: string
+        if (scope === 'global') {
+          treeType = 'global'
+        } else {
+          if (!project) {
+            this.sendJson(res, 400, { error: 'scope 为 project 时归属工程（project）不能为空' })
+            return
+          }
+          const resolved = this.db.findProjectScope(project)
+          if (resolved !== null) {
+            treeType = resolved
+          } else {
+            treeType = project
+            this.db.registerProject(treeType, project, null)
+          }
+        }
+
+        try {
+          const created = this.db.createLeaf(treeType, pathInput, title, content, keywords)
+          this.notifyTreeChanged(created.tree_type)
+          this.sendJson(res, 201, { data: created })
+        } catch (e) {
+          this.sendJson(res, 400, { error: (e as Error).message })
+        }
+        return
+      }
+
+      // 在线编辑记忆节点（看板详情抽屉「保存」提交）：title / content / path 任意组合，
+      // FTS5 由 trg_nodes_au 触发器自动同步；唯一冲突转译为 409。
+      if (req.method === 'PUT' && pathname.startsWith('/api/nodes/')) {
+        const id = pathname.slice('/api/nodes/'.length)
+        const body = await this.readJsonBody(req)
+        const patch: { title?: string; content?: string; path?: string } = {}
+        if (typeof body.title === 'string') patch.title = body.title
+        if (typeof body.content === 'string') patch.content = body.content
+        if (typeof body.path === 'string') patch.path = body.path
+        if (Object.keys(patch).length === 0) {
+          this.sendJson(res, 400, { error: 'title / content / path 至少提供一项' })
+          return
+        }
+        try {
+          const updated = this.db.updateNode(id, patch)
+          if (updated === null) {
+            this.sendJson(res, 404, { error: `记忆节点 ${id} 不存在` })
+            return
+          }
+          this.notifyTreeChanged(updated.tree_type)
+          this.sendJson(res, 200, { data: updated })
+        } catch (e) {
+          this.sendJson(res, 409, { error: (e as Error).message })
+        }
         return
       }
 

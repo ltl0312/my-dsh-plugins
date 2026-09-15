@@ -48,9 +48,15 @@ export class MemoryRecallEngine {
       }
     }
 
-    return Array.from(merged.values())
+    const results = Array.from(merged.values())
       .sort((a, b) => b.score - a.score)
       .slice(0, maxCount)
+
+    // 召回即强化：命中并被注入上下文的记忆叶子断言计数 +1（reinforce_count），
+    // 高频被调用的记忆在长期使用中自然获得更高权重沉淀。
+    this.db.reinforceByIds(results.filter((r) => r.is_leaf === 1).map((r) => r.id))
+
+    return results
   }
 
   /** 查询候选展开：整句 -> 标点/空白切分 -> 中英文边界分段 -> 中文长段 Trigram 级滑窗子串 */
