@@ -19,7 +19,21 @@
 
 ## 📦 安装方式
 
-### 方式一：在 DSH Profile 中作为依赖安装（推荐）
+### 方式一：一条命令安装并自动挂载（推荐）
+
+```powershell
+dsh plugin --profile web add dsh-plugin-tlmemory
+
+# 本地源码目录
+dsh plugin --profile web add "file:D:/Code/my-dsh-plugins/packages/tlmemory"
+```
+
+`dsh plugin add` 会自动完成下面三件以前需要手工做的事：装依赖 → 放行原生模块
+（`pnpm-workspace.yaml` 的 `allowBuilds`）→ 往 `cordis.patch.yml` 追加挂载条目（幂等）。
+另外 `dsh plugin --profile web list` 可查看挂载状态，`dsh plugin --profile web remove <包名>`
+可一键摘除补丁并卸载。
+
+### 方式二：手工安装（等价于方式一的三步）
 
 进入你的 DSH profile 目录（例如 `~/.dsh/profiles/web`）：
 
@@ -33,16 +47,17 @@ pnpm add dsh-plugin-tlmemory
 pnpm add "file:D:/Code/my-dsh-plugins/packages/tlmemory"
 ```
 
-### 方式二：放行原生模块（针对 SQLite 原生驱动）
-
-若使用原生驱动，在 `~/.dsh/profiles/web/pnpm-workspace.yaml` 中放行 `better-sqlite3`：
+若安装过程中 pnpm 提示 `Ignored build scripts`（例如 `better-sqlite3`），
+在 `~/.dsh/profiles/web/pnpm-workspace.yaml` 中放行该原生模块后重新安装：
 
 ```yaml
-packages:
-  - '.'
-onlyBuiltDependencies:
-  - better-sqlite3
+allowBuilds:
+  better-sqlite3: true
 ```
+
+> 注意键名：pnpm 11 用的是 `allowBuilds`（映射），不是 pnpm 10 的
+> `onlyBuiltDependencies`（数组）。pnpm 拦下构建时会自己往这里写一行
+> `better-sqlite3: set this to true or false` 占位，改成 `true` 即可。
 
 ---
 

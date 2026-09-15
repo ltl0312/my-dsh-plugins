@@ -5,7 +5,9 @@
   "scripts": {
     "build": "pnpm -r --filter \"./packages/**\" run build",
     "dev": "pnpm -r --filter \"./packages/**\" run dev",
-    "test": "pnpm -r run test"
+    "test": "pnpm -r run test",
+    "test:cli": "node --test \"tools/dsh-plugin-cmd/**/*.test.mjs\"",
+    "install:cli": "node tools/dsh-plugin-cmd/install.mjs"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

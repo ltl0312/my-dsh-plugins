@@ -143,3 +143,7 @@ vite.config.ts.timestamp-*
 .vite/
 
 .workbuddy/
+
+# dsh plugin 增强层的本地备份与还原点（不随仓库分发）
+.backup-dsh-cli-*/
+.backup-dsh-cli-latest.txt
