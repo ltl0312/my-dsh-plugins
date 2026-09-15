@@ -7,7 +7,8 @@
     "dev": "pnpm -r --filter \"./packages/**\" run dev",
     "test": "pnpm -r run test",
     "test:cli": "node --test \"tools/dsh-plugin-cmd/**/*.test.mjs\"",
-    "install:cli": "node tools/dsh-plugin-cmd/install.mjs"
+    "install:cli": "node tools/dsh-plugin-cmd/install.mjs",
+    "smoke:client": "pnpm -r --filter \"./packages/**\" run smoke:client"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

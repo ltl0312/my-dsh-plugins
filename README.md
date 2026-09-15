@@ -82,11 +82,14 @@ allowBuilds:
 
 ### 1. 启动 DSH Web 宿主
 
-在任意终端路径下直接启动（Node >= 22，推荐 Node 24）：
+在任意终端路径下直接启动：
 
 ```powershell
 dsh web
 ```
+
+> Node 版本：运行需 Node >= 22；由于 `better-sqlite3` 是原生模块，**建议统一用 Node 24**
+> （原生二进制的 ABI 必须与运行它的 Node 匹配，混用会报 `NODE_MODULE_VERSION` 不匹配）。
 
 ### 2. 访问记忆看板
 
@@ -100,15 +103,23 @@ dsh web
 ## 🛠️ 项目常用命令（开发与测试）
 
 ```powershell
-# 运行单元测试
+# 运行单元测试（全工作区）
 pnpm run test
 
-# 构建 Node 核心与前端客户端产物
+# 构建全部产物：dist/（Node 核心）+ web/client.js（客户端插件）+ web/dist/（看板前端）
 pnpm run build
 
-# 客户端 Bundle 真实冒烟走查
+# 客户端 Bundle 真实冒烟走查（jsdom 加载真实产物，需先 build）
 pnpm run smoke:client
+
+# dsh CLI 增强层的单测 / 安装（可选，见 tools/dsh-plugin-cmd）
+pnpm run test:cli
+pnpm run install:cli
 ```
+
+> 根目录 `pnpm run build` 是递归构建（workspace 同时包含 `packages/tlmemory` 与
+> `packages/tlmemory/web`），因此 `dist/`、`web/client.js`、`web/dist/` 会被一并刷新 ——
+> 发包前跑这一条即可。单独构建看板前端用 `pnpm --dir packages/tlmemory/web run build`。
 
 ---
 

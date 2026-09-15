@@ -1,7 +1,9 @@
 # 阶段六：会话无感静默沉淀 + DSH 原生侧边栏 / 主视口嵌入
 
 本文档记录 `dsh-plugin-tlmemory` 阶段六升级的设计决策、DSH 官方契约依据、
-实现要点与验证指引。对应版本 v0.2.0。
+实现要点与验证指引。阶段六自 v0.2.0 起引入，后续版本持续演进
+（§7 记录 v0.2.2 / v0.2.3 的增量）；**涉及具体版本号、用例数、产物字节数的表述以
+源码与根目录 `README.md` 为准**。
 
 ## 1. 目标
 
@@ -133,8 +135,10 @@
    返回记忆树 JSON；
 5. 与 GUI 正常对话数轮（completed 轮次）→ 看板树自动出现静默沉淀叶子；
    GUI 宿主日志出现 `[tlmemory] 静默沉淀入库 [...]`；
-6. 质量门禁：`cd packages/tlmemory && pnpm test`（71 用例全绿）、
-   `pnpm build`（dist + web/client.js）、`cd web && pnpm build`（web/dist）。
+6. 质量门禁：`cd packages/tlmemory && pnpm test`（当前 104 用例全绿）、
+   `pnpm build`（dist + web/client.js）、`cd web && pnpm build`（web/dist）、
+   `pnpm run smoke:client`（jsdom 加载真实产物走查装配）；根目录另有
+   `pnpm run test:cli` / `pnpm run install:cli` 对应 dsh CLI 增强层（见 §7）。
 
 ## 6. 客户端注册架构改造：改为全局一级主视图（2026-09-15）
 
@@ -195,6 +199,51 @@
 | `tests/client-logic.spec.ts` | 重写为纯逻辑用例（地址 / 探测 / 状态机 / 单占协议） |
 | `tests/client-dom.spec.ts` | 新增 jsdom 用例（入口注入排序与自愈、接管属性与广播、卸载还原） |
 
-产物：`web/client.js` 32171 bytes（含 `require("react")` / `require("react-dom/client")`），
+产物：`web/client.js` 42394 bytes（含 `require("react")` / `require("react-dom/client")`），
 已同步至 `~/.dsh/profiles/web/node_modules/dsh-plugin-tlmemory/`。
+
+## 7. v0.2.2 / v0.2.3 增量（在阶段六形态之上）
+
+§6 完成「中心列整幅接管」后，又按用户反馈做了两轮改造，细节见根 `README.md` 的
+核心特性与 `tools/dsh-plugin-cmd/`、`src/client/theme.ts` 等源码：
+
+### 7.1 与宿主主题实时自适应（透明透传）
+
+- 新增 `src/client/theme.ts`：宿主配色读数与订阅（优先级
+  `body/html[data-ds-dark-theme]` → `[data-ds-light-theme]` → `data-theme`/`data-dsw-theme`
+  文本值 → `matchMedia` 回落）；订阅用 MutationObserver 精确盯 `documentElement` 与
+  `body` 的属性（**不用 subtree**，否则 hover 类名抖动都会触发读数）。
+- 新增 `src/client/frame.ts`：`allowtransparency` / `background` 遗留属性 + 内联样式，
+  经 ref 落到真实 iframe 元素，规避 React 各版本对遗留属性白名单的差异。
+- 主题经 `postMessage` 双向握手同步（iframe 加载完成 + 子文档发 `ready` 各推一次），
+  解决「iframe src 先加载、面板后挂载」导致首帧丢推的问题。
+- 面板容器不再自带 `--dsw-alias-bg-base` 不透明底，改为 `transparent`：宿主主题背景
+  穿透到看板之下。**看板侧 `:root` 上绝不能写 `color-scheme`** —— 根元素背景透明时
+  画布会被所用色彩方案的基础色填满，透明透传直接失效（`backgroundColor` 仍是
+  `rgba(0,0,0,0)`，只看计算样式查不出来）；该声明改放在 `.tlm-app` / `.tlm-drawer` 上。
+
+### 7.2 看板前端（Vue）交互改造
+
+- 折叠箭头由 `▼`/`▶` 文本字符改为统一的 14×14 SVG chevron + CSS 旋转过渡
+  （展开 90° 朝下 / 收起 0° 朝右），消除字形差异导致的尺寸与基准线跳动。
+- 记忆列表项只渲染简介（`line-clamp: 2`）与元数据（置顶 / `×N`），点击从右侧滑出
+  Markdown 详情抽屉：新增 `web/src/components/MemoryDetailDrawer.vue`、
+  `web/src/lib/markdown.ts`（`marked` 收口：转义原始 HTML、链接协议白名单、
+  不产出 `<img>`），配色统一走 `web/src/style.css` 的 `--tlm-*` 令牌层。
+- 面板顶部标题栏右侧留 48px 宿主安全区（`.tlmemory-header { padding-right: 48px }`），
+  状态胶囊与标题同基准线左对齐 —— 避免盖住宿主右上角的抽屉折叠按钮。
+
+### 7.3 dsh CLI 增强层（可选，不影响插件本体）
+
+`tools/dsh-plugin-cmd/` 给官方 `dsh plugin` 补上「装完自动放行原生构建 + 自动写
+`cordis.patch.yml` 挂载」，即：
+
+```powershell
+dsh plugin --profile web add dsh-plugin-tlmemory
+dsh plugin --profile web list
+dsh plugin --profile web remove dsh-plugin-tlmemory
+```
+
+安装/刷新用 `pnpm run install:cli`（**每次升级 `@deepseek-ai/dsh` 都会覆盖 bin.js，
+需重跑一次**），回滚 `install.mjs --uninstall`。单测 `pnpm run test:cli`。
 
