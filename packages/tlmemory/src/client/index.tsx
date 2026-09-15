@@ -243,7 +243,7 @@ function MemoryDashboardPanel(props: { state: PanelState }): ReactElement {
             React.createElement(
               'span',
               { className: 'tlmemory-overlay-hint' },
-              `未能连接 ${DASHBOARD_ORIGIN}。请确认 DSH 宿主已启动（配置项 serverEnabled: true）。`,
+              `未能连接 ${DASHBOARD_ORIGIN}。请确认 DSH 宿主已启动（看板服务随宿主自动开启，端口被占用时已自动顺延）。`,
             ),
             React.createElement('button', { type: 'button', className: 'tlmemory-retry', onClick: retry }, '重试'),
           ),

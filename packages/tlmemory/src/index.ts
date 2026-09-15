@@ -60,9 +60,6 @@ export interface Config {
   serverPort?: number
   maxRecallCount?: number
   enableAutoReflection?: boolean
-  /** 是否启用内嵌 127.0.0.1 HTTP/WS 服务。多宿主并存时（GUI 宿主与常驻内存服务
-   * 宿主共用同一 SQLite 文件）可置 false，避免 4890 端口重复绑定。 */
-  serverEnabled?: boolean
   /** M3 compaction 间隔：每累计 N 次静默沉淀触发一轮强化衰减 + 矛盾检测（默认 20） */
   compactionInterval?: number
 }
@@ -72,7 +69,6 @@ export const Config: Schema<Config> = Schema.object({
   serverPort: Schema.number().default(4890).description('侧边栏与 REST API 服务端口'),
   maxRecallCount: Schema.number().default(5).description('单轮最大系统提示词注入记忆条数'),
   enableAutoReflection: Schema.boolean().default(true).description('是否开启会话结束异步自动反思提炼'),
-  serverEnabled: Schema.boolean().default(true).description('是否启动内嵌 127.0.0.1 HTTP/WS 管理服务'),
   compactionInterval: Schema.number()
     .default(20)
     .description('M3 compaction 间隔：每累计 N 次静默沉淀触发一轮强化衰减与矛盾检测'),
@@ -163,7 +159,6 @@ function extractSessionWorkspaceDir(session: unknown): string | undefined {
 export function apply(ctx: Context, config: Config): () => void {
   ctx.logger?.info?.(`[tlmemory] 插件装配启动中...`)
 
-  const serverEnabled = config.serverEnabled ?? true
   const db = new MemoryDB(config.dbPath)
   const recallEngine = new MemoryRecallEngine(db)
   const turnTracker = new TurnTracker()
@@ -248,14 +243,12 @@ export function apply(ctx: Context, config: Config): () => void {
 
   const unregisterTools = registerMemoryTools(ctx, db, () => projectScope)
 
-  // 阶段三：内嵌回环网络服务。禁用时（serverEnabled:false）不监听端口，
-  // 看板由共享 SQLite 的另一宿主实例提供，本实例仅承担事件沉淀与召回职责。
+  // 阶段三：内嵌回环网络服务（零配置自启，随插件挂载自动拉起）。
+  // 端口被前序 tlmemory 实例占用时健康探测确认同名进程后自动复用；
+  // 被无关进程占用时自动顺延端口；彻底失败时打印 EADDRINUSE 解决指引。
+  // 旧拓扑（serverEnabled:false 的多宿主手工分工）由上述自愈机制自动取代。
   const server = new MemoryServer(db, config.serverPort ?? 4890, ctx.logger, project)
-  if (serverEnabled) {
-    server.start()
-  } else {
-    ctx.logger?.info?.('[tlmemory] serverEnabled=false，内嵌服务不监听端口（看板由常驻宿主提供）')
-  }
+  void server.start()
 
   // 会话事件流监听（官方契约：'session/event'(session, event)）。
   // 根上下文监听器观察全部会话；易失监听抛错会被宿主隔离，但本插件仍采用

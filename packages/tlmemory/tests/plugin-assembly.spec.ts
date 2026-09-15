@@ -2,7 +2,7 @@
 // 插件装配中心测试：以最小化假 ctx 驱动 apply()，验证
 // 1. session/event 监听按官方双参契约正确折叠轮次素材；
 // 2. completed 轮次在 setImmediate 后台触发无感静默沉淀并落库；
-// 3. 非 completed 轮次不触发提炼；serverEnabled=false 不监听端口；
+// 3. 非 completed 轮次不触发提炼；服务零配置自启（serverPort=0 绑定临时端口）；
 // 4. 注销 Disposer 全量收敛、可重复执行。
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { apply, type Config } from '../src/index.js'
@@ -61,7 +61,9 @@ describe('dsh-plugin-tlmemory 装配与无感静默沉淀', () => {
   })
 
   function buildConfig(extra: Partial<Config> = {}): Config {
-    return { dbPath: ':memory:', serverEnabled: false, ...extra }
+    // serverPort=0：让 OS 分配临时端口，避免测试与真实 4890 服务互相干扰；
+    // 新版装配已移除 serverEnabled 开关，内嵌服务随 apply 零配置自启。
+    return { dbPath: ':memory:', serverPort: 0, ...extra }
   }
 
   it('completed 轮次经 setImmediate 后台触发静默沉淀并入库', async () => {
@@ -141,12 +143,14 @@ describe('dsh-plugin-tlmemory 装配与无感静默沉淀', () => {
     disposer()
   })
 
-  it('serverEnabled=false 时记录提示日志且不启动内嵌服务', async () => {
+  it('零配置自启：apply 默认拉起内嵌服务并绑定临时端口', async () => {
     const { ctx } = createFakeCtx()
     const disposer = apply(ctx, buildConfig())
+    // listen 是异步动作，稍候轮询服务就绪日志
+    await new Promise((resolve) => setTimeout(resolve, 200))
     expect(
       ctx.logger.info.mock.calls.some((call) =>
-        call.some((arg) => typeof arg === 'string' && arg.includes('serverEnabled=false')),
+        call.some((arg) => typeof arg === 'string' && arg.includes('本地管理服务就绪')),
       ),
     ).toBe(true)
     disposer()

@@ -981,7 +981,7 @@ window.__ModuleLoader__.load({
             import_react.default.createElement(
               "span",
               { className: "tlmemory-overlay-hint" },
-              `\u672A\u80FD\u8FDE\u63A5 ${DASHBOARD_ORIGIN}\u3002\u8BF7\u786E\u8BA4 DSH \u5BBF\u4E3B\u5DF2\u542F\u52A8\uFF08\u914D\u7F6E\u9879 serverEnabled: true\uFF09\u3002`
+              `\u672A\u80FD\u8FDE\u63A5 ${DASHBOARD_ORIGIN}\u3002\u8BF7\u786E\u8BA4 DSH \u5BBF\u4E3B\u5DF2\u542F\u52A8\uFF08\u770B\u677F\u670D\u52A1\u968F\u5BBF\u4E3B\u81EA\u52A8\u5F00\u542F\uFF0C\u7AEF\u53E3\u88AB\u5360\u7528\u65F6\u5DF2\u81EA\u52A8\u987A\u5EF6\uFF09\u3002`
             ),
             import_react.default.createElement("button", { type: "button", className: "tlmemory-retry", onClick: retry }, "\u91CD\u8BD5")
           )

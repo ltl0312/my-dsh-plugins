@@ -300,7 +300,7 @@ describe('M2：干活信号与门控', () => {
   }
 
   function buildConfig(): Config {
-    return { dbPath: ':memory:', serverEnabled: false }
+    return { dbPath: ':memory:', serverPort: 0 }
   }
 
   it('无干活信号且无决策表述的回合：零 LLM 调用', async () => {

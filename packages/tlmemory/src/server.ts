@@ -66,6 +66,17 @@ function resolveWebDist(): string {
   return path.resolve(currentDir, '../web/dist')
 }
 
+/**
+ * 服务启动结果：
+ * - bound     成功绑定端口；
+ * - delegated 端口已被前序 tlmemory 实例监听，健康探测确认同名进程后本实例复用之；
+ * - failed    连续端口重试后仍无法绑定（已打印 EADDRINUSE 排查指引）。
+ */
+export type ServerStartOutcome = 'bound' | 'delegated' | 'failed'
+
+/** 端口冲突自愈：从配置端口起最多向后顺延尝试的端口数（4890 → 4899） */
+const MAX_PORT_ATTEMPTS = 10
+
 export class MemoryServer {
   private server: http.Server | null = null
   private wss: WebSocketServer | null = null
@@ -75,7 +86,11 @@ export class MemoryServer {
   constructor(
     private db: MemoryDB,
     private port: number = 4890,
-    private logger?: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
+    private logger?: {
+      info: (...args: unknown[]) => void
+      warn: (...args: unknown[]) => void
+      error: (...args: unknown[]) => void
+    },
     private currentProject?: CurrentProject,
   ) {
     this.distPath = resolveWebDist()
@@ -86,38 +101,137 @@ export class MemoryServer {
     return typeof addr === 'object' && addr !== null ? addr.port : 0
   }
 
-  public start(): void {
-    if (this.server) return
+  /**
+   * 零配置自启（异步）：按配置端口尝试绑定；若 EADDRINUSE 则先做健康探测 ——
+   * 确认是前序 tlmemory 实例（同名进程）时直接复用、不再重复绑定（多宿主并存
+   * 场景自动收敛，无需任何手工开关）；确认是无关进程时自动顺延 +1 端口重试；
+   * 连续重试仍失败则打印明确的 EADDRINUSE 解决指引。
+   */
+  public async start(): Promise<ServerStartOutcome> {
+    if (this.server) return 'bound'
 
-    this.server = http.createServer((req, res) => {
-      void this.handleHttp(req, res)
-    })
+    let port = this.port
+    for (let attempt = 0; attempt < MAX_PORT_ATTEMPTS; attempt++) {
+      const result = await this.listenOnce(port)
 
-    this.wss = new WebSocketServer({ noServer: true })
+      if (result === 'bound') return 'bound'
 
-    this.wss.on('connection', (ws: WebSocket) => {
-      this.clients.add(ws)
-      ws.on('close', () => this.clients.delete(ws))
-    })
-
-    // upgrade 握手：Host 与 Origin 双头白名单校验，任一不合法立即销毁底层 socket
-    this.server.on('upgrade', (request, socket, head) => {
-      if (!isAllowedHost(request.headers.host) || !isAllowedOrigin(request.headers.origin)) {
-        socket.destroy()
-        return
+      if (result === 'eaddrinuse') {
+        // 自愈第一优先：健康探测确认是否为前序 tlmemory 实例 —— 是则直接复用，
+        // 本实例不重复绑定（沉淀与召回职责照常，看板由在岗实例提供）
+        if (await this.probeTlmemoryPeer(port)) {
+          this.logger?.info?.(
+            `[tlmemory-server] 端口 ${port} 已由前序 tlmemory 实例提供服务，本实例自动复用该实例（不重复绑定）`,
+          )
+          return 'delegated'
+        }
+        this.logger?.warn?.(
+          `[tlmemory-server] 端口 ${port} 被其他进程占用，自动改用 ${port + 1} 重试...`,
+        )
+        port += 1
+        continue
       }
-      this.wss?.handleUpgrade(request, socket, head, (ws) => {
-        this.wss?.emit('connection', ws, request)
+
+      // 非 EADDRINUSE 的监听异常已在 listenOnce 内记日志，不再重试
+      break
+    }
+
+    this.logger?.error?.(
+      `[tlmemory-server] EADDRINUSE：从端口 ${this.port} 起连续 ${MAX_PORT_ATTEMPTS} 个端口均无法绑定。\n` +
+        `  解决指引：\n` +
+        `    Windows:     netstat -ano | findstr :${this.port}  找到占用 PID 后 taskkill /PID <pid> /F\n` +
+        `    macOS/Linux: lsof -i :${this.port}\n` +
+        `    或在 cordis.patch.yml 的 tlmemory config 中将 serverPort 改为其他空闲端口。`,
+    )
+    return 'failed'
+  }
+
+  /** 单次尝试：在指定端口上完成整套运行时装配（HTTP + WS upgrade + 安全校验） */
+  private listenOnce(port: number): Promise<'bound' | 'eaddrinuse' | 'error'> {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        void this.handleHttp(req, res)
+      })
+
+      const wss = new WebSocketServer({ noServer: true })
+
+      wss.on('connection', (ws: WebSocket) => {
+        this.clients.add(ws)
+        ws.on('close', () => this.clients.delete(ws))
+      })
+
+      // upgrade 握手：Host 与 Origin 双头白名单校验，任一不合法立即销毁底层 socket
+      server.on('upgrade', (request, socket, head) => {
+        if (!isAllowedHost(request.headers.host) || !isAllowedOrigin(request.headers.origin)) {
+          socket.destroy()
+          return
+        }
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request)
+        })
+      })
+
+      let settled = false
+      const settle = (value: 'bound' | 'eaddrinuse' | 'error'): void => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      }
+
+      server.once('error', (err) => {
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === 'EADDRINUSE') {
+          server.close(() => {})
+          settle('eaddrinuse')
+          return
+        }
+        this.logger?.error?.('[tlmemory-server] 本地网络服务异常:', (err as Error).message)
+        settle('error')
+      })
+
+      // 绝对绑定至本地回环地址，严禁监听 0.0.0.0
+      server.listen(port, LOOPBACK_HOST, () => {
+        this.server = server
+        this.wss = wss
+        this.logger?.info?.(`[tlmemory-server] 本地管理服务就绪: http://127.0.0.1:${port}`)
+        settle('bound')
       })
     })
+  }
 
-    // 绝对绑定至本地回环地址，严禁监听 0.0.0.0
-    this.server.listen(this.port, LOOPBACK_HOST, () => {
-      this.logger?.info?.(`[tlmemory-server] 本地管理服务就绪: http://127.0.0.1:${this.port}`)
-    })
-
-    this.server.on('error', (err) => {
-      this.logger?.error?.('[tlmemory-server] 本地网络服务异常:', (err as Error).message)
+  /**
+   * 端口被占时的同名进程探测：向 127.0.0.1:<port>/api/health 发一次短超时 GET。
+   * 响应携带 service:'tlmemory'（新版本）或 ok:true（兼容旧版本健康响应）即认定
+   * 是前序 tlmemory 实例在岗；探测超时/失败/非本服务响应一律返回 false。
+   */
+  private probeTlmemoryPeer(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const req = http.get({ host: LOOPBACK_HOST, port, path: '/api/health', timeout: 800 }, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume()
+          resolve(false)
+          return
+        }
+        let raw = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk: string) => {
+          raw += chunk
+          if (raw.length > 4096) req.destroy()
+        })
+        res.on('end', () => {
+          try {
+            const body = JSON.parse(raw) as { ok?: unknown; service?: unknown }
+            resolve(body.service === 'tlmemory' || body.ok === true)
+          } catch {
+            resolve(false)
+          }
+        })
+      })
+      req.on('timeout', () => {
+        req.destroy()
+        resolve(false)
+      })
+      req.on('error', () => resolve(false))
     })
   }
 
@@ -168,9 +282,11 @@ export class MemoryServer {
 
     try {
       // P2-1 轻量健康探针：客户端每 15s 轮询一次只为判断在线与否，
-      // 绝不应拉全量节点表（几千节点 = 全表 dump + JSON 序列化的纯浪费）
+      // 绝不应拉全量节点表（几千节点 = 全表 dump + JSON 序列化的纯浪费）。
+      // service 字段同时服务于端口冲突自愈：新实例 EADDRINUSE 时据此
+      // 确认占用者是否为前序 tlmemory 同名进程。
       if (req.method === 'GET' && pathname === '/api/health') {
-        this.sendJson(res, 200, { ok: true })
+        this.sendJson(res, 200, { ok: true, service: 'tlmemory' })
         return
       }
 

@@ -65,19 +65,23 @@ allowBuilds:
 
 ## ⚙️ 配置与挂载
 
-编辑 Profile 目录下的补丁文件 `~/.dsh/profiles/web/cordis.patch.yml`，挂载插件并开启自服务：
+编辑 Profile 目录下的补丁文件 `~/.dsh/profiles/web/cordis.patch.yml`，挂载插件即可
+（看板服务随宿主**零配置自启**，无需任何开关声明）：
 
 ```yaml
 - insert:
     - id: tlmemory-runtime
       name: "dsh-plugin-tlmemory"
       config:
-        serverEnabled: true        # 随 DSH 宿主一并启动 127.0.0.1:4890 看板服务
-        serverPort: 4890
+        serverPort: 4890           # 看板服务端口（默认 4890）
         maxRecallCount: 5          # 单轮最多注入系统提示词的记忆条数
         enableAutoReflection: true # 会话结束异步自动反思提炼
         compactionInterval: 20     # 每累计 N 次沉淀触发一轮强化衰减 + 矛盾检测
 ```
+
+> 端口冲突自愈：4890 被前序 tlmemory 实例占用时，新实例会经健康探测确认同名进程
+> 后自动复用（多宿主并存无需手工分工）；被无关进程占用时自动顺延端口；连续顺延
+> 仍失败时在控制台打印 EADDRINUSE 排查指引。
 
 ---
 
