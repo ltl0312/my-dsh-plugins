@@ -25,6 +25,8 @@ export const useMemoryStore = defineStore('memory', () => {
   const searchQuery = ref('')
   const searchResults = ref<MemoryNodeDto[]>([])
   const wsConnected = ref(false)
+  /** 详情抽屉当前展示的记忆项；null 表示抽屉关闭 */
+  const selectedNode = ref<MemoryNodeDto | null>(null)
 
   async function fetchNodes() {
     try {
@@ -34,6 +36,16 @@ export const useMemoryStore = defineStore('memory', () => {
     } catch (e) {
       console.error('拉取节点数据失败:', e)
     }
+  }
+
+  /** 打开详情抽屉（点击列表项即进入 Markdown 全文阅读） */
+  function openDetail(node: MemoryNodeDto) {
+    selectedNode.value = node
+  }
+
+  /** 关闭详情抽屉 */
+  function closeDetail() {
+    selectedNode.value = null
   }
 
   async function deleteNode(id: string) {
@@ -90,9 +102,12 @@ export const useMemoryStore = defineStore('memory', () => {
     searchQuery,
     searchResults,
     wsConnected,
+    selectedNode,
     fetchNodes,
     deleteNode,
     performSearch,
     setupWebSocket,
+    openDetail,
+    closeDetail,
   }
 })

@@ -1,3 +1,954 @@
+/* packages/tlmemory/web/src/style.css
+ *
+ * 看板的主题与透明层。
+ *
+ * 两条硬约束（都源自「看板是宿主中心列里的跨源 iframe」这一事实）：
+ *   1. **背景必须透明**：html / body / #app 一律 background: transparent !important，
+ *      否则浏览器默认白底会把宿主的主题背景挡在外面，看板就成了一块补丁；
+ *      所有卡片改用半透明叠色（--tlm-surface），让宿主底色透上来参与成像。
+ *   2. **配色只能来自 data-theme**：跨源 iframe 拿不到宿主的 CSS 变量，宿主经
+ *      postMessage 推来 light / dark，写到 <html data-theme> 上，本表的令牌层据此
+ *      切换。组件里不允许出现写死的颜色 —— 一律走 --tlm-* 令牌。
+ *
+ * 令牌的浅 / 深两套取值都用带透明度的黑白叠色，而不是纯色：这样即便宿主换了
+ * 主题皮肤（非标准底色），半透明叠色也能自然融合，不会出现「色块感」。
+ */
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* --- 基础：透明基底 + 主题令牌 -------------------------------------------- */
+
+:root {
+  /* 版式与骨架（与主题无关） */
+  --tlm-font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --tlm-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Code', monospace;
+  --tlm-radius: 10px;
+  --tlm-radius-sm: 7px;
+  --tlm-drawer-width: min(600px, 92vw);
+  --tlm-motion: 150ms ease-in-out;
+
+  /* 透明透传的基底：任何一层铺实体色都会截断宿主的背景 */
+  --tlm-bg: transparent;
+}
+
+/* 浅色令牌：默认值，也是 data-theme='light' 的取值 */
+:root,
+:root[data-theme='light'] {
+  --tlm-scheme: light;
+  --tlm-fg: #1f2328;
+  --tlm-fg-strong: #0d1117;
+  --tlm-fg-muted: #59636e;
+  --tlm-fg-faint: #7d8590;
+  --tlm-accent: #0969da;
+  --tlm-accent-fg: #ffffff;
+  --tlm-pin: #9a6700;
+  --tlm-danger: #cf222e;
+  --tlm-surface: rgba(0, 0, 0, 0.028);
+  --tlm-surface-hover: rgba(0, 0, 0, 0.055);
+  --tlm-surface-strong: rgba(0, 0, 0, 0.07);
+  --tlm-border: rgba(0, 0, 0, 0.14);
+  --tlm-border-soft: rgba(0, 0, 0, 0.075);
+  --tlm-hit: rgba(9, 105, 218, 0.1);
+  --tlm-hit-border: rgba(9, 105, 218, 0.5);
+  --tlm-code-bg: rgba(0, 0, 0, 0.055);
+  --tlm-scrim: rgba(15, 20, 28, 0.24);
+  /* 抽屉需要足够不透明才读得清：仍然是叠色而非纯色，宿主底色隐约可见 */
+  --tlm-drawer-bg: rgba(251, 252, 253, 0.92);
+  --tlm-shadow: 0 18px 48px rgba(0, 0, 0, 0.16);
+  --tlm-focus: rgba(9, 105, 218, 0.55);
+}
+
+/* 深色令牌：宿主 body[data-ds-dark-theme] 时由宿主经 postMessage 推到 data-theme */
+:root[data-theme='dark'] {
+  --tlm-scheme: dark;
+  --tlm-fg: #e6edf3;
+  --tlm-fg-strong: #f0f6fc;
+  --tlm-fg-muted: #9aa7b4;
+  --tlm-fg-faint: #7d8590;
+  --tlm-accent: #79b8ff;
+  --tlm-accent-fg: #06203d;
+  --tlm-pin: #e3b341;
+  --tlm-danger: #ff7b72;
+  --tlm-surface: rgba(255, 255, 255, 0.035);
+  --tlm-surface-hover: rgba(255, 255, 255, 0.07);
+  --tlm-surface-strong: rgba(255, 255, 255, 0.1);
+  --tlm-border: rgba(255, 255, 255, 0.16);
+  --tlm-border-soft: rgba(255, 255, 255, 0.085);
+  --tlm-hit: rgba(121, 184, 255, 0.16);
+  --tlm-hit-border: rgba(121, 184, 255, 0.6);
+  --tlm-code-bg: rgba(255, 255, 255, 0.075);
+  --tlm-scrim: rgba(0, 0, 0, 0.46);
+  --tlm-drawer-bg: rgba(19, 23, 30, 0.92);
+  --tlm-shadow: 0 20px 52px rgba(0, 0, 0, 0.5);
+  --tlm-focus: rgba(121, 184, 255, 0.6);
+}
+
+/* 透明透传：这是「背景颜色与宿主主题实时自适应」的地基，不能被任何规则覆盖 */
+html,
+body,
+#app {
+  background: transparent !important;
+}
+
+/* 关键约束：**绝不在 :root 上写 color-scheme**。
+   按 CSS Color Adjust 规范，根元素背景为 transparent 时，画布会用所用色彩方案的
+   基础色填充 —— 在 :root 上写 color-scheme: dark 会让 iframe 画布被涂成不透明深色，
+   宿主的主题背景就再也透不上来（实测：#0f766e 的宿主底色被整块盖住）。
+   滚动条 / 表单控件这类需要 color-scheme 的地方，改为在**具体元素**上声明。 */
+html {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  height: 100%;
+  color: var(--tlm-fg);
+  font-family: var(--tlm-font);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* --- 布局骨架 ------------------------------------------------------------- */
+
+.tlm-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+  color: var(--tlm-fg);
+  font-size: 12px;
+  background: var(--tlm-bg);
+}
+
+/* color-scheme 落在**元素**上（可继承）而不是 :root：滚动条、输入框等内核绘制的
+   部件仍按宿主主题走，而画布不会被涂成不透明底。
+   .tlm-drawer 需要单独声明 —— 它经 Teleport 挂在 body 下，不在 .tlm-app 子树内，
+   拿不到继承值。 */
+.tlm-app,
+.tlm-drawer {
+  color-scheme: var(--tlm-scheme);
+}
+
+.tlm-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--tlm-border-soft);
+}
+
+.tlm-brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--tlm-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--tlm-accent);
+  white-space: nowrap;
+}
+
+.tlm-brand-count {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 分段控件（当前工程 / 全局偏好） */
+.tlm-segment {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: 999px;
+  background: var(--tlm-surface);
+}
+
+.tlm-segment-btn {
+  appearance: none;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tlm-fg-muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--tlm-motion), color var(--tlm-motion);
+}
+
+.tlm-segment-btn:hover {
+  color: var(--tlm-fg);
+  background: var(--tlm-surface-hover);
+}
+
+.tlm-segment-btn[aria-pressed='true'] {
+  background: var(--tlm-accent);
+  color: var(--tlm-accent-fg);
+  font-weight: 600;
+}
+
+/* --- 搜索 ----------------------------------------------------------------- */
+
+.tlm-searchbar {
+  flex: none;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--tlm-border-soft);
+}
+
+.tlm-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--tlm-border);
+  border-radius: var(--tlm-radius-sm);
+  background: var(--tlm-surface);
+  color: var(--tlm-fg);
+  font-family: inherit;
+  font-size: 12px;
+  transition: border-color var(--tlm-motion), background-color var(--tlm-motion);
+}
+
+.tlm-search::placeholder {
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-search:focus {
+  outline: none;
+  border-color: var(--tlm-hit-border);
+  background: var(--tlm-surface-hover);
+}
+
+/* --- 主体滚动区 ----------------------------------------------------------- */
+
+.tlm-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.tlm-main-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 16px;
+}
+
+.tlm-empty {
+  padding: 40px 12px;
+  text-align: center;
+  color: var(--tlm-fg-faint);
+  font-size: 12px;
+}
+
+.tlm-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 4px;
+  font-family: var(--tlm-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--tlm-fg-faint);
+}
+
+/* --- 记忆树：分组 --------------------------------------------------------- */
+
+.tlm-group {
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: var(--tlm-radius);
+  background: var(--tlm-surface);
+  overflow: hidden;
+}
+
+.tlm-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  /* 点击区域：整行可点，且纵向留足到 ~32px，鼠标与触屏都好按 */
+  min-height: 32px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--tlm-fg);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--tlm-motion);
+}
+
+.tlm-group-head:hover {
+  background: var(--tlm-surface-hover);
+}
+
+.tlm-group-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--tlm-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--tlm-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tlm-chip {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--tlm-surface-strong);
+  color: var(--tlm-fg-muted);
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+/* --- 记忆树：折叠箭头（统一 SVG + 旋转过渡） ------------------------------ */
+
+/* 尺寸与旋转都固定在同一 14×14 矢量盒里：展开 / 收起时图标尺寸与中心基准线
+   完全一致，不再出现 ▼ / ▶ 那种因字形宽高不同导致的跳动与偏移。 */
+.tree-chevron {
+  display: block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--tlm-fg-faint);
+  transition: transform var(--tlm-motion);
+  transform: rotate(0deg);
+}
+
+.tree-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.tlm-group-head:hover .tree-chevron {
+  color: var(--tlm-fg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-chevron {
+    transition: none;
+  }
+}
+
+/* --- 记忆树：叶子列表项（简介视图） --------------------------------------- */
+
+.tlm-leaves {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+
+.tlm-leaf {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: var(--tlm-radius-sm);
+  background: var(--tlm-surface);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--tlm-motion), border-color var(--tlm-motion);
+}
+
+.tlm-leaf:hover {
+  background: var(--tlm-surface-hover);
+  border-color: var(--tlm-border);
+}
+
+/* 检索命中：微光高亮（由 WebSocket 的 MEMORY_HITS 驱动，数秒后自动熄灭） */
+.tlm-leaf.is-hit {
+  background: var(--tlm-hit);
+  border-color: var(--tlm-hit-border);
+}
+
+.tlm-leaf-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tlm-leaf-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--tlm-fg-strong);
+}
+
+.tlm-pin {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--tlm-pin);
+}
+
+.tlm-reinforce {
+  flex: none;
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--tlm-fg-faint);
+  cursor: pointer;
+  transition: background-color var(--tlm-motion), color var(--tlm-motion);
+}
+
+.tlm-iconbtn:hover {
+  background: var(--tlm-surface-strong);
+  color: var(--tlm-danger);
+}
+
+.tlm-iconbtn svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
+/* 简介（Summary）：最多两行、省略打点、次级灰度字体 */
+.tlm-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--tlm-fg-muted);
+  word-break: break-word;
+}
+
+.tlm-leaf.is-hit .tlm-clamp-2 {
+  color: var(--tlm-fg);
+}
+
+/* 简化前的空简介占位：左对齐，跟着名字走（不能用 .tlm-empty，那是居中的整页占位） */
+.tlm-leaf-empty {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+/* --- 检索结果 ------------------------------------------------------------- */
+
+.tlm-hit-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: var(--tlm-radius-sm);
+  background: var(--tlm-surface);
+  cursor: pointer;
+  transition: background-color var(--tlm-motion), border-color var(--tlm-motion);
+}
+
+.tlm-hit-item:hover {
+  background: var(--tlm-surface-hover);
+  border-color: var(--tlm-border);
+}
+
+.tlm-hit-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-hit-score {
+  margin-left: auto;
+  flex: none;
+  color: var(--tlm-accent);
+  font-weight: 700;
+}
+
+/* --- 页脚 ----------------------------------------------------------------- */
+
+.tlm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: none;
+  padding: 7px 12px;
+  border-top: 1px solid var(--tlm-border-soft);
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tlm-conn-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--tlm-danger);
+}
+
+.tlm-conn.is-online .tlm-conn-dot {
+  background: #2da44e;
+}
+
+/* --- 详情抽屉（Slide-over Drawer） --------------------------------------- */
+
+.tlm-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--tlm-scrim);
+}
+
+.tlm-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  width: var(--tlm-drawer-width);
+  max-width: 100%;
+  box-sizing: border-box;
+  /* 半透明叠色 + 模糊：宿主底色仍然透上来，但正文区域足够不透明以保障可读性 */
+  background: var(--tlm-drawer-bg);
+  border-left: 1px solid var(--tlm-border);
+  box-shadow: var(--tlm-shadow);
+  color: var(--tlm-fg);
+}
+
+/* 进出场：从右侧平滑滑入 / 滑出 */
+.tlm-drawer-enter-active,
+.tlm-drawer-leave-active {
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tlm-drawer-enter-from,
+.tlm-drawer-leave-to {
+  transform: translateX(100%);
+}
+
+.tlm-scrim-enter-active,
+.tlm-scrim-leave-active {
+  transition: opacity 0.26s ease;
+}
+
+.tlm-scrim-enter-from,
+.tlm-scrim-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tlm-drawer-enter-active,
+  .tlm-drawer-leave-active,
+  .tlm-scrim-enter-active,
+  .tlm-scrim-leave-active {
+    transition: none;
+  }
+}
+
+.tlm-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: none;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--tlm-border-soft);
+}
+
+/* 面包屑：目录前缀 + 节点名两段相邻内联，读作一条完整的原始路径
+   （读屏器与标题属性都能拿到完整值，不依赖视觉拼接） */
+.tlm-crumbs {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  font-family: var(--tlm-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--tlm-fg-faint);
+  word-break: break-all;
+}
+
+.tlm-crumb-current {
+  font-family: var(--tlm-font);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--tlm-fg-strong);
+}
+
+.tlm-tagrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tlm-tag {
+  padding: 1px 7px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: 999px;
+  background: var(--tlm-surface);
+  color: var(--tlm-fg-muted);
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.tlm-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tlm-fg-muted);
+  cursor: pointer;
+  transition: background-color var(--tlm-motion), color var(--tlm-motion);
+}
+
+.tlm-close:hover {
+  background: var(--tlm-surface-hover);
+  color: var(--tlm-fg);
+}
+
+.tlm-close svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.tlm-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px;
+}
+
+.tlm-drawer-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 10px 14px;
+  border-top: 1px solid var(--tlm-border-soft);
+  background: var(--tlm-surface);
+}
+
+.tlm-foot-hint {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  color: var(--tlm-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tlm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 5px 12px;
+  border: 1px solid var(--tlm-border);
+  border-radius: 8px;
+  background: var(--tlm-surface);
+  color: var(--tlm-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background-color var(--tlm-motion), border-color var(--tlm-motion), color var(--tlm-motion);
+}
+
+.tlm-btn:hover {
+  background: var(--tlm-surface-hover);
+  border-color: var(--tlm-border);
+}
+
+.tlm-btn.is-done {
+  color: #2da44e;
+  border-color: rgba(45, 163, 78, 0.5);
+}
+
+.tlm-btn svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
+/* 统一的键盘焦点可见性 */
+.tlm-segment-btn:focus-visible,
+.tlm-search:focus-visible,
+.tlm-group-head:focus-visible,
+.tlm-iconbtn:focus-visible,
+.tlm-close:focus-visible,
+.tlm-btn:focus-visible,
+.tlm-leaf:focus-visible {
+  outline: 2px solid var(--tlm-focus);
+  outline-offset: 1px;
+}
+
+/* --- Markdown 正文排版（详情抽屉内） ------------------------------------- */
+
+/* Tailwind preflight 清掉了列表 / 标题的默认样式，这里为正文完整还原一套
+   文档级排版（标题、段落、列表、引用、代码、表格、分割线）。 */
+.tlm-md {
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--tlm-fg);
+  word-break: break-word;
+}
+
+.tlm-md > :first-child {
+  margin-top: 0;
+}
+
+.tlm-md > :last-child {
+  margin-bottom: 0;
+}
+
+.tlm-md h1,
+.tlm-md h2,
+.tlm-md h3,
+.tlm-md h4,
+.tlm-md h5,
+.tlm-md h6 {
+  margin: 18px 0 8px;
+  line-height: 1.35;
+  font-weight: 700;
+  color: var(--tlm-fg-strong);
+}
+
+.tlm-md h1 {
+  font-size: 18px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--tlm-border-soft);
+}
+
+.tlm-md h2 {
+  font-size: 15.5px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--tlm-border-soft);
+}
+
+.tlm-md h3 {
+  font-size: 13.5px;
+}
+
+.tlm-md h4,
+.tlm-md h5,
+.tlm-md h6 {
+  font-size: 12.5px;
+}
+
+.tlm-md p {
+  margin: 8px 0;
+}
+
+.tlm-md strong {
+  font-weight: 700;
+  color: var(--tlm-fg-strong);
+}
+
+.tlm-md em {
+  font-style: italic;
+}
+
+.tlm-md del {
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-md a.tlm-md-link {
+  color: var(--tlm-accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--tlm-hit-border);
+}
+
+.tlm-md a.tlm-md-link:hover {
+  border-bottom-color: var(--tlm-accent);
+}
+
+.tlm-md ul,
+.tlm-md ol {
+  margin: 8px 0;
+  padding-left: 1.4em;
+}
+
+.tlm-md ul {
+  list-style: disc;
+}
+
+.tlm-md ul ul {
+  list-style: circle;
+}
+
+.tlm-md ol {
+  list-style: decimal;
+}
+
+.tlm-md li {
+  margin: 3px 0;
+}
+
+.tlm-md li::marker {
+  color: var(--tlm-fg-faint);
+}
+
+.tlm-md input[type='checkbox'] {
+  margin-right: 5px;
+}
+
+.tlm-md blockquote {
+  margin: 10px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--tlm-border);
+  color: var(--tlm-fg-muted);
+}
+
+.tlm-md hr {
+  margin: 16px 0;
+  border: none;
+  border-top: 1px solid var(--tlm-border-soft);
+}
+
+.tlm-md .tlm-md-code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--tlm-code-bg);
+  font-family: var(--tlm-mono);
+  font-size: 11.5px;
+}
+
+.tlm-md .tlm-md-pre {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--tlm-border-soft);
+  border-radius: var(--tlm-radius-sm);
+  background: var(--tlm-code-bg);
+  overflow-x: auto;
+}
+
+.tlm-md .tlm-md-pre code {
+  font-family: var(--tlm-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.tlm-md .tlm-md-imgtext {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--tlm-code-bg);
+  color: var(--tlm-fg-muted);
+  font-style: italic;
+}
+
+.tlm-md table {
+  width: 100%;
+  margin: 10px 0;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.tlm-md th,
+.tlm-md td {
+  padding: 5px 8px;
+  border: 1px solid var(--tlm-border-soft);
+  text-align: left;
+}
+
+.tlm-md th {
+  background: var(--tlm-surface);
+  font-weight: 600;
+  color: var(--tlm-fg-strong);
+}
+
+/* 滚动条：跟随主题，避免在浅色宿主上出现深色滚动条 */
+.tlm-main,
+.tlm-drawer-body,
+.tlm-md .tlm-md-pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--tlm-border) transparent;
+}
+
+.tlm-main::-webkit-scrollbar,
+.tlm-drawer-body::-webkit-scrollbar,
+.tlm-md .tlm-md-pre::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.tlm-main::-webkit-scrollbar-thumb,
+.tlm-drawer-body::-webkit-scrollbar-thumb,
+.tlm-md .tlm-md-pre::-webkit-scrollbar-thumb {
+  background: var(--tlm-border);
+  border-radius: 4px;
+}
+
+.tlm-main::-webkit-scrollbar-track,
+.tlm-drawer-body::-webkit-scrollbar-track,
+.tlm-md .tlm-md-pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (max-width: 768px) {
+  :root {
+    --tlm-drawer-width: 100vw;
+  }
+
+  .tlm-group-head {
+    min-height: 36px;
+  }
+}

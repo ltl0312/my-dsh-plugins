@@ -1,9 +1,38 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>TL·MEMORY</title>
+    <style>
+      /* 首帧兜底：宿主主题消息到达之前，至少先去掉浏览器默认的白底，
+         否则跨源 iframe 会在宿主背景上闪一块白。完整令牌层见 src/style.css。
+         注意不要在这里给 :root 加 color-scheme —— 根元素背景透明时，画布会被
+         所用色彩方案的基础色涂满，反而盖住宿主的主题背景。 */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent !important;
+      }
+    </style>
+    <script>
+      // 内联执行（先于 bundle）：按系统配色预置 data-theme，避免首帧用错令牌。
+      // 宿主真正推送的主题模式会在 postMessage 到达后覆盖此值。
+      // 只写 data-theme，不碰 color-scheme（原因见上面的样式注释）。
+      ;(function () {
+        var mode = 'light'
+        try {
+          if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            mode = 'dark'
+          }
+        } catch (error) {
+          mode = 'light'
+        }
+        document.documentElement.dataset.theme = mode
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

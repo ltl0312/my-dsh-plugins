@@ -1,22 +1,101 @@
 // packages/tlmemory/src/client/logic.ts
-// DSH 客户端插件（浏览器半边）的纯逻辑层：看板地址、健康探测与视图激活。
-// 本模块不 import 任何 React / DSH 运行时包，可在 Node 侧直接单测；
-// 浏览器侧由 src/client/index.tsx 消费（构建时打入 web/client.js 捆绑包）。
+// DSH 客户端插件（浏览器半边）的纯逻辑层：看板地址、健康探测、面板状态机
+// 与「中心列单占」协议常量。
+//
+// 本模块不 import 任何 React / DSH 运行时包、不触碰 DOM，可在 Node 侧直接单测；
+// DOM 注入层见 sidebar-entry.ts / panel-mount.ts，注入样式见 styles.ts。
+//
+// 架构（与宿主内既有全局一级主视图「任务看板 / SSH / 技能中心」同规格）：
+//   * 宿主 sidebar shell 未向外部插件开放任何顶部导航插槽；
+//   * 中心列（conversation 主视口）是单占席位（ui-conversation 持有），
+//     外部插件既不能声明插槽、也无法通过服务 API 切换。
+//   因此家族插件统一采用 DOM 级接管：
+//     1) 侧栏入口行注入到 shell 的 New Session 行之后（sidebar-entry.ts）；
+//     2) 面板容器作为中心列的尾部子节点注入，经 <html> 上的激活属性控制显隐
+//        （panel-mount.ts + styles.ts），会话子树保持挂载、状态不丢。
+// 单占协调：激活时清除既有面板的 <html> 标记并广播 dsh-panel-activate；
+// 收到兄弟面板的广播时主动退场。
+//
+// 主题桥：看板是跨源 iframe，主题无法继承，故本模块同时定义宿主 ⇄ 看板的
+// postMessage 协议常量与消息构造（DOM 侧的读数与订阅见 theme.ts）。
 
 /** 看板服务源地址（由 Node 侧 MemoryServer 严格绑定 127.0.0.1 回环提供服务） */
 export const DASHBOARD_ORIGIN = 'http://127.0.0.1:4890'
 
-/** conversation.view 插槽注册 id（会话头部「记忆看板」页签 + 中心主视口嵌入） */
-export const VIEW_ID = 'tlmemory-dashboard'
-
-/** sidebar.footer.action 插槽注册 id（左侧导航栏底部图标入口） */
-export const SIDEBAR_ACTION_ID = 'tlmemory-dashboard-action'
-
-/** 页签与侧边栏入口的统一显示名 */
+/** 入口与视图的统一显示名 */
 export const DASHBOARD_LABEL = '记忆看板'
+
+/** 回到会话的操作文案（面板头部回退按钮） */
+export const BACK_TO_CONVERSATION_LABEL = '返回会话'
+
+/** L2 语义属性取值（skins / 语义属性契约用） */
+export const PLUGIN_ID = 'tlmemory'
+
+/** 侧栏入口行的稳定属性：幂等键 + 样式作用域 + 家族排序键 */
+export const ENTRY_ATTRIBUTE = 'data-dsh-tlmemory-entry'
+
+/** 侧栏入口行选择器 */
+export const ENTRY_SELECTOR = `[${ENTRY_ATTRIBUTE}]`
+
+/** 中心主视口容器属性 */
+export const VIEW_ATTRIBUTE = 'data-dsh-tlmemory-view'
+
+/** 中心主视口容器选择器 */
+export const VIEW_SELECTOR = `[${VIEW_ATTRIBUTE}]`
+
+/** 注入样式表的 id（同一页面生命周期内只注入一次） */
+export const STYLE_ID = 'dsh-plugin-tlmemory/client-view.css'
+
+/** <html> 上的本面板激活标记 */
+export const ACTIVE_ATTRIBUTE = 'data-dsh-tlmemory-active'
+
+/** 中心列既有占用者的激活标记：本面板激活时必须一并清除 */
+export const SIBLING_ACTIVE_ATTRIBUTES: readonly string[] = [
+  'data-dsh-taskboard-active',
+  'data-dsh-ssh-active',
+]
+
+/** 跨插件中心列占用广播事件（家族协议常量） */
+export const PANEL_ACTIVATE_EVENT = 'dsh-panel-activate'
+
+/** 本面板在广播中的 detail 值 */
+export const PANEL_NAME = 'tlmemory'
+
+/** 兄弟面板的 detail 值：收到它们的广播即主动退场 */
+export const SIBLING_PANEL_NAMES: readonly string[] = ['taskboard', 'ssh']
+
+/**
+ * 侧栏家族排序选择器（与任务看板 / SSH / 技能中心并列常驻）。
+ * 入口行插到家族块末尾，因此始终排在技能中心之后；把自身选择器也列入，
+ * 使已有自身行时锚点计算稳定（放置守卫会跳过已在根内的行）。
+ */
+export const SIDEBAR_FAMILY_SELECTORS: readonly string[] = [
+  '[data-dsh-taskboard-entry]',
+  '[data-dsh-ssh-entry]',
+  '[data-dsh-skill-explorer-entry]',
+  `[${ENTRY_ATTRIBUTE}]`,
+]
+
+/** 中心列选择器（0.1.0-rc.6+ AppFrame 用 centerCol，旧 shell 用 data-pane） */
+export const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"]'
+
+/**
+ * 侧栏中「点击即应交还会话」的行选择器：会话行 / 项目行 / 搜索结果 /
+ * New Session。捕获相位监听，先于 shell 处理点击时收拢面板。
+ */
+export const SIDEBAR_SESSION_ROW_SELECTOR = [
+  '[class*="sessionRow"]',
+  '[class*="projectRow"]',
+  '[class*="searchResultRow"]',
+  '[class*="searchResultWorkspace"]',
+  '[class*="newSession"]',
+].join(', ')
 
 /** 健康探测超时（毫秒），离线时快速失败、不悬挂 UI */
 export const PROBE_TIMEOUT_MS = 2500
+
+/** 健康探测轮询间隔（毫秒） */
+export const PROBE_INTERVAL_MS = 15000
 
 /** 看板完整 URL（可追加 path 参数以便未来支持子路由） */
 export function dashboardUrl(origin: string = DASHBOARD_ORIGIN): string {
@@ -45,35 +124,168 @@ export async function probeDashboardHealth(
   }
 }
 
-/** 会话服务最小结构（与 DSH 客户端 sessions 服务逐字段对齐） */
-export interface SessionsLike {
-  list: {
-    getSnapshot(): { current?: string }
-  }
-  binding(sessionId: string): unknown
+/** 中心列占用状态机（打开 / 关闭 / 切换 + 订阅），与 DOM 完全解耦 */
+export interface PanelState {
+  isOpen(): boolean
+  setOpen(open: boolean): void
+  toggle(): void
+  subscribe(listener: () => void): () => void
 }
 
-/** uiConversation 服务最小结构（binding().activate 为视图激活唯一入口） */
-export interface UiConversationLike {
-  binding(sessionId: string): {
-    activate(view: string): void
+/**
+ * 创建面板状态机。
+ * @param initial - 初始打开状态
+ * @returns 状态读写与订阅面
+ */
+export function createPanelState(initial = false): PanelState {
+  let open = initial
+  const listeners = new Set<() => void>()
+  const notify = (): void => {
+    for (const listener of [...listeners]) {
+      try {
+        listener()
+      } catch {
+        // 单个订阅者异常不得影响其它订阅者与状态本身。
+      }
+    }
+  }
+  return {
+    isOpen: () => open,
+    setOpen: (next: boolean) => {
+      if (open === next) return
+      open = next
+      notify()
+    },
+    toggle: () => {
+      open = !open
+      notify()
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
   }
 }
 
 /**
- * 打开记忆看板：激活当前会话的 tlmemory 视图。
- * 无当前会话（如 New Session 英雄页）时返回 false，调用方应静默忽略。
+ * 本面板激活时需要广播的 detail 序列。
+ *
+ * 既有面板（任务看板 / SSH）只在收到「自身 siblingPanelName」的广播时退场：
+ * SSH 的 sibling 是 `taskboard`，任务看板的 sibling 是 `ssh`。它们不认识
+ * `tlmemory`，所以除了广播自身，还要按它们各自的语义各播一次，中心列
+ * 才能真正让给本面板（同时清除它们的 <html> 标记作为兜底）。
  */
-export function openDashboardForSession(
-  sessions: SessionsLike,
-  uiConversation: UiConversationLike,
-): boolean {
-  const current = sessions.list.getSnapshot().current
-  if (!current) return false
-  try {
-    uiConversation.binding(current).activate(VIEW_ID)
-    return true
-  } catch {
-    return false
-  }
+export function activationBroadcasts(): readonly string[] {
+  return [...SIBLING_PANEL_NAMES, PANEL_NAME]
+}
+
+/** 广播事件上的来源标记键：自播事件必须能被自己的监听端识别并忽略 */
+export const PANEL_ACTIVATE_ORIGIN_KEY = '__dshPanelActivateOrigin'
+
+/**
+ * 给广播事件打上本面板的来源标记。
+ * 激活时要替兄弟面板「代播」它们的 detail 让它们退场，若不加标记，本面板
+ * 自己的监听端会把这条广播当成兄弟激活而立刻自我退场（打开即关闭）。
+ * @param event - 即将 dispatch 的 dsh-panel-activate 事件
+ */
+export function markPanelActivation(event: object): void {
+  ;(event as Record<string, unknown>)[PANEL_ACTIVATE_ORIGIN_KEY] = PANEL_NAME
+}
+
+/**
+ * 该广播是否由本面板自身发出。
+ * @param event - dsh-panel-activate 事件
+ */
+export function isSelfActivation(event: object): boolean {
+  return (event as Record<string, unknown>)[PANEL_ACTIVATE_ORIGIN_KEY] === PANEL_NAME
+}
+
+/**
+ * 收到广播时是否应主动退场（中心列单占）。
+ * 自身广播（含代播的兄弟 detail）与陌生 detail 都不退场。
+ * @param event - dsh-panel-activate 事件
+ */
+export function shouldRelinquishColumn(event: object): boolean {
+  if (isSelfActivation(event)) return false
+  const detail = (event as { detail?: unknown }).detail
+  return typeof detail === 'string' && SIBLING_PANEL_NAMES.includes(detail)
+}
+
+/* --- 主题桥协议（宿主 ⇄ 看板 iframe） ------------------------------------- */
+
+/**
+ * 配色模式。
+ *
+ * 看板是跨源 iframe（回环 127.0.0.1），与宿主的文档、CSS 变量、<html> 属性
+ * 全部隔离 —— 主题无法通过 CSS 继承跟随，只能显式传递，因此需要这条协议。
+ */
+export type ThemeMode = 'light' | 'dark'
+
+/** 宿主 → 看板：推送当前配色模式 */
+export const THEME_MESSAGE_TYPE = 'dsh-tlmemory:theme'
+
+/** 看板 → 宿主：就绪握手（宿主据此补推一次主题，避免首帧丢失） */
+export const READY_MESSAGE_TYPE = 'dsh-tlmemory:ready'
+
+/**
+ * 宿主深色主题标记属性（宿主 shell 与家族插件 @linxin666/dsh-client-ui-skin-center
+ * 共同使用的权威标记位）。
+ */
+export const DARK_THEME_ATTRIBUTE = 'data-ds-dark-theme'
+
+/** 宿主显式浅色主题标记属性 */
+export const LIGHT_THEME_ATTRIBUTE = 'data-ds-light-theme'
+
+/** 取值型主题标记属性（值为 light / dark），兼容宿主换用通用属性名的情形 */
+export const THEME_VALUE_ATTRIBUTES: readonly string[] = ['data-theme', 'data-dsw-theme']
+
+/**
+ * 主题观察属性集：宿主切换配色时必然改动其中之一。
+ * `class` 用于兼容 class 形态的深色模式（如 `body.dark`）。
+ */
+export const THEME_WATCH_ATTRIBUTES: readonly string[] = [
+  DARK_THEME_ATTRIBUTE,
+  LIGHT_THEME_ATTRIBUTE,
+  ...THEME_VALUE_ATTRIBUTES,
+  'class',
+]
+
+/** 系统配色媒体查询（宿主未声明主题时的回落依据） */
+export const THEME_MEDIA_QUERY = '(prefers-color-scheme: dark)'
+
+/** 主题推送消息体 */
+export interface ThemeMessage {
+  type: typeof THEME_MESSAGE_TYPE
+  mode: ThemeMode
+}
+
+/**
+ * 构造主题推送消息体。
+ * @param mode - 当前配色模式
+ */
+export function themeMessage(mode: ThemeMode): ThemeMessage {
+  return { type: THEME_MESSAGE_TYPE, mode }
+}
+
+/**
+ * 解析看板发来的握手消息。非本协议消息一律返回 undefined（宿主文档上会流经
+ * 大量无关 postMessage，不能误判）。
+ * @param data - message 事件负载
+ */
+export function parseDashboardMessage(data: unknown): { type: string } | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const type = (data as { type?: unknown }).type
+  if (type !== READY_MESSAGE_TYPE) return undefined
+  return { type }
+}
+
+/**
+ * 该消息是否来自看板 iframe。
+ * @param origin - message 事件的 origin
+ * @param expected - 看板源地址
+ */
+export function isDashboardOrigin(origin: string, expected: string = DASHBOARD_ORIGIN): boolean {
+  return origin === expected.replace(/\/+$/, '')
 }

@@ -1,81 +1,109 @@
-<!-- packages/tlmemory/web/src/App.vue -->
+<!-- packages/tlmemory/web/src/App.vue
+     记忆看板主视图。所有配色走 style.css 的 --tlm-* 令牌层（由 <html data-theme>
+     驱动），组件内不写死任何颜色，因此宿主切浅色 / 深色时整块看板同步响应。 -->
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 import { useMemoryStore } from './stores/memory'
 import MemoryTree from './components/MemoryTree.vue'
+import MemoryDetailDrawer from './components/MemoryDetailDrawer.vue'
+import { setupThemeBridge } from './theme'
 
 const store = useMemoryStore()
 
+/** 主题桥的卸载函数（组件销毁时摘掉 postMessage 监听） */
+let disposeThemeBridge: (() => void) | undefined
+
 onMounted(() => {
+  // 先接主题再取数据：避免首屏用错配色。
+  disposeThemeBridge = setupThemeBridge()
   store.fetchNodes()
   store.setupWebSocket()
+})
+
+onBeforeUnmount(() => {
+  disposeThemeBridge?.()
 })
 </script>
 
 <template>
-  <div class="h-screen w-full flex flex-col bg-slate-900 text-slate-100 text-xs font-sans select-none">
-    <header class="flex border-b border-slate-800 bg-slate-950 p-2 gap-2 items-center">
-      <div class="font-bold text-sky-400 px-1 tracking-wider">TL·MEMORY</div>
-      <div class="flex-1 flex gap-1 justify-end">
+  <div class="tlm-app">
+    <header class="tlm-header">
+      <span class="tlm-brand">
+        TL·MEMORY
+        <span class="tlm-brand-count">{{ store.nodes.length }} 条</span>
+      </span>
+      <span class="tlm-spacer" />
+      <div class="tlm-segment">
         <button
+          type="button"
+          class="tlm-segment-btn"
+          :aria-pressed="store.currentTree === 'project'"
           @click="store.currentTree = 'project'"
-          :class="[
-            'px-2 py-1 rounded transition-colors',
-            store.currentTree === 'project' ? 'bg-sky-600 text-white font-medium' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-          ]"
         >
           当前工程
         </button>
         <button
+          type="button"
+          class="tlm-segment-btn"
+          :aria-pressed="store.currentTree === 'global'"
           @click="store.currentTree = 'global'"
-          :class="[
-            'px-2 py-1 rounded transition-colors',
-            store.currentTree === 'global' ? 'bg-sky-600 text-white font-medium' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-          ]"
         >
           全局偏好
         </button>
       </div>
     </header>
 
-    <div class="p-2 border-b border-slate-800">
+    <div class="tlm-searchbar">
       <input
         v-model="store.searchQuery"
-        @input="store.performSearch(store.searchQuery)"
+        class="tlm-search"
         type="text"
-        placeholder="FTS5 全文搜索记忆..."
-        class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-sky-500"
+        placeholder="FTS5 全文搜索记忆…"
+        aria-label="全文搜索记忆"
+        @input="store.performSearch(store.searchQuery)"
       />
     </div>
 
-    <main class="flex-1 overflow-y-auto p-2">
-      <div v-if="store.searchQuery.trim().length > 0">
-        <div class="text-slate-500 mb-2 font-mono">全文检索匹配结果 ({{ store.searchResults.length }})</div>
-        <div
-          v-for="item in store.searchResults"
-          :key="item.id"
-          class="p-2 rounded mb-1 bg-slate-800/60 border border-slate-700/50"
-        >
-          <div class="flex justify-between items-center text-slate-400 font-mono text-[10px]">
-            <span>{{ item.path }}{{ item.name }}</span>
-            <span class="text-sky-400 font-bold">score: {{ item.score?.toFixed(1) }}</span>
+    <main class="tlm-main">
+      <div class="tlm-main-inner">
+        <template v-if="store.searchQuery.trim().length > 0">
+          <div class="tlm-section-label">
+            <span>全文检索匹配结果</span>
+            <span class="tlm-chip">{{ store.searchResults.length }}</span>
           </div>
-          <div class="mt-1 text-slate-200">{{ item.content }}</div>
-        </div>
-      </div>
-      <div v-else>
-        <MemoryTree />
+          <div v-if="store.searchResults.length === 0" class="tlm-empty">没有命中的记忆</div>
+          <!-- 检索结果同样点击进入详情抽屉 -->
+          <div
+            v-for="item in store.searchResults"
+            :key="item.id"
+            class="tlm-hit-item"
+            role="button"
+            tabindex="0"
+            @click="store.openDetail(item)"
+            @keydown.enter.prevent="store.openDetail(item)"
+            @keydown.space.prevent="store.openDetail(item)"
+          >
+            <div class="tlm-hit-meta">
+              <span>{{ item.path }}{{ item.name }}</span>
+              <span v-if="item.score !== undefined" class="tlm-hit-score">score {{ item.score.toFixed(1) }}</span>
+            </div>
+            <p class="tlm-clamp-2">{{ item.content }}</p>
+          </div>
+        </template>
+
+        <MemoryTree v-else />
       </div>
     </main>
 
-    <footer class="border-t border-slate-800 bg-slate-950 px-3 py-1 flex justify-between text-[10px] text-slate-500">
-      <span>已载入节点: {{ store.nodes.length }}</span>
-      <span
-        class="flex items-center gap-1"
-        :class="store.wsConnected ? 'text-emerald-500' : 'text-rose-500'"
-      >
-        ● {{ store.wsConnected ? '实时链路正常' : '实时链路断开' }}
+    <footer class="tlm-footer">
+      <span>已载入节点 {{ store.nodes.length }}</span>
+      <span class="tlm-conn" :class="{ 'is-online': store.wsConnected }">
+        <span class="tlm-conn-dot" aria-hidden="true" />
+        {{ store.wsConnected ? '实时链路正常' : '实时链路断开' }}
       </span>
     </footer>
+
+    <!-- 详情抽屉：完整渲染所选记忆的 Markdown 全文 -->
+    <MemoryDetailDrawer :node="store.selectedNode" @close="store.closeDetail()" />
   </div>
 </template>

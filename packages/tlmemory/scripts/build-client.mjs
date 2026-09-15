@@ -2,8 +2,10 @@
 // 构建 DSH 客户端插件捆绑包：src/client/* → web/client.js。
 // 产物遵循 DSH 客户端模块加载协议：
 //   window.__ModuleLoader__.load({ id: <包名>, factory: (require) => exports })
-// 其中 react / react/jsx-runtime / @deepseek-ai/dsh-client-ui-primitives 为
-// shell 静态模块表名称，必须保持 external（工厂内以 require() 解析）。
+// 其中 react / react/jsx-runtime / react-dom/client /
+// @deepseek-ai/dsh-client-ui-primitives 为 shell 静态模块表名称，必须保持
+// external（工厂内以 require() 解析）——中心主视口面板由独立 React 根挂载，
+// 与宿主内的任务看板 / SSH 插件同规格（它们同样 require("react-dom/client")）。
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -46,7 +48,7 @@ const result = await esbuildBuild({
   globalName: '__tlmemory_client_exports',
   platform: 'browser',
   target: 'es2020',
-  external: ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-ui-primitives'],
+  external: ['react', 'react/jsx-runtime', 'react-dom/client', '@deepseek-ai/dsh-client-ui-primitives'],
   sourcemap: false,
   minify: false,
   logLevel: 'warning',
