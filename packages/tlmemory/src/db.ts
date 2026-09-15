@@ -12,6 +12,13 @@ import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './
 /** 路径分段白名单正则：仅允许字母、数字、下划线、中文与连字符 */
 const SEGMENT_WHITELIST = /[^a-zA-Z0-9_\u4e00-\u9fa5\-]/g
 
+/** P1-3 强化计数的打分权重：score + min(count, CAP) * WEIGHT */
+const REINFORCE_WEIGHT = 0.1
+/** 强化计数打分封顶：超过 10 次强化不再继续加权，防止单条记忆权重失控 */
+const REINFORCE_SCORE_CAP = 10
+/** 短词 LIKE 回退检索的固定基线分（LIKE 无相关性排序语义，取正值小基线） */
+const LIKE_FALLBACK_SCORE = 1
+
 function sanitizeSegment(seg: unknown): string {
   return String(seg ?? '').replace(SEGMENT_WHITELIST, '').trim()
 }
@@ -58,6 +65,12 @@ export class MemoryDB {
     this.db = new Database(resolvedPath)
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
+    // P1-2 多宿主共享同一 SQLite 文件（GUI 宿主 + 常驻服务宿主）时的并发写保护：
+    // better-sqlite3 默认 busy_timeout 为 0，另一宿主持有写锁时本侧立刻抛 SQLITE_BUSY，
+    // 静默沉淀链路会因此丢记忆。设 5s 忙等重试；synchronous=NORMAL 是 WAL 模式下的
+    // 推荐搭配（事务提交不再强制 fsync 全量 WAL，兼顾性能与崩溃安全）。
+    this.db.pragma('busy_timeout = 5000')
+    this.db.pragma('synchronous = NORMAL')
     this.migrate()
   }
 
@@ -116,6 +129,17 @@ export class MemoryDB {
   }
 
   /**
+   * P1-7 事务包裹辅助：多语句写序列（建目录链 + 建叶子 + 后代重写 + 剪枝）必须是
+   * 单一原子单元 —— better-sqlite3 单条语句原子，但语句序列不原子，
+   * 「自身已改 path、后代未重写」的间隙崩溃会永久断裂物化路径链且无自愈手段。
+   * 仅顶层写入口（upsertLeaf / createLeaf / updateNode）使用，内部辅助方法
+   * 不得再套用（better-sqlite3 事务不允许嵌套）。
+   */
+  private withTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)()
+  }
+
+  /**
    * 沿物化路径递归构建目录节点并在末端挂载/强化原子断言叶子。
    * 同 (tree_type, path, name) 冲突时执行强化：reinforce_count + 1 并更新内容与关键词。
    */
@@ -126,25 +150,27 @@ export class MemoryDB {
     content: string,
     keywords: string[],
   ): MemoryNode {
-    const cleanSegments = (Array.isArray(pathSegments) ? pathSegments : [])
-      .map(sanitizeSegment)
-      .filter(Boolean)
-    const fallbackSegments = cleanSegments.length > 0 ? cleanSegments : ['未分类']
-    const cleanName = sanitizeSegment(name) || '未命名规则'
-    const cleanContent = String(content ?? '').trim().slice(0, 80)
-    const cleanKeywords = (Array.isArray(keywords) ? keywords : [])
-      .map((k) => sanitizeSegment(k))
-      .filter(Boolean)
-      .join(' ')
+    return this.withTransaction(() => {
+      const cleanSegments = (Array.isArray(pathSegments) ? pathSegments : [])
+        .map(sanitizeSegment)
+        .filter(Boolean)
+      const fallbackSegments = cleanSegments.length > 0 ? cleanSegments : ['未分类']
+      const cleanName = sanitizeSegment(name) || '未命名规则'
+      const cleanContent = String(content ?? '').trim().slice(0, 80)
+      const cleanKeywords = (Array.isArray(keywords) ? keywords : [])
+        .map((k) => sanitizeSegment(k))
+        .filter(Boolean)
+        .join(' ')
 
-    let parentId: number | null = null
-    let fullPath = ''
-    for (const seg of fallbackSegments) {
-      fullPath += `/${seg}`
-      parentId = this.upsertDirectory(treeType, parentId, `${fullPath}/`, seg)
-    }
+      let parentId: number | null = null
+      let fullPath = ''
+      for (const seg of fallbackSegments) {
+        fullPath += `/${seg}`
+        parentId = this.upsertDirectory(treeType, parentId, `${fullPath}/`, seg)
+      }
 
-    return this.upsertNode(treeType, parentId, `${fullPath}/`, cleanName, 1, cleanContent, cleanKeywords)
+      return this.upsertNode(treeType, parentId, `${fullPath}/`, cleanName, 1, cleanContent, cleanKeywords)
+    })
   }
 
   /**
@@ -176,26 +202,28 @@ export class MemoryDB {
     const segments = parsePathSegments(pathSegments)
     const fallbackSegments = segments.length > 0 ? segments : ['未分类']
 
-    let parentId: number | null = null
-    let fullPath = ''
-    for (const seg of fallbackSegments) {
-      fullPath += `/${seg}`
-      parentId = this.ensureDirectory(cleanType, parentId, `${fullPath}/`, seg)
-    }
+    return this.withTransaction(() => {
+      let parentId: number | null = null
+      let fullPath = ''
+      for (const seg of fallbackSegments) {
+        fullPath += `/${seg}`
+        parentId = this.ensureDirectory(cleanType, parentId, `${fullPath}/`, seg)
+      }
 
-    const now = Date.now()
-    const result = this.db
-      .prepare(`
-        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 1, ?, ?, 1, 0, ?, ?)
-        ON CONFLICT(tree_type, path, name) DO UPDATE SET
-          content = excluded.content,
-          keywords = excluded.keywords,
-          updated_at = excluded.updated_at
-        RETURNING *
-      `)
-      .get(cleanType, parentId, `${fullPath}/`, cleanName, cleanContent, cleanKeywords, now, now) as Record<string, unknown>
-    return this.rowToNode(result)
+      const now = Date.now()
+      const result = this.db
+        .prepare(`
+          INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?, 1, 0, ?, ?)
+          ON CONFLICT(tree_type, path, name) DO UPDATE SET
+            content = excluded.content,
+            keywords = excluded.keywords,
+            updated_at = excluded.updated_at
+          RETURNING *
+        `)
+        .get(cleanType, parentId, `${fullPath}/`, cleanName, cleanContent, cleanKeywords, now, now) as Record<string, unknown>
+      return this.rowToNode(result)
+    })
   }
 
   /**
@@ -249,12 +277,26 @@ export class MemoryDB {
     return this.rowToNode(result)
   }
 
-  /** FTS5 Trigram 全文检索：BM25 排序，输出 score（越高越相关）与 bm25_rank */
+  /**
+   * FTS5 Trigram 全文检索：BM25 排序，输出 score（越高越相关）与 bm25_rank。
+   * P1-3 打分模型：
+   *   - is_pinned = 1 的记忆在 SQL 层强制排在未置顶记忆之前（置顶语义落地）；
+   *   - reinforce_count 纳入最终得分（score + min(count, 10) * REINFORCE_WEIGHT），
+   *     让「召回即强化」的高频记忆在长期使用中自然获得更高权重，
+   *     召回侧的每轮 reinforce 写入从此有了真实的排序收益。
+   */
   public search(query: string, options: SearchOptions = {}): SearchResult[] {
     const cleanQuery = String(query ?? '').trim()
     if (!cleanQuery) return []
 
     const { treeType, pathPrefix, limit = 5 } = options
+
+    // FTS5 Trigram 最小检索粒度为 3 字符，1–2 字关键词会静默零命中：
+    // 短词降级为 LIKE 模糊匹配（name / content / keywords 三列）兜底
+    if (cleanQuery.length < 3) {
+      return this.searchByLike(cleanQuery, options)
+    }
+
     // 将查询包裹为短语查询，规避 FTS5 语法注入并兼容中英文混排 Trigram 匹配
     const matchQuery = `"${cleanQuery.replace(/"/g, '""')}"`
 
@@ -276,7 +318,7 @@ export class MemoryDB {
         FROM memory_fts
         JOIN nodes n ON n.id = memory_fts.rowid
         WHERE ${where.join(' AND ')}
-        ORDER BY bm25(memory_fts)
+        ORDER BY n.is_pinned DESC, bm25(memory_fts)
         LIMIT ?
       `)
       .all(...params) as Array<Record<string, unknown>>
@@ -284,9 +326,50 @@ export class MemoryDB {
     return rows.map((row, index) => {
       const node = this.rowToNode(row)
       const bm25 = Number(row.bm25_score ?? 0)
+      const reinforceBonus = Math.min(node.reinforce_count, REINFORCE_SCORE_CAP) * REINFORCE_WEIGHT
       return {
         ...node,
-        score: Math.round(-bm25 * 100) / 100,
+        score: Math.round((-bm25 + reinforceBonus) * 100) / 100,
+        bm25_rank: index + 1,
+      } satisfies SearchResult
+    })
+  }
+
+  /**
+   * 短词（<3 字符）LIKE 回退检索：Trigram 索引无法命中的最小粒度问题在此兜底。
+   * score 给固定基线（LIKE 无相关性排序语义），按强化计数与更新时间排序。
+   */
+  private searchByLike(cleanQuery: string, options: SearchOptions): SearchResult[] {
+    const { treeType, pathPrefix, limit = 5 } = options
+    const like = `%${escapeLikePattern(cleanQuery)}%`
+
+    const where: string[] = ['(n.name LIKE ? OR n.content LIKE ? OR n.keywords LIKE ?)']
+    const params: unknown[] = [like, like, like]
+    if (treeType) {
+      where.push('n.tree_type = ?')
+      params.push(treeType)
+    }
+    if (pathPrefix) {
+      where.push(`n.path LIKE ? ESCAPE '\\'`)
+      params.push(`${escapeLikePattern(pathPrefix)}%`)
+    }
+    params.push(limit)
+
+    const rows = this.db
+      .prepare(`
+        SELECT n.* FROM nodes n
+        WHERE ${where.join(' AND ')}
+        ORDER BY n.is_pinned DESC, n.reinforce_count DESC, n.updated_at DESC
+        LIMIT ?
+      `)
+      .all(...params) as Array<Record<string, unknown>>
+
+    return rows.map((row, index) => {
+      const node = this.rowToNode(row)
+      const reinforceBonus = Math.min(node.reinforce_count, REINFORCE_SCORE_CAP) * REINFORCE_WEIGHT
+      return {
+        ...node,
+        score: Math.round((LIKE_FALLBACK_SCORE + reinforceBonus) * 100) / 100,
         bm25_rank: index + 1,
       } satisfies SearchResult
     })
@@ -508,43 +591,47 @@ export class MemoryDB {
       targetParentId = parentId == null ? null : String(parentId)
     }
 
-    // UNIQUE(tree_type, path, name) 冲突前置显式检查，给出可读错误而非 SQLite 原生报错
-    const conflict = this.db
-      .prepare('SELECT id FROM nodes WHERE tree_type = ? AND path = ? AND name = ? AND id <> ?')
-      .get(current.tree_type, targetPath, newName, numericId) as { id: number } | undefined
-    if (conflict) throw new Error('同目录下已存在同名记忆，请换一个标题')
+    // P1-7 事务包裹：「更新自身 → 重写后代 path → 剪枝空目录」三步必须在同一
+    // 原子单元内完成，中途失败/断电由事务回滚兜底，物化路径链不再可能断裂。
+    return this.withTransaction(() => {
+      // UNIQUE(tree_type, path, name) 冲突前置显式检查，给出可读错误而非 SQLite 原生报错
+      const conflict = this.db
+        .prepare('SELECT id FROM nodes WHERE tree_type = ? AND path = ? AND name = ? AND id <> ?')
+        .get(current.tree_type, targetPath, newName, numericId) as { id: number } | undefined
+      if (conflict) throw new Error('同目录下已存在同名记忆，请换一个标题')
 
-    this.db
-      .prepare('UPDATE nodes SET parent_id = ?, path = ?, name = ?, content = ?, updated_at = ? WHERE id = ?')
-      .run(
-        targetParentId == null ? null : Number(targetParentId),
-        targetPath,
-        newName,
-        newContent,
-        Date.now(),
-        numericId,
-      )
-
-    // 目录迁移：沿旧物化路径前缀重写全部后代节点（FTS 由触发器自动重索引）
-    if (targetPath !== originalPath) {
       this.db
-        .prepare(
-          `UPDATE nodes SET path = ? || substr(path, ?)
-           WHERE tree_type = ? AND path LIKE ? ESCAPE '\\' AND id <> ?`,
-        )
+        .prepare('UPDATE nodes SET parent_id = ?, path = ?, name = ?, content = ?, updated_at = ? WHERE id = ?')
         .run(
+          targetParentId == null ? null : Number(targetParentId),
           targetPath,
-          originalPath.length + 1,
-          current.tree_type,
-          `${escapeLikePattern(originalPath)}%`,
+          newName,
+          newContent,
+          Date.now(),
           numericId,
         )
-      // 旧目录链空壳剪枝（自原父节点向上逐层收敛，仅删除零子代的目录）
-      this.pruneEmptyDirectoryChain(originalParentId)
-    }
 
-    const updated = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(numericId) as Record<string, unknown>
-    return this.rowToNode(updated)
+      // 目录迁移：沿旧物化路径前缀重写全部后代节点（FTS 由触发器自动重索引）
+      if (targetPath !== originalPath) {
+        this.db
+          .prepare(
+            `UPDATE nodes SET path = ? || substr(path, ?)
+             WHERE tree_type = ? AND path LIKE ? ESCAPE '\\' AND id <> ?`,
+          )
+          .run(
+            targetPath,
+            originalPath.length + 1,
+            current.tree_type,
+            `${escapeLikePattern(originalPath)}%`,
+            numericId,
+          )
+        // 旧目录链空壳剪枝（自原父节点向上逐层收敛，仅删除零子代的目录）
+        this.pruneEmptyDirectoryChain(originalParentId)
+      }
+
+      const updated = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(numericId) as Record<string, unknown>
+      return this.rowToNode(updated)
+    })
   }
 
   /** 自底向上剪枝零子代目录链：迁移 / 重命名遗留的空目录逐层收敛删除 */

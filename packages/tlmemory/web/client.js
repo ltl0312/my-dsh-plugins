@@ -52,7 +52,14 @@ window.__ModuleLoader__.load({
       var import_client = __require("react-dom/client");
     
       // src/client/logic.ts
-      var DASHBOARD_ORIGIN = "http://127.0.0.1:4890";
+      function resolveInjectedPort() {
+        if (typeof __TLMEMORY_SERVER_PORT__ === "number" && Number.isFinite(__TLMEMORY_SERVER_PORT__)) {
+          return __TLMEMORY_SERVER_PORT__;
+        }
+        return 4890;
+      }
+      var DASHBOARD_SERVER_PORT = resolveInjectedPort();
+      var DASHBOARD_ORIGIN = `http://127.0.0.1:${DASHBOARD_SERVER_PORT}`;
       var DASHBOARD_LABEL = "\u8BB0\u5FC6\u770B\u677F";
       var BACK_TO_CONVERSATION_LABEL = "\u8FD4\u56DE\u4F1A\u8BDD";
       var PLUGIN_ID = "tlmemory";

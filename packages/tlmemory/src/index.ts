@@ -115,6 +115,21 @@ function eventDataOf<T>(
   return event.type === type ? (event.data as T) : null
 }
 
+/**
+ * 从会话对象防御式提取 workspace 目录线索。
+ * 宿主 session 对象结构未在官方契约中冻结，这里按常见命名做鸭子类型探测，
+ * 全部不命中返回 undefined（由调用方回退进程级身份）。
+ */
+function extractSessionWorkspaceDir(session: unknown): string | undefined {
+  if (!session || typeof session !== 'object') return undefined
+  const record = session as Record<string, unknown>
+  for (const key of ['workspaceDir', 'workspace', 'cwd', 'root']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return undefined
+}
+
 export function apply(ctx: Context, config: Config): () => void {
   ctx.logger?.info?.(`[tlmemory] 插件装配启动中...`)
 
@@ -129,6 +144,28 @@ export function apply(ctx: Context, config: Config): () => void {
   const project = resolveProjectIdentity()
   const projectScope = project.scope
   db.registerProject(project.scope, project.name, project.root)
+
+  // P1-5 会话级工程身份解析：GUI 宿主可能同时服务多个 workspace 的会话，
+  // 进程级固定 scope 会把 A 仓库的沉淀写进 B 仓库的记忆树（记忆错账）。
+  // 事件回调携带 session 对象时，优先从其 workspace 线索按会话解析身份并缓存
+  // （WeakMap 随会话对象生命周期自动回收）；解析不出回退进程级身份。
+  const sessionIdentityCache = new WeakMap<object, ProjectIdentity>()
+  const registeredScopes = new Set<string>([projectScope])
+  const resolveSessionScope = (session: unknown): string => {
+    if (!session || typeof session !== 'object') return projectScope
+    const cached = sessionIdentityCache.get(session)
+    if (cached) return cached.scope
+    const workspaceDir = extractSessionWorkspaceDir(session)
+    if (!workspaceDir) return projectScope
+    const identity = resolveProjectIdentity(workspaceDir)
+    sessionIdentityCache.set(session, identity)
+    // 每个新解析出的工程身份都登记（保留用户手工命名），保证看板下拉框可见
+    if (!registeredScopes.has(identity.scope)) {
+      registeredScopes.add(identity.scope)
+      db.registerProject(identity.scope, identity.name, identity.root)
+    }
+    return identity.scope
+  }
 
   let activeRecalledMemories: SearchResult[] = []
   let activePromptSectionText = ''
@@ -157,6 +194,9 @@ export function apply(ctx: Context, config: Config): () => void {
   // 防御式读取 + 双保险 try-catch，保证事件热路径零异常上抛。
   const unregisterSessionEvent = ctx.on('session/event', (session, event) => {
     try {
+      // P1-5：按会话解析工程作用域（多 workspace 宿主下记忆归属不再错账）
+      const sessionScope = resolveSessionScope(session)
+
       // 1) 轮次素材折叠：turn/start 开户、assistant/message 聚合可见文本
       const turnStart = eventDataOf<TurnStartEventData>(event, 'turn/start')
       if (turnStart) {
@@ -180,9 +220,9 @@ export function apply(ctx: Context, config: Config): () => void {
         turnTracker.addUserMessage(userMsg.content, userMsg.source?.kind)
 
         if (text) {
-          activeRecalledMemories = recallEngine.recall(text, projectScope, config.maxRecallCount ?? 5)
+          activeRecalledMemories = recallEngine.recall(text, sessionScope, config.maxRecallCount ?? 5)
           activePromptSectionText = recallEngine.formatPromptBlock(activeRecalledMemories)
-          server.broadcastHits(projectScope, activeRecalledMemories.map((m) => m.id))
+          server.broadcastHits(sessionScope, activeRecalledMemories.map((m) => m.id))
         }
       }
 
@@ -198,8 +238,8 @@ export function apply(ctx: Context, config: Config): () => void {
           // 提炼失败仅记日志，绝不阻塞、绝不打扰会话对话流
           setImmediate(() => {
             extractor
-              .extractAndConsolidate(item, projectScope)
-              .then(() => server.notifyTreeChanged(projectScope))
+              .extractAndConsolidate(item, sessionScope)
+              .then(() => server.notifyTreeChanged(sessionScope))
               .catch((err) => ctx.logger?.error?.('[tlmemory] 后台静默沉淀任务异常:', err))
           })
         }

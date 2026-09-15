@@ -41,6 +41,13 @@ const esbuildModule = await import(pathToFileURL(esbuildPath).href)
 const esbuildBuild = esbuildModule.default?.build ?? esbuildModule.build
 if (typeof esbuildBuild !== 'function') throw new Error('esbuild 加载失败: ' + esbuildPath)
 
+// P1-1 服务端口构建期内联：客户端 bundle 无法读取宿主 cordis 配置，
+// DASHBOARD_ORIGIN 若硬编码 4890，用户改了 serverPort 后侧栏入口点开永远是
+// 「服务未启动」。构建时经 TLMEMORY_SERVER_PORT 指定与服务端一致的端口，
+// esbuild define 会把 src/client/logic.ts 中的 __TLMEMORY_SERVER_PORT__
+// 标识符替换为该字面量；未设置环境变量时取默认 4890。
+const injectedPort = Number.parseInt(process.env.TLMEMORY_SERVER_PORT ?? '', 10)
+
 const result = await esbuildBuild({
   entryPoints: [join(pkgRoot, 'src', 'client', 'entry.ts')],
   bundle: true,
@@ -49,6 +56,10 @@ const result = await esbuildBuild({
   platform: 'browser',
   target: 'es2020',
   external: ['react', 'react/jsx-runtime', 'react-dom/client', '@deepseek-ai/dsh-client-ui-primitives'],
+  define:
+    Number.isInteger(injectedPort) && injectedPort > 0
+      ? { __TLMEMORY_SERVER_PORT__: String(injectedPort) }
+      : undefined,
   sourcemap: false,
   minify: false,
   logLevel: 'warning',

@@ -19,8 +19,27 @@
 // 主题桥：看板是跨源 iframe，主题无法继承，故本模块同时定义宿主 ⇄ 看板的
 // postMessage 协议常量与消息构造（DOM 侧的读数与订阅见 theme.ts）。
 
+/**
+ * 构建期注入的服务端口（scripts/build-client.mjs 经 esbuild define 写入）。
+ * 与服务端 config.serverPort 的对应关系：构建客户端 bundle 时通过
+ * TLMEMORY_SERVER_PORT 环境变量指定（默认 4890）。运行时未注入（如 vitest
+ * 单测直接加载 TS 源码）时回退默认端口，typeof 守卫保证未定义标识符安全。
+ */
+declare const __TLMEMORY_SERVER_PORT__: number | undefined
+
+function resolveInjectedPort(): number {
+  // typeof 守卫：未注入 define 时该标识符在运行时不存在，typeof 读取是唯一安全路径
+  if (typeof __TLMEMORY_SERVER_PORT__ === 'number' && Number.isFinite(__TLMEMORY_SERVER_PORT__)) {
+    return __TLMEMORY_SERVER_PORT__
+  }
+  return 4890
+}
+
+/** 看板服务端口（构建期内联，与 MemoryServer 的 config.serverPort 保持一致） */
+export const DASHBOARD_SERVER_PORT = resolveInjectedPort()
+
 /** 看板服务源地址（由 Node 侧 MemoryServer 严格绑定 127.0.0.1 回环提供服务） */
-export const DASHBOARD_ORIGIN = 'http://127.0.0.1:4890'
+export const DASHBOARD_ORIGIN = `http://127.0.0.1:${DASHBOARD_SERVER_PORT}`
 
 /** 入口与视图的统一显示名 */
 export const DASHBOARD_LABEL = '记忆看板'

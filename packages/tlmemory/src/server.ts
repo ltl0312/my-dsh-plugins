@@ -44,10 +44,19 @@ function isAllowedHost(hostHeader: string | undefined): boolean {
  * Origin 头白名单校验：阻断跨站 WebSocket 劫持（CSWSH）。
  * 浏览器连接强制携带 Origin 且 JS 无法伪造，非回环 Origin 一律销毁；
  * 本地非浏览器客户端（如 ws 库）不携带 Origin，属合法本地调用，放行（Host 校验仍在）。
+ * 安全基线（P0-2）：必须用 URL 解析后取 hostname 做严格相等比较，
+ * 严禁子串包含判断 —— `http://evil-127.0.0.1.attacker.com` 这类伪造 Origin
+ * 能绕过 includes 校验，但对 hostname 严格匹配无效。
  */
 function isAllowedOrigin(originHeader: string | undefined): boolean {
   if (!originHeader) return true
-  return originHeader.includes('127.0.0.1') || originHeader.includes('localhost')
+  try {
+    const hostname = new URL(originHeader).hostname.toLowerCase()
+    return hostname === '127.0.0.1' || hostname === 'localhost'
+  } catch {
+    // 畸形 Origin（非合法 URL）一律拒绝
+    return false
+  }
 }
 
 /** 解析 web/dist 静态产物根目录（兼容 CJS __dirname 与 ESM import.meta.url 双产物） */
@@ -140,13 +149,17 @@ export class MemoryServer {
   }
 
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    // P0-1 安全基线：不再返回任何 Access-Control-Allow-* 头。
+    // 看板与 API 同源（127.0.0.1:4890），同源请求天然不需要 CORS；
+    // 任何跨源网页发起的 fetch/DELETE 预检因无 ACAO 头而必然失败，
+    // 简单请求（GET）的响应也无法被跨源页面读取 —— 任意网页读写删记忆库的通道就此封死。
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204)
-      res.end()
+    // DNS rebinding 防御：普通 HTTP 请求与 WS upgrade 一致执行 Host 头白名单校验。
+    // 恶意域名的 A 记录指向 127.0.0.1 时，浏览器发送的 Host 头是恶意域名本身，
+    // 在此被直接拒绝。
+    if (!isAllowedHost(req.headers.host)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+      res.end('Forbidden')
       return
     }
 
@@ -348,6 +361,13 @@ export class MemoryServer {
         const id = pathname.slice('/api/nodes/'.length)
         const removed = this.db.deleteNode(id)
         this.sendJson(res, 200, { success: removed })
+        return
+      }
+
+      // API 命名空间隔离：全部 API 路由均未命中时，未知 /api/* 请求不得回落到
+      // SPA index.html（返回 200 + HTML 会让前端与调试时的错误语义混乱），统一 404。
+      if (pathname === '/api' || pathname.startsWith('/api/')) {
+        this.sendJson(res, 404, { error: `未知 API 端点: ${req.method ?? 'GET'} ${pathname}` })
         return
       }
 

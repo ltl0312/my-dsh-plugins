@@ -1,6 +1,8 @@
 // packages/tlmemory/src/tools.ts
 import type { Context } from "cordis";
 import type { MemoryDB } from "./db.js";
+import { expandQueryCandidates } from "./query-expand.js";
+import type { SearchResult } from "./types.js";
 
 export function registerMemoryTools(
   ctx: Context,
@@ -166,10 +168,24 @@ export function registerMemoryTools(
       if (args.scope === "global") treeType = "global";
       if (args.scope === "project") treeType = currentScope;
 
-      const results = db.search(args.query, {
-        treeType,
-        limit: args.limit || 5,
-      });
+      const maxCount = args.limit || 5;
+      const rawQuery = String(args.query ?? "").trim();
+
+      // P1-4 查询展开：LLM 传入的自然语言长句（最常见形态）走严格 Trigram 短语匹配
+      // 几乎必然零命中，这里复用与召回引擎同一套候选展开（<3 字符时 db.search
+      // 内部自动降级 LIKE 兜底），跨候选取最高分去重合并。
+      const candidates = expandQueryCandidates(rawQuery);
+      const merged = new Map<string, SearchResult>();
+      for (const candidate of candidates) {
+        for (const hit of db.search(candidate, { treeType, limit: maxCount })) {
+          const key = `${hit.tree_type}:${hit.path}${hit.name}`;
+          const prev = merged.get(key);
+          if (!prev || hit.score > prev.score) merged.set(key, hit);
+        }
+      }
+      const results = Array.from(merged.values())
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxCount);
 
       return {
         status: "success",
