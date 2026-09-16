@@ -36,7 +36,7 @@ export { MemoryDB } from './db.js'
 export { MemoryExtractor } from './extractor.js'
 export { MemoryCompactor } from './compactor.js'
 export { registerMemoryTools, toContentBlocks, toToolResult } from './tools.js'
-export type { ToolResultEnvelope, ToolTextBlock } from './tools.js'
+export type { ToolResultEnvelope, ToolTextBlock, ScopeResolver } from './tools.js'
 export { MemoryRecallEngine } from './recall.js'
 // 阶段三/六交付物：嵌入式 REST 与 WebSocket 实时中继服务 + 轮次跟踪器
 export { MemoryServer, isFetchForbiddenPort } from './server.js'
@@ -63,7 +63,7 @@ export {
   workspaceRegistryPath,
 } from './workspaces.js'
 export type { WorkspaceRegistry } from './workspaces.js'
-export type { ProjectPruneOptions } from './db.js'
+export type { ProjectPruneOptions, OrphanMergeOptions, OrphanMergeResult } from './db.js'
 
 export interface Config {
   dbPath?: string
@@ -108,9 +108,12 @@ export interface ProjectIdentity {
  */
 export function resolveProjectIdentity(workspaceDir?: string): ProjectIdentity {
   const fallbackRoot = path.normalize(process.cwd())
-  let root = fallbackRoot
   const explicit = workspaceDir ?? process.env.DSH_WORKSPACE_DIR
+  // v0.6.6 修复（ZhuanZ 事故根因）：显式会话目录向上找不到 .git 时，根目录取
+  // **会话目录本身** —— 旧实现会静默回退到 process.cwd()，宿主以用户主目录启动时
+  // 所有会话的记忆都被打上终端启动目录的 project_key。
   let currentDir = explicit ? path.normalize(explicit) : fallbackRoot
+  let root = currentDir
   while (currentDir !== path.parse(currentDir).root) {
     if (fs.existsSync(path.join(currentDir, '.git'))) {
       root = path.normalize(currentDir)
@@ -206,6 +209,71 @@ export function apply(ctx: Context, config: Config): () => void {
     )
   }
 
+  // v0.6.6 防漂移降级：白名单首位合法工作区（scope + 标题）。仅在「进程/会话作用域
+  // 被判定为孤儿」时作为记忆写入的降落点 —— 严禁以用户主目录之类的名单外目录建工程。
+  const fallbackWorkspace = (): { scope: string; name: string } | null => {
+    if (workspaceRegistry === null) return null
+    for (const [scope, title] of workspaceRegistry.scopes) {
+      return { scope, name: title }
+    }
+    return null
+  }
+  /** 启用降级工作区：首次使用时补登记（可读名 = 工作区标题），保证看板不出现裸哈希 */
+  const useFallbackWorkspace = (): string | null => {
+    const fallback = fallbackWorkspace()
+    if (!fallback) return null
+    if (!registeredScopes.has(fallback.scope)) {
+      registeredScopes.add(fallback.scope)
+      identityByScope.set(fallback.scope, { scope: fallback.scope, name: fallback.name, root: '' })
+      db.registerProject(fallback.scope, fallback.name, null)
+    }
+    return fallback.scope
+  }
+  /**
+   * 作用域安全防线（防漂移最后一道闸）：候选 scope 必须属于宿主合法工作区；
+   * 名单外目录（如用户主目录 C:\Users\ZhuanZ）一律降级到白名单首位合法工作区。
+   * 白名单不可读（registry === null，isAllowedWorkspaceScope 恒 true）时维持旧行为 ——
+   * 「读不到名单」不等于「名单为空」，无从判定绝不搬家。
+   */
+  const resolveSafeScope = (candidate: string): string => {
+    if (isAllowedWorkspaceScope(candidate)) return candidate
+    const fallback = useFallbackWorkspace()
+    if (fallback !== null) {
+      ctx.logger?.warn?.(
+        `[tlmemory] 作用域 ${candidate} 不属于宿主合法工作区，已降级写入合法工作区 ${fallback}（防止生成幽灵工程）`,
+      )
+      return fallback
+    }
+    return candidate
+  }
+
+  // v0.6.6 孤儿工程热归并（装配期一次，幂等）：先把白名单外 scope 的存量记忆
+  // 迁入合法工作区（同名对齐优先，否则落白名单首位），随后 maintainProjects
+  // 才能安全收紧 —— 归并优先于清理，记忆一条不少，只是搬回家。
+  try {
+    const titleToScope = new Map<string, string>()
+    if (workspaceRegistry !== null) {
+      for (const [scope, title] of workspaceRegistry.scopes) {
+        titleToScope.set(title.trim().toLowerCase(), scope)
+      }
+    }
+    const merges = db.mergeOrphanScopes({
+      keepScope: projectIsAllowed ? projectScope : null,
+      // 兜底降落点：进程级工作区合法时优先（记忆大概率来自当前宿主目录），
+      // 否则取白名单首位 —— 绝不落在任何名单外目录
+      fallbackScope: (projectIsAllowed ? projectScope : fallbackWorkspace()?.scope) ?? null,
+      isScopeAllowed: workspaceRegistry === null ? null : isAllowedWorkspaceScope,
+      titleToScope: workspaceRegistry === null ? null : titleToScope,
+    })
+    for (const merged of merges) {
+      ctx.logger?.warn?.(
+        `[tlmemory] 孤儿工程记忆已归并: ${merged.from} → ${merged.to}（迁移 ${merged.movedNodes} 个节点，合并 ${merged.mergedLeaves} 条同位冲突叶子）`,
+      )
+    }
+  } catch (err) {
+    ctx.logger?.error?.('[tlmemory] 孤儿工程归并异常（跳过本轮，不影响启动）:', err)
+  }
+
   // 工程清单自愈：清掉**零节点的空壳登记**（以用户主目录启动产生的临时登记、宿主已删除
   // 的历史目录留下的空记录）与名单内的零记忆工程，并把重名工程收敛为唯一名；
   // keepScope 只豁免「当前正在打开的工程」—— 它零记忆也保留，作为「当前工程就绪」的
@@ -238,11 +306,11 @@ export function apply(ctx: Context, config: Config): () => void {
   /** scope → 工程身份（可读名 / 根目录），沉淀前据此重建可能已被维护清掉的登记项 */
   const identityByScope = new Map<string, ProjectIdentity>([[projectScope, project]])
   const resolveSessionScope = (session: unknown): string => {
-    if (!session || typeof session !== 'object') return projectScope
+    if (!session || typeof session !== 'object') return resolveSafeScope(projectScope)
     const cached = sessionIdentityCache.get(session)
     if (cached) return cached.scope
     const workspaceDir = extractSessionWorkspaceDir(session)
-    if (!workspaceDir) return projectScope
+    if (!workspaceDir) return resolveSafeScope(projectScope)
     const identity = resolveProjectIdentity(workspaceDir)
     sessionIdentityCache.set(session, identity)
     identityByScope.set(identity.scope, identity)
@@ -252,7 +320,9 @@ export function apply(ctx: Context, config: Config): () => void {
       registeredScopes.add(identity.scope)
       db.registerProject(identity.scope, identity.name, identity.root)
     }
-    return identity.scope
+    // v0.6.6 防漂移：会话工作区不在白名单（如宿主会话游离在用户主目录）时，
+    // 记忆降级写入合法工作区，绝不把名单外 scope 当 project_key 落库
+    return resolveSafeScope(identity.scope)
   }
 
   /**
@@ -325,7 +395,13 @@ export function apply(ctx: Context, config: Config): () => void {
       text: () => activePromptSectionText,
     }) ?? (() => {})
 
-  const unregisterTools = registerMemoryTools(ctx, db, () => projectScope)
+  // v0.6.6 作用域动态感知：工具执行时按宿主 exec 上下文携带的 session 解析工程作用域；
+  // 无会话线索时先取进程级身份（合法才用），孤儿进程目录一律降级白名单首位合法工作区
+  // —— 严禁以 process.cwd()（如用户主目录）直接建工程，杜绝 ZhuanZ 幽灵工程再生。
+  const unregisterTools = registerMemoryTools(ctx, db, (session) => {
+    if (session && typeof session === 'object') return resolveSessionScope(session)
+    return resolveSafeScope(projectScope)
+  })
 
   // 阶段三：内嵌回环网络服务（零配置自启，随插件挂载自动拉起）。
   // 端口被前序 tlmemory 实例占用时健康探测确认同名进程后自动复用；

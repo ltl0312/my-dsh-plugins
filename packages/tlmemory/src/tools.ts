@@ -160,11 +160,41 @@ function toolOutput(): { schema: Record<string, unknown>; render: (...params: un
   };
 }
 
+/**
+ * 工程作用域解析器：给定宿主会话对象（可能为 undefined）返回写入用的 tree_type。
+ *
+ * v0.6.6 作用域防漂移：解析实现由插件装配层（src/index.ts）提供，必须完成
+ * 「会话工作区 → 白名单校验 → 降级合法工作区」的完整防线；本文件只负责把
+ * 宿主 execute 上下文里的 session 线索提取出来交给它，绝不自行猜测 scope。
+ */
+export type ScopeResolver = (session?: unknown) => string
+
+/**
+ * 从宿主 execute 的第二参（exec 执行上下文）防御式提取 session 对象。
+ * 宿主上下文结构未在官方契约中冻结，这里按常见形态做鸭子类型探测：
+ * `exec.session` → `exec.context.session`，全部不命中返回 undefined。
+ */
+function extractExecSession(exec: unknown): unknown {
+  if (!exec || typeof exec !== 'object') return undefined
+  const record = exec as Record<string, unknown>
+  const direct = record.session
+  if (direct && typeof direct === 'object') return direct
+  const nested = record.context
+  if (nested && typeof nested === 'object') {
+    const inner = (nested as Record<string, unknown>).session
+    if (inner && typeof inner === 'object') return inner
+  }
+  return undefined
+}
+
 export function registerMemoryTools(
   ctx: Context,
   db: MemoryDB,
-  resolveCurrentScope: () => string,
+  resolveCurrentScope?: ScopeResolver,
 ): () => void {
+  // 第三参缺省（嵌入式最小用法）：回退 global —— 绝不回退 process.cwd()，
+  // 那正是「记忆误存进终端启动目录」的事故根源。
+  const resolveScope: ScopeResolver = resolveCurrentScope ?? (() => 'global')
   if (!ctx.tools?.register) {
     ctx.logger?.warn?.("[tlmemory] ctx.tools 未就绪，跳过工具注册");
     return () => {};
@@ -212,15 +242,20 @@ export function registerMemoryTools(
       ],
     },
     output: toolOutput(),
-    async execute(args: {
-      tree_scope: "global" | "project";
-      path_segments: string[];
-      rule_name: string;
-      content: string;
-      keywords: string[];
-    }) {
+    async execute(
+      args: {
+        tree_scope: "global" | "project";
+        path_segments: string[];
+        rule_name: string;
+        content: string;
+        keywords: string[];
+      },
+      exec?: unknown,
+    ) {
+      // v0.6.6 作用域防漂移：宿主 exec 上下文携带 session 时按会话解析工程作用域，
+      // 多 workspace 宿主下记忆归属不再退化为进程启动目录（ZhuanZ 事故根因）
       const targetTree =
-        args.tree_scope === "global" ? "global" : resolveCurrentScope();
+        args.tree_scope === "global" ? "global" : resolveScope(extractExecSession(exec));
       // P2-12：净化统一复用 db.ts 的 sanitizeSegment（此前内联正则缺连字符
       // `-`，含连字符的规则名经工具链路会被剥成连写词）
       const sanitizedSegments = args.path_segments.map((s) => sanitizeSegment(s));
@@ -266,12 +301,15 @@ export function registerMemoryTools(
       required: ["query"],
     },
     output: toolOutput(),
-    async execute(args: {
-      query: string;
-      scope?: "all" | "global" | "project";
-      limit?: number;
-    }) {
-      const currentScope = resolveCurrentScope();
+    async execute(
+      args: {
+        query: string;
+        scope?: "all" | "global" | "project";
+        limit?: number;
+      },
+      exec?: unknown,
+    ) {
+      const currentScope = resolveScope(extractExecSession(exec));
       let treeType: string | undefined;
       if (args.scope === "global") treeType = "global";
       if (args.scope === "project") treeType = currentScope;

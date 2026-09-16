@@ -190,3 +190,66 @@ describe('tlmemory 工具返回契约（MCP/DSH 规范）', () => {
     }
   })
 })
+
+describe('tlmemory 工具作用域动态感知（v0.6.6 防漂移）', () => {
+  let db: MemoryDB
+  let host: ReturnType<typeof createToolHost>
+  let dispose: () => void
+  /** resolver 收到的 session 线索（按调用次序） */
+  const seenSessions: unknown[] = []
+
+  beforeEach(() => {
+    db = new MemoryDB(':memory:')
+    host = createToolHost()
+    seenSessions.length = 0
+    dispose = registerMemoryTools(host.ctx, db, (session) => {
+      seenSessions.push(session)
+      // 会话携带孤儿工作区线索时返回降级后的合法 scope（由装配层保证）
+      const dir = (session as { workspaceDir?: string } | undefined)?.workspaceDir
+      return dir === 'C:/Users/ZhuanZ' ? 'repo:safefallback' : 'repo:session-resolved'
+    })
+  })
+
+  afterEach(() => {
+    dispose()
+    db.close()
+  })
+
+  it('execute 第二参（exec 上下文）携带 session 时按会话解析作用域', async () => {
+    const tool = host.get('tlmemory_save')
+    await tool.execute(SAVE_ARGS, { session: { workspaceDir: 'D:/Code/my-dsh-plugins' } })
+
+    expect(seenSessions).toEqual([{ workspaceDir: 'D:/Code/my-dsh-plugins' }])
+    // 落库 scope 是会话解析结果，而非进程级固定值
+    expect(db.getNodesByScope('repo:session-resolved').filter((n) => n.is_leaf === 1)).toHaveLength(1)
+  })
+
+  it('嵌套形态 exec.context.session 同样被识别', async () => {
+    const tool = host.get('tlmemory_save')
+    await tool.execute(SAVE_ARGS, { context: { session: { workspaceDir: 'C:/Users/ZhuanZ' } } })
+
+    expect(seenSessions).toEqual([{ workspaceDir: 'C:/Users/ZhuanZ' }])
+    expect(db.getNodesByScope('repo:safefallback').filter((n) => n.is_leaf === 1)).toHaveLength(1)
+  })
+
+  it('不传 exec（历史宿主单参调用）时 session 为 undefined，resolver 仍被调用', async () => {
+    const tool = host.get('tlmemory_save')
+    await tool.execute(SAVE_ARGS)
+
+    expect(seenSessions).toEqual([undefined])
+    expect(db.getNodesByScope('repo:session-resolved').filter((n) => n.is_leaf === 1)).toHaveLength(1)
+  })
+
+  it('tlmemory_query 的 project 范围检索同样按会话解析作用域', async () => {
+    const save = host.get('tlmemory_save')
+    await save.execute(SAVE_ARGS, { session: { workspaceDir: 'D:/Code/my-dsh-plugins' } })
+
+    const query = host.get('tlmemory_query')
+    seenSessions.length = 0
+    const result: any = await query.execute({ query: 'pnpm 依赖构建放行', scope: 'project' }, { session: null })
+
+    // session: null 经 extractExecSession 探测后回退为 undefined（鸭子类型守卫）
+    expect(seenSessions).toEqual([undefined])
+    expect(result.content[0].text).toContain('pnpm')
+  })
+})

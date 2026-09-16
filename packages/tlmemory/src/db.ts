@@ -19,6 +19,41 @@ export interface ProjectMaintenance {
 }
 
 /**
+ * 孤儿工程归并的判定选项（v0.6.6 作用域防漂移）。
+ *
+ * 归并语义：白名单之外的孤儿 scope（如宿主以用户主目录 `C:\Users\ZhuanZ` 启动时
+ * 误建并误存的工程）**不删除、不隐藏，而是把它的全部记忆迁入合法工作区** ——
+ * 这是「第一铁律（有记忆的工程绝不隐藏）」在防漂移场景下的演进形态：
+ * 「有记忆的孤儿绝不孤立存在」。
+ */
+export interface OrphanMergeOptions {
+  /** 豁免：该 scope 即使不在白名单也不迁移（宿主当前合法工程由调用方保证合法后再传） */
+  keepScope?: string | null
+  /**
+   * 兜底迁移目标：孤儿既不在白名单、工程名也无法对齐到任何工作区标题时，
+   * 迁入该 scope（通常取宿主当前合法工作区或白名单首位）。
+   * 传 null 表示无从判定兜底目标 —— 此类孤儿本轮跳过，绝不清空其记忆。
+   */
+  fallbackScope?: string | null
+  /** 白名单判定：返回 true 的 scope 视为合法，原样保留不迁移；null 表示关闭判定 */
+  isScopeAllowed?: ((scope: string) => boolean) | null
+  /** 工作区标题（小写）→ 权威 scope 投影：工程名与标题同名（同名对齐）的孤儿迁入对应权威 scope */
+  titleToScope?: ReadonlyMap<string, string> | null
+}
+
+/** 单个孤儿 scope 的归并结果（供日志与测试断言） */
+export interface OrphanMergeResult {
+  /** 被归并的源 scope（迁移完成后不复存在） */
+  from: string
+  /** 迁移目标 scope */
+  to: string
+  /** 迁移的节点总数（含目录骨架） */
+  movedNodes: number
+  /** 与目标树同位冲突而按「取大合并」收敛的叶子数 */
+  mergedLeaves: number
+}
+
+/**
  * 工程清理的判定选项。
  *
  * `isScopeAllowed` 是宿主工作区白名单的投影：传 null 表示「无从判定」（宿主登记表
@@ -676,6 +711,185 @@ export class MemoryDB {
       }
     })
     return doomed
+  }
+
+  /**
+   * 孤儿工程热归并（v0.6.6 作用域防漂移核心）：把白名单之外 scope 的**全部记忆**
+   * 迁入合法工作区，随后删除源 scope 的节点树与登记项。
+   *
+   * 为什么必须先归并再收紧展示：v0.6.5 的「有记忆的工程绝不隐藏」让误存进
+   * `C:\Users\ZhuanZ` 的记忆作为幽灵工程在看板常驻 —— 铁律本身没错，错在记忆
+   * 的归属。归并是铁律的演进：记忆一条不少，但家要搬回合法工作区。
+   *
+   * 迁移算法（单事务、幂等）：
+   * 1. 候选 = `projects` 登记表 ∪ `nodes` 出现过的 scope（排除 global 与 keepScope）；
+   * 2. 目标解析：scope 在白名单 → 原样保留；否则工程名与某工作区标题同名（同名对齐）
+   *    → 迁入该工作区的权威 scope；再否则 → 迁入 fallbackScope（无从判定则跳过，
+   *    绝不清空记忆）；
+   * 3. 逐节点重建：按物化路径深度升序（父目录先于子节点），parent_id 按新旧 id
+   *    映射重挂；目录已存在即复用；叶子同位冲突按「reinforce_count 取大、is_pinned
+   *    取或、content/keywords 新者胜、pending→confirmed 单向升级、created_at 取早、
+   *    updated_at 取晚」收敛 —— 与 UNIQUE(tree_type, path, name) 约束天然兼容；
+   * 4. 删除源 scope 全部节点（trg_nodes_ad 触发器同步清 FTS5）与登记项；
+   *    目标 scope 的登记项由调用方（index/server）负责补齐可读名。
+   *
+   * FTS5 全程由触发器自动重索引，无需手工重建。
+   */
+  public mergeOrphanScopes(options: OrphanMergeOptions = {}): OrphanMergeResult[] {
+    const keep = String(options.keepScope ?? '').trim()
+    const isScopeAllowed = options.isScopeAllowed ?? null
+    const titleToScope = options.titleToScope ?? null
+    const fallback = String(options.fallbackScope ?? '').trim() || null
+    // 完全无从判定（无白名单、无标题投影、无兜底目标）：关闭归并，绝不凭空搬记忆
+    if (isScopeAllowed === null && (titleToScope === null || titleToScope.size === 0) && fallback === null) {
+      return []
+    }
+
+    const candidates = this.db
+      .prepare(
+        `SELECT scope FROM (
+           SELECT scope FROM projects WHERE scope <> 'global'
+           UNION
+           SELECT DISTINCT tree_type AS scope FROM nodes WHERE tree_type <> 'global'
+         ) WHERE TRIM(scope) <> ''`,
+      )
+      .all() as Array<{ scope: string }>
+    if (candidates.length === 0) return []
+
+    const projectNames = new Map(
+      (this.db.prepare('SELECT scope, name FROM projects').all() as Array<{ scope: string; name: string }>).map(
+        (r) => [r.scope, r.name],
+      ),
+    )
+
+    const plan: Array<{ from: string; to: string }> = []
+    for (const { scope } of candidates) {
+      const clean = String(scope ?? '').trim()
+      if (!clean || clean === 'global' || clean === keep) continue
+      if (isScopeAllowed !== null && isScopeAllowed(clean)) continue
+      // 同名对齐：工程名与某合法工作区标题同名 → 迁入该工作区的权威 scope
+      let target: string | null = null
+      const projectName = projectNames.get(clean)
+      if (projectName && titleToScope !== null) {
+        const aligned = titleToScope.get(String(projectName).trim().toLowerCase())
+        if (aligned && aligned !== clean) target = aligned
+      }
+      if (!target) target = fallback
+      if (!target || target === clean) continue
+      plan.push({ from: clean, to: target })
+    }
+    if (plan.length === 0) return []
+
+    const results: OrphanMergeResult[] = []
+    this.withTransaction(() => {
+      for (const { from, to } of plan) {
+        const merged = this.mergeSingleScope(from, to)
+        if (merged !== null) results.push(merged)
+      }
+    })
+    return results
+  }
+
+  /**
+   * 把单个源 scope 的记忆树整体迁入目标 scope（仅供 mergeOrphanScopes 在事务内调用）。
+   * 源树为空（零节点）时仍删除其登记项，返回 movedNodes=0 的结果。
+   */
+  private mergeSingleScope(from: string, to: string): OrphanMergeResult | null {
+    if (from === to) return null
+    const now = Date.now()
+
+    // 父目录先于子节点：按路径分段深度升序（物化路径以 '/' 计段），同深度按 path 字典序
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM nodes WHERE tree_type = ?
+         ORDER BY (LENGTH(path) - LENGTH(REPLACE(path, '/', ''))) ASC, path ASC, name ASC`,
+      )
+      .all(from) as Array<Record<string, unknown>>
+
+    // 源节点 id → 目标树新 id 的映射（目录复用既有行；根节点 parent 为 null）
+    const idMap = new Map<number, number>()
+    let movedNodes = 0
+    let mergedLeaves = 0
+
+    const insertDir = this.db.prepare(`
+      INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 0, NULL, NULL, 1, 0, 'manual', 'confirmed', ?, ?)
+    `)
+    const findDir = this.db.prepare('SELECT id FROM nodes WHERE tree_type = ? AND path = ? AND name = ?')
+    const mergeLeaf = this.db.prepare(`
+      UPDATE nodes SET
+        is_leaf = 1,
+        reinforce_count = MAX(reinforce_count, @reinforce_count),
+        is_pinned = MAX(is_pinned, @is_pinned),
+        content = CASE WHEN @updated_at >= updated_at THEN @content ELSE content END,
+        keywords = CASE WHEN @updated_at >= updated_at THEN @keywords ELSE keywords END,
+        status = CASE WHEN status = 'pending' AND @status = 'confirmed' THEN 'confirmed' ELSE status END,
+        created_at = MIN(created_at, @created_at),
+        updated_at = MAX(updated_at, @updated_at)
+      WHERE id = @id
+    `)
+    const insertLeaf = this.db.prepare(`
+      INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+
+    for (const row of rows) {
+      const sourceId = Number(row.id)
+      const sourceParentId = row.parent_id == null ? null : Number(row.parent_id)
+      const targetParentId = sourceParentId === null ? null : (idMap.get(sourceParentId) ?? null)
+      const nodePath = String(row.path)
+      const nodeName = String(row.name)
+
+      if (Number(row.is_leaf ?? 0) === 1) {
+        const existing = findDir.get(to, nodePath, nodeName) as { id: number } | undefined
+        if (existing) {
+          // 同位冲突：按取大合并语义收敛进既有叶子（FTS 由 trg_nodes_au 重索引）
+          mergeLeaf.run({
+            reinforce_count: Number(row.reinforce_count ?? 1),
+            is_pinned: Number(row.is_pinned ?? 0),
+            content: row.content ?? null,
+            keywords: row.keywords ?? null,
+            status: String(row.status ?? 'confirmed'),
+            created_at: Number(row.created_at ?? now),
+            updated_at: Number(row.updated_at ?? now),
+            id: Number(existing.id),
+          })
+          idMap.set(sourceId, Number(existing.id))
+          mergedLeaves += 1
+        } else {
+          const inserted = insertLeaf.run(
+            to,
+            targetParentId,
+            nodePath,
+            nodeName,
+            row.content ?? null,
+            row.keywords ?? null,
+            Number(row.reinforce_count ?? 1),
+            Number(row.is_pinned ?? 0),
+            String(row.source ?? 'manual'),
+            String(row.status ?? 'confirmed'),
+            Number(row.created_at ?? now),
+            Number(row.updated_at ?? now),
+          )
+          idMap.set(sourceId, Number(inserted.lastInsertRowid))
+        }
+      } else {
+        // 目录：已存在即复用（不覆盖、不递增强化计数），否则原样重建
+        const existing = findDir.get(to, nodePath, nodeName) as { id: number } | undefined
+        if (existing) {
+          idMap.set(sourceId, Number(existing.id))
+        } else {
+          const inserted = insertDir.run(to, targetParentId, nodePath, nodeName, Number(row.created_at ?? now), now)
+          idMap.set(sourceId, Number(inserted.lastInsertRowid))
+        }
+      }
+      movedNodes += 1
+    }
+
+    // 叶子删除经 trg_nodes_ad 触发器同步清理 FTS5 索引；登记项一并移除
+    this.db.prepare('DELETE FROM nodes WHERE tree_type = ?').run(from)
+    this.db.prepare('DELETE FROM projects WHERE scope = ?').run(from)
+    return { from, to, movedNodes, mergedLeaves }
   }
 
   /**

@@ -204,17 +204,44 @@ export class MemoryServer {
   /**
    * 清单项是否允许呈现给看板。
    *
-   * **第一铁律：有记忆的工程绝不隐藏。** 白名单只用来过滤「零节点的空壳登记」
-   * （如宿主以用户主目录启动产生的临时登记），只要该工程在库里还有节点，
-   * 无论 scope 是否在 workspace.json 名单里都照常展示 —— 上一版在这里对 scope
-   * 做无条件过滤，把 hash 规范化口径变更后的存量工程整条隐藏，配合落库侧的清理
-   * 直接造成「下拉框空掉、记忆归零」，这是本次修复的核心。
+   * v0.6.6 展示口径收紧：**只呈现归属明确的工程** —— scope 命中工作区白名单，
+   * 或工程名与某工作区同名（同名对齐）。名单外孤儿的 `nodeCount > 0` 存活通道
+   * 被移除 —— 那正是 ZhuanZ 幽灵工程逆向存活的机制。
+   *
+   * 与「第一铁律」的关系：记忆绝不被删除，但孤儿 scope 的记忆在读取清单**之前**
+   * 已被 mergeOrphanScopes 整体迁入合法工作区（归并优先），因此收紧不会造成
+   * 「看板下拉框空掉、记忆归零」—— 无处可迁（registry 为 null 无从判定）时
+   * 归并不生效，本过滤器也同步关闭，维持旧行为。
    */
   private isProjectVisible(item: ProjectSummary, registry: WorkspaceRegistry | null): boolean {
     if (registry === null) return true // 无从判定 ⇒ 关闭过滤
     if (registry.has(item.scope)) return true
     if (item.workspaceName !== null && item.workspaceName !== undefined) return true // 同名对齐
-    return item.nodeCount > 0
+    return false // 名单外孤儿：记忆已归并，登记与展示一并收敛
+  }
+
+  /**
+   * 工作区标题（小写）→ 权威 scope 投影：孤儿归并的同名对齐线索。
+   * registry 为 null 时返回 null（无从判定）。
+   */
+  private titleToScopeOf(registry: WorkspaceRegistry | null): ReadonlyMap<string, string> | null {
+    if (registry === null) return null
+    const map = new Map<string, string>()
+    for (const [scope, title] of registry.scopes) {
+      map.set(title.trim().toLowerCase(), scope)
+    }
+    return map
+  }
+
+  /**
+   * 孤儿记忆的兜底降落点：宿主当前工程合法时优先用它，否则取白名单首位。
+   * registry 为 null 时返回 null（无从判定，不迁移）。
+   */
+  private fallbackScopeOf(registry: WorkspaceRegistry | null, current?: CurrentProject): string | null {
+    if (registry === null) return null
+    if (current && registry.has(current.scope)) return current.scope
+    for (const scope of registry.scopes.keys()) return scope
+    return null
   }
 
   public get actualPort(): number {
@@ -457,24 +484,40 @@ export class MemoryServer {
       }
 
       // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）。
-      // 读取前先做一次自愈维护（幂等）：只清掉**零节点的空壳登记**（以用户主目录启动
-      // 产生的临时空登记、宿主已删除的历史目录留下的空记录）与名单内零记忆工程，
-      // 消除同名工程；**有记忆的工程一律不动**（第一铁律，见 isProjectVisible）。
-      // 豁免宿主当前正在打开的合法工作区（方案 B）—— 它零记忆时也保留，作为
-      // 「当前工程就绪、可随时新建沉淀」的锚点。
+      // 读取流程（v0.6.6 归并优先）：
+      //   1. 先把白名单外孤儿 scope 的记忆整体迁入合法工作区（同名对齐优先，
+      //      否则落宿主当前合法工程/白名单首位）—— 记忆一条不少，只是搬回家；
+      //   2. 再做自愈维护（只清**零节点的空壳登记**与名单内零记忆工程，消除同名）；
+      //   3. 最后按收紧后的 isProjectVisible 过滤：名单外孤儿绝不单独展示。
       if (req.method === 'GET' && pathname === '/api/projects') {
         const registry = this.workspaceRegistry()
         const current = this.currentProject
-        // 白名单校验（方案 B 锚点约束）：当前工程本身属于宿主合法工作区、或其工程名
-        // 对齐到某个合法工作区、或**它已经有记忆数据**时，才配得上「零记忆也保留」的
-        // 豁免；否则不呈现为锚点 —— 避免看板冒出「以用户主目录启动」的空壳工程。
-        const currentHasData = current !== undefined && this.db.countNodes(current.scope) > 0
+        // 锚点豁免判定（v0.6.6 收紧）：当前工程必须归属明确（scope 命中白名单或
+        // 工程名对齐工作区）才有资格常驻下拉框；孤儿 current（如以用户主目录启动）
+        // 不再作为锚点 —— 前端按自愈逻辑回退到第一个有记忆的工程。
         const currentAllowed =
           current !== undefined &&
           (registry === null ||
             registry.has(current.scope) ||
-            registry.alignTitleByName(current.name) !== null ||
-            currentHasData)
+            registry.alignTitleByName(current.name) !== null)
+        // 步骤 1：孤儿归并（幂等；registry 不可读时 isScopeAllowed/titleToScope/fallback
+        // 均为 null，mergeOrphanScopes 自动关闭，绝不凭空搬记忆）
+        try {
+          const merges = this.db.mergeOrphanScopes({
+            keepScope: currentAllowed ? current.scope : null,
+            fallbackScope: this.fallbackScopeOf(registry, current),
+            isScopeAllowed: registry === null ? null : (scope: string) => registry.has(scope),
+            titleToScope: this.titleToScopeOf(registry),
+          })
+          for (const merged of merges) {
+            this.logger?.warn?.(
+              `[tlmemory-server] 孤儿工程记忆已归并: ${merged.from} → ${merged.to}（迁移 ${merged.movedNodes} 个节点，合并 ${merged.mergedLeaves} 条同位冲突叶子）`,
+            )
+          }
+        } catch (err) {
+          this.logger?.error?.('[tlmemory-server] 孤儿工程归并异常（跳过本轮）:', err)
+        }
+        // 步骤 2：空壳清理与重名收敛
         const maintenance = this.db.maintainProjects({
           keepScope: currentAllowed ? current.scope : null,
           isScopeAllowed: registry === null ? null : (scope: string) => registry.has(scope),
@@ -498,7 +541,7 @@ export class MemoryServer {
         if (currentAllowed && !this.db.hasProject(current.scope)) {
           this.db.registerProject(current.scope, current.name, current.root)
         }
-        // 清单再过滤一层（纵深防御）：只滤掉「零节点的空壳」，**有记忆的工程绝不隐藏**。
+        // 步骤 3：清单过滤（名单外孤儿已被归并，此处只做纵深防御）
         const list = this.projectList(registry).filter((item) => this.isProjectVisible(item, registry))
         this.sendJson(res, 200, {
           data: list,
