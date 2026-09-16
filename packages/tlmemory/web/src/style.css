@@ -330,6 +330,21 @@ body {
   color: var(--tlm-fg-muted);
 }
 
+/* 所属工作区标识（顶栏工程名旁 / 下拉项内）：低饱和小徽标，不抢工程名的主角位 */
+.tlm-pick-ws {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--tlm-surface);
+  color: var(--tlm-fg-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
 .tlm-pick-chevron {
   display: block;
   flex: none;
@@ -418,6 +433,25 @@ body {
   font-family: var(--tlm-mono);
   font-size: 10px;
   color: var(--tlm-fg-faint);
+}
+
+/* 下拉项里的所属工作区徽标：与顶栏保持同一观感 */
+.tlm-pick-item-ws {
+  flex: none;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--tlm-surface);
+  color: var(--tlm-fg-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.tlm-pick-item.is-current .tlm-pick-item-ws {
+  background: var(--tlm-surface-strong);
 }
 
 .tlm-pick-item-check {

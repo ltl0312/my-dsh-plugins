@@ -14,7 +14,6 @@ import type { Context } from 'cordis'
 import Schema from 'schemastery'
 import path from 'node:path'
 import fs from 'node:fs'
-import crypto from 'node:crypto'
 import { MemoryDB } from './db.js'
 import { MemoryExtractor } from './extractor.js'
 import { MemoryCompactor } from './compactor.js'
@@ -22,6 +21,7 @@ import { registerMemoryTools } from './tools.js'
 import { MemoryRecallEngine } from './recall.js'
 import { MemoryServer } from './server.js'
 import { TurnTracker } from './turn-tracker.js'
+import { loadWorkspaceRegistry, projectScopeOf, type WorkspaceRegistry } from './workspaces.js'
 import type {
   AssistantMessageEventData,
   SearchResult,
@@ -54,6 +54,15 @@ export type {
   TurnTrackItem,
 } from './types.js'
 export type { CurrentProject } from './server.js'
+// 宿主工作区白名单读取层（看板「工程 ↔ 工作区」对齐的唯一事实来源）
+export {
+  loadWorkspaceRegistry,
+  projectScopeOf,
+  resolveDshHome,
+  workspaceRegistryPath,
+} from './workspaces.js'
+export type { WorkspaceRegistry } from './workspaces.js'
+export type { ProjectPruneOptions } from './db.js'
 
 export interface Config {
   dbPath?: string
@@ -90,9 +99,10 @@ export interface ProjectIdentity {
  * 工作区根目录来源优先级：显式入参（DSH 会话传入的 workspaceDir）>
  * 环境变量 DSH_WORKSPACE_DIR > 从 process.cwd() 向上回溯 .git 根目录。
  *
- * scope 仍是「repo 根目录绝对路径」的 sha256 前 12 位，与历史版本逐字节一致 ——
- * 这样既有记忆库的 tree_type 不会因为本次改造发生漂移；额外带出根目录 basename
- * 作为可读工程名，交给 db.registerProject 落库，看板下拉框才能显示
+ * scope 仍是「repo 根目录绝对路径」的 sha256 前 12 位，与历史版本逐字节一致（算法已
+ * 收敛到 workspaces.ts 的 projectScopeOf，与工作区白名单共用同一实现）—— 这样既有
+ * 记忆库的 tree_type 不会因为本次改造发生漂移；额外带出根目录 basename 作为可读工程名，
+ * 交给 db.registerProject 落库，看板下拉框才能显示
  * my-dsh-plugins / TLToolBox 这类人类可读的名字，杜绝裸哈希 repo:<hash> 充当展示名。
  */
 export function resolveProjectIdentity(workspaceDir?: string): ProjectIdentity {
@@ -107,8 +117,8 @@ export function resolveProjectIdentity(workspaceDir?: string): ProjectIdentity {
     }
     currentDir = path.dirname(currentDir)
   }
-  const hash = crypto.createHash('sha256').update(root).digest('hex')
-  return { scope: `repo:${hash.slice(0, 12)}`, name: path.basename(root) || 'unknown-project', root }
+  const hashRoot = path.normalize(root)
+  return { scope: projectScopeOf(hashRoot), name: path.basename(hashRoot) || 'unknown-project', root: hashRoot }
 }
 
 /** 事件载荷判型守卫：事件类型不匹配时返回 null，防御宿主未来新增同类事件名 */
@@ -167,20 +177,41 @@ export function apply(ctx: Context, config: Config): () => void {
   // 在提炼链尾部串行执行，绝不与提炼并行、绝不阻塞会话流
   const compactor = new MemoryCompactor(ctx, db, config.compactionInterval ?? 20)
 
-  // 工程身份：解析当前仓库根目录 → scope 哈希 + 可读工程名，并登记进 projects 登记表。
-  // 登记之后再打开看板，下拉框里出现的才是 my-dsh-plugins 这样的名字而非 repo:<hash>。
+  // 工程身份：解析当前仓库根目录 → scope 哈希 + 可读工程名。
+  // 但**登记前必须先过宿主工作区白名单**：插件可能被宿主以任意工作目录拉起
+  // （例如直接在用户主目录下启动），此时算出的 scope 既不是仓库、也不属于任何已
+  // 登记工作区；把它登记进去只会在看板里凭空多出一个幽灵工程。白名单不可读
+  // （registry === null）时视为「无从判定」，退回旧行为以保证记忆不丢。
   const project = resolveProjectIdentity()
   const projectScope = project.scope
-  db.registerProject(project.scope, project.name, project.root)
+  const workspaceRegistry: WorkspaceRegistry | null = loadWorkspaceRegistry()
+  /** 宿主工作区白名单判定：登记表不可读时全部放行（宁可多显示，也不误删用户记忆） */
+  const isAllowedWorkspaceScope = (scope: string): boolean =>
+    workspaceRegistry === null || workspaceRegistry.has(scope)
+  /** 当前工程是否属于宿主合法工作区 —— 决定它能否登记、能否当看板锚点 */
+  const projectIsAllowed = isAllowedWorkspaceScope(projectScope)
 
-  // 工程清单自愈：清掉历史遗留的「零记忆工程」，并把重名工程收敛为唯一名；
-  // keepScope 豁免当前活跃工程 —— 它零记忆也保留，作为「当前工程就绪」的看板锚点。
-  // 每次启动都跑一次，看板不必等到打开才被清理。
+  if (projectIsAllowed) {
+    // 登记之后再打开看板，下拉框里出现的才是 my-dsh-plugins 这样的名字而非 repo:<hash>。
+    db.registerProject(project.scope, project.name, project.root)
+  } else {
+    ctx.logger?.warn?.(
+      `[tlmemory] 当前目录不属于宿主已登记工作区，跳过工程登记（记忆看板不会显示该工程）: ${project.root}`,
+    )
+  }
+
+  // 工程清单自愈：清掉历史遗留的「零记忆工程」与**不属于宿主合法工作区的孤儿工程**，
+  // 并把重名工程收敛为唯一名；keepScope 只豁免「当前正在打开的合法工作区」——
+  // 它零记忆也保留，作为「当前工程就绪」的看板锚点。每次启动都跑一次，
+  // 看板不必等到打开才被清理。
   try {
-    const maintenance = db.maintainProjects({ keepScope: projectScope })
+    const maintenance = db.maintainProjects({
+      keepScope: projectIsAllowed ? projectScope : null,
+      isScopeAllowed: workspaceRegistry === null ? null : isAllowedWorkspaceScope,
+    })
     if (maintenance.purgedScopes.length > 0) {
       ctx.logger?.info?.(
-        `[tlmemory] 自动清理 ${maintenance.purgedScopes.length} 个零记忆工程: ${maintenance.purgedScopes.join(', ')}`,
+        `[tlmemory] 自动清理 ${maintenance.purgedScopes.length} 个工程（零记忆或不属于宿主合法工作区）: ${maintenance.purgedScopes.join(', ')}`,
       )
     }
     for (const change of maintenance.renamed) {
@@ -207,8 +238,9 @@ export function apply(ctx: Context, config: Config): () => void {
     const identity = resolveProjectIdentity(workspaceDir)
     sessionIdentityCache.set(session, identity)
     identityByScope.set(identity.scope, identity)
-    // 每个新解析出的工程身份都登记（保留用户手工命名），保证看板下拉框可见
-    if (!registeredScopes.has(identity.scope)) {
+    // 每个新解析出的**合法工作区**工程身份都登记（保留用户手工命名），保证看板下拉框可见；
+    // 工作区之外的目录不登记 —— 它只会在看板里制造幽灵工程，随后被维护周期清掉。
+    if (!registeredScopes.has(identity.scope) && isAllowedWorkspaceScope(identity.scope)) {
       registeredScopes.add(identity.scope)
       db.registerProject(identity.scope, identity.name, identity.root)
     }
@@ -220,8 +252,10 @@ export function apply(ctx: Context, config: Config): () => void {
    * 为什么必须重复登记：零记忆工程会被看板读取/启动时的维护周期清理（合规要求），
    * 而登记项是「可读工程名」的唯一来源 —— 少了它，新落库的记忆会让看板
    * 以裸 scope 哈希显示整个工程。每次沉淀前补登记，成本可忽略（沉淀本身要调 LLM）。
+   * 白名单外的工程不补登记（它不属于宿主合法工作区，本就不该出现在看板里）。
    */
   const ensureProjectRegistered = (scope: string): void => {
+    if (!isAllowedWorkspaceScope(scope)) return
     const identity = identityByScope.get(scope)
     if (!identity) return
     db.registerProject(identity.scope, identity.name, identity.root)
@@ -284,7 +318,16 @@ export function apply(ctx: Context, config: Config): () => void {
   // 端口被前序 tlmemory 实例占用时健康探测确认同名进程后自动复用；
   // 被无关进程占用时自动顺延端口；彻底失败时打印 EADDRINUSE 解决指引。
   // 旧拓扑（serverEnabled:false 的多宿主手工分工）由上述自愈机制自动取代。
-  const server = new MemoryServer(db, config.serverPort ?? 4890, ctx.logger, project)
+  //
+  // 宿主当前工程仅在**属于合法工作区**时上报：非合法工作区（例如以用户主目录启动）
+  // 绝不能作为看板锚点呈现；工作区白名单读取器一并注入，服务端每次读清单都会校验。
+  const server = new MemoryServer(
+    db,
+    config.serverPort ?? 4890,
+    ctx.logger,
+    projectIsAllowed ? project : undefined,
+    () => loadWorkspaceRegistry(),
+  )
   void server.start()
 
   // 会话事件流监听（官方契约：'session/event'(session, event)）。

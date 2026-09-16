@@ -80,7 +80,8 @@ describe('dsh-plugin-tlmemory 服务端安全回归（P0-1 / P0-2）', () => {
   beforeEach(async () => {
     db = new MemoryDB(':memory:')
     db.upsertLeaf('global', ['工程化'], 'pnpm放行', 'pnpm 11 需要配置原生依赖构建放行', ['pnpm'])
-    server = new MemoryServer(db, 0)
+    // 第 5 参 null：关闭宿主工作区白名单过滤（本用例 scope 为合成种子数据）
+    server = new MemoryServer(db, 0, undefined, undefined, null)
     server.start()
     port = await waitForPort(server)
   })

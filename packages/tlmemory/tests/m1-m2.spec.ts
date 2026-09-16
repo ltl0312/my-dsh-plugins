@@ -207,7 +207,8 @@ describe('M1：审核端点 PATCH /api/nodes/:id/status', () => {
   beforeEach(async () => {
     db = new MemoryDB(':memory:')
     db.upsertLeaf('repo:p2t', ['工程化'], '待审条目', '待审核的断言内容', ['pnpm'], { status: 'pending' })
-    server = new MemoryServer(db, 0)
+    // 第 5 参 null：关闭宿主工作区白名单过滤（本用例 scope 为合成种子数据）
+    server = new MemoryServer(db, 0, undefined, undefined, null)
     server.start()
     const port = await waitForPort(server)
     base = `http://127.0.0.1:${port}`

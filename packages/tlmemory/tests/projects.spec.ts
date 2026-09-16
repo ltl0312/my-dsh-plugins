@@ -57,7 +57,9 @@ describe('dsh-plugin-tlmemory 多项目记忆选择', () => {
     )
     db.upsertLeaf('repo:bbbbbbbbbbbb', ['架构', '审计'], 'P0修复', '审计路线图 P0 阶段集中修复阻断级问题', ['audit'])
 
-    server = new MemoryServer(db, 0, undefined, CURRENT)
+    // 第 5 参传 null：关闭宿主工作区白名单过滤 —— 本用例的 scope 是合成种子数据，
+    // 不该受开发机上真实 DSH 工作区登记表影响（白名单专项断言见 workspace-whitelist.spec.ts）
+    server = new MemoryServer(db, 0, undefined, CURRENT, null)
     server.start()
     port = await waitForPort(server)
     base = `http://127.0.0.1:${port}`
@@ -154,7 +156,7 @@ describe('dsh-plugin-tlmemory 多项目记忆选择', () => {
     const db2 = new MemoryDB(':memory:')
     const current2 = { scope: 'repo:cccccccccccc', name: 'deskcraft', root: 'D:/Code/deskcraft' }
     db2.registerProject(current2.scope, current2.name, current2.root)
-    const extra = new MemoryServer(db2, 0, undefined, current2)
+    const extra = new MemoryServer(db2, 0, undefined, current2, null)
     extras.push({ server: extra, db: db2 })
     await extra.start()
     const extraBase = `http://127.0.0.1:${await waitForPort(extra)}`
@@ -286,7 +288,7 @@ describe('dsh-plugin-tlmemory 多项目记忆选择', () => {
     const db2 = new MemoryDB(':memory:')
     const current2 = { scope: 'repo:cccccccccccc', name: 'deskcraft', root: 'D:/Code/deskcraft' }
     db2.registerProject(current2.scope, current2.name, current2.root)
-    const extra = new MemoryServer(db2, 0, undefined, current2)
+    const extra = new MemoryServer(db2, 0, undefined, current2, null)
     extras.push({ server: extra, db: db2 })
     await extra.start()
     const extraBase = `http://127.0.0.1:${await waitForPort(extra)}`
@@ -355,7 +357,7 @@ describe('dsh-plugin-tlmemory 多项目记忆选择', () => {
 
     // 当前工程零记忆但被豁免保留，basename 与既有工程同名
     const current2 = { scope: 'repo:999999999999', name: 'TLToolBox', root: 'E:/another/TLToolBox' }
-    const extra = new MemoryServer(db2, 0, undefined, current2)
+    const extra = new MemoryServer(db2, 0, undefined, current2, null)
     extras.push({ server: extra, db: db2 })
     await extra.start()
     const extraBase = `http://127.0.0.1:${await waitForPort(extra)}`

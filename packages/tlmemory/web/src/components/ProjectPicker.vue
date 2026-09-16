@@ -1,9 +1,9 @@
 <!-- packages/tlmemory/web/src/components/ProjectPicker.vue
      工程选择器：真正的下拉选择框（按钮 + 弹出清单）。
-     * 按钮常显当前工程名称与记忆数（如 my-dsh-plugins (4)）；
-     * 下拉列出所有可用工程（含各自的记忆数），点击即切换整棵树；
-       服务端已在清单读取时清理「零记忆工程」并收敛同名工程，所以这里只会出现
-       有记忆的工程 + 宿主当前工程，且名字两两不同；
+     * 按钮常显当前工程名称、所属工作区与记忆数（如 my-dsh-plugins [my-dsh-plugins] (4)）；
+     * 下拉列出所有可用工程（格式为「工程名 [工作区名称] (N条)」），点击即切换整棵树；
+       清单由服务端按**宿主工作区白名单**净化（孤儿工程与零记忆工程都已被清理、
+       同名工程已收敛），所以这里只会出现合法工作区对应的工程 + 宿主当前工程；
      * 下拉框右侧集成「重命名」图标按钮（仅工程记忆态展示，全局偏好不出现），
        点击弹出简洁输入框，确认后 PATCH /api/projects 并即时更新下拉与树根名；
        撞名时服务端回 409 并带上占用者名字，弹层原样展示该理由（工程名必须唯一）；
@@ -150,6 +150,13 @@ onBeforeUnmount(() => {
               : (store.currentProject?.name ?? store.scopeLabel)
         }}
       </span>
+      <!-- 所属工作区标识：紧贴顶栏工程名，说明这台工程归属哪个 DSH 工作区 -->
+      <span
+        v-if="!store.projectsLoading && store.currentWorkspaceName"
+        class="tlm-pick-ws"
+        :title="`所属工作区：${store.currentWorkspaceName}`"
+        >[{{ store.currentWorkspaceName }}]</span
+      >
       <span v-if="!store.projectsLoading && store.currentProject !== null" class="tlm-pick-count">
         ({{ store.currentProject.leafCount }})
       </span>
@@ -191,7 +198,11 @@ onBeforeUnmount(() => {
           :class="{ 'is-current': project.scope === store.currentProjectScope }"
           role="option"
           :aria-selected="project.scope === store.currentProjectScope && store.currentTree === 'project'"
-          :title="`${project.name} · ${project.leafCount} 条记忆`"
+          :title="
+            project.workspaceName
+              ? `${project.name} [工作区 ${project.workspaceName}] · ${project.leafCount} 条记忆`
+              : `${project.name} · ${project.leafCount} 条记忆`
+          "
           @click="choose(project.scope)"
         >
           <svg
@@ -208,6 +219,8 @@ onBeforeUnmount(() => {
             <path d="M3.5 8.5 6.5 11.5 12.5 4.5" />
           </svg>
           <span class="tlm-pick-item-name">{{ project.name }}</span>
+          <!-- 所属工作区：下拉项格式为「工程名 [工作区名称] (N条)」 -->
+          <span v-if="project.workspaceName" class="tlm-pick-item-ws">[{{ project.workspaceName }}]</span>
           <span class="tlm-pick-item-count">({{ project.leafCount }})</span>
         </button>
       </div>

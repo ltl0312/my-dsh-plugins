@@ -167,7 +167,8 @@ describe('server 层：新增 / 编辑 / 重命名 API', () => {
     db = new MemoryDB(':memory:')
     db.registerProject('repo:aaaaaaaaaaaa', 'my-dsh-plugins', 'D:/Code/my-dsh-plugins')
     db.upsertLeaf('repo:aaaaaaaaaaaa', ['工程化', '包管理'], 'pnpm放行', 'pnpm 11 需要配置原生依赖构建放行键', ['pnpm'])
-    server = new MemoryServer(db, 0, undefined, CURRENT)
+    // 第 5 参 null：关闭宿主工作区白名单过滤（本用例 scope 为合成种子数据）
+    server = new MemoryServer(db, 0, undefined, CURRENT, null)
     server.start()
     port = await waitForPort(server)
     base = `http://127.0.0.1:${port}`

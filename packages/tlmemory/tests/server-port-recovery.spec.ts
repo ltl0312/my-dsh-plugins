@@ -114,7 +114,7 @@ describe('端口冲突自愈（零配置自启）', () => {
       cleanup.push(() => closeServer(squatter))
 
       const db = new MemoryDB(':memory:')
-      const server = new MemoryServer(db, occupiedPort)
+      const server = new MemoryServer(db, occupiedPort, undefined, undefined, null)
       cleanup.push(() => {
         server.stop()
         db.close()
@@ -137,7 +137,7 @@ describe('端口冲突自愈（零配置自启）', () => {
 
   it('前序 tlmemory 实例占用端口时健康探测命中并复用（不重复绑定）', async () => {
     const db = new MemoryDB(':memory:')
-    const first = new MemoryServer(db, 0)
+    const first = new MemoryServer(db, 0, undefined, undefined, null)
     cleanup.push(() => {
       first.stop()
       db.close()
@@ -146,7 +146,7 @@ describe('端口冲突自愈（零配置自启）', () => {
     const firstPort = await waitForPort(first)
 
     const db2 = new MemoryDB(':memory:')
-    const second = new MemoryServer(db2, firstPort)
+    const second = new MemoryServer(db2, firstPort, undefined, undefined, null)
     cleanup.push(() => {
       second.stop()
       db2.close()

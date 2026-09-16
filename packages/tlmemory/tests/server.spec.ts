@@ -36,7 +36,8 @@ describe('dsh-plugin-tlmemory 嵌入式 HTTP 服务', () => {
       ['pnpm', 'native', '构建放行'],
     )
     db.upsertLeaf('repo:abc', ['踩坑'], '本地样例', 'repo 作用域样例内容', ['local'])
-    server = new MemoryServer(db, 0)
+    // 第 5 参 null：关闭宿主工作区白名单过滤（本用例 scope 为合成种子数据）
+    server = new MemoryServer(db, 0, undefined, undefined, null)
     server.start()
     port = await waitForPort(server)
   })

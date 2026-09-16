@@ -12,10 +12,23 @@ import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './
 
 /** 工程清单自愈维护的改动明细（供日志与测试断言） */
 export interface ProjectMaintenance {
-  /** 因「没有任何记忆文件」而被清理掉的工程 scope */
+  /** 被清理掉的工程 scope（含「零记忆工程」与「不属于宿主合法工作区的孤儿工程」） */
   purgedScopes: string[]
   /** 因与其他工程重名而被改名的工程 */
   renamed: Array<{ scope: string; from: string; to: string }>
+}
+
+/**
+ * 工程清理的判定选项。
+ *
+ * `isScopeAllowed` 是宿主工作区白名单的投影：传 null 表示「无从判定」（宿主登记表
+ * 不可读）→ 关闭白名单过滤，只按「零记忆」清理；传入判定函数时，**不在名单里的
+ * 作用域一律无条件清理**（哪怕它有记忆、哪怕它正是宿主当前工程）—— 这正是
+ * 「以用户主目录 `/home` 启动产生的临时工程」「宿主已删除的历史废弃目录」的清除路径。
+ */
+export interface ProjectPruneOptions {
+  keepScope?: string | null
+  isScopeAllowed?: ((scope: string) => boolean) | null
 }
 
 /** 由 scope 导出的稳定短标识：同名工程去重后缀（repo:<hash> 取 hash 前 6 位） */
@@ -570,40 +583,65 @@ export class MemoryDB {
    *    只有空目录、没有任何记忆的工程；
    * 2. 清理是**连带**的：既然该工程已无记忆，其空目录骨架与登记项一并删除，
    *    否则 listProjects 仍会从 nodes 里把它们聚合回清单（删了等于没删）；
-   * 3. **豁免 keepScope（宿主当前活跃工程）**：它是「当前工程就绪、可随时新建沉淀」
-   *    的心智锚点 —— 看板需要它常驻下拉框（标记为 0 条）以便随时切入空树后新建，
-   *    因此零记忆也不清理（见 server 的 GET /api/projects 展示保证）；
+   * 3. **豁免 keepScope（宿主当前正在打开的合法工作区）**：它是「当前工程就绪、可随时
+   *    新建沉淀」的心智锚点 —— 看板需要它常驻下拉框（标记为 0 条）以便随时切入空树后
+   *    新建，因此零记忆也不清理（见 server 的 GET /api/projects 展示保证）；
    * 4. 除当前工程外的历史遗留（路径漂移产生的无用 scope、只登记过没写过的目录等）
-   *    依然彻底清理。
+   *    依然彻底清理；
+   * 5. **宿主工作区白名单**（isScopeAllowed，见 ProjectPruneOptions）：名单外的作用域
+   *    一律无条件清理（含其记忆节点与登记项），且**不因它是宿主当前工程而豁免** ——
+   *    「当前工程」这块免死金牌只发给合法工作区。
    *
    * 候选集取「登记表 scope ∪ nodes 里出现过的 scope」的并集，覆盖
    * 「只登记过没写过」与「只写过没登记过（历史库）」两种遗留形态。
    * 返回被清理的 scope 列表；幂等，可安全重复调用。
    */
-  public pruneEmptyProjects(options: { keepScope?: string | null } = {}): string[] {
+  public pruneEmptyProjects(options: ProjectPruneOptions = {}): string[] {
     const keep = String(options.keepScope ?? '').trim()
-    const doomed = this.db
+    const isScopeAllowed = options.isScopeAllowed ?? null
+    // 候选集：登记表 ∪ 节点表（排除 global —— 全局偏好树永远不属于任何工作区）
+    const candidates = this.db
       .prepare(`
         SELECT scope FROM (
           SELECT scope FROM projects WHERE scope <> 'global'
           UNION
           SELECT DISTINCT tree_type AS scope FROM nodes WHERE tree_type <> 'global'
         )
-        WHERE scope <> COALESCE(?, '')
-          AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.tree_type = scope AND n.is_leaf = 1)
       `)
-      .all(keep) as Array<{ scope: string }>
+      .all() as Array<{ scope: string }>
+    if (candidates.length === 0) return []
+    // 有真实记忆（叶子节点）的作用域：白名单外者照样清理，白名单内者除非零记忆否则保留
+    const withLeaf = new Set(
+      (this.db.prepare('SELECT DISTINCT tree_type AS scope FROM nodes WHERE is_leaf = 1').all() as Array<{
+        scope: string
+      }>).map((row) => row.scope),
+    )
+
+    const doomed: string[] = []
+    for (const row of candidates) {
+      const scope = String(row.scope ?? '').trim()
+      if (!scope || scope === 'global') continue
+      // 白名单优先：不在宿主合法工作区列表内 → 无条件剔除（含当前工程）
+      if (isScopeAllowed !== null && !isScopeAllowed(scope)) {
+        doomed.push(scope)
+        continue
+      }
+      // 名单内：豁免宿主当前活跃工程（零记忆也留作看板锚点），其余零记忆者清理
+      if (keep && scope === keep) continue
+      if (withLeaf.has(scope)) continue
+      doomed.push(scope)
+    }
     if (doomed.length === 0) return []
     // 叶子删除经 trg_nodes_ad 触发器同步清理 FTS5 索引，不留孤立句柄
     const removeNodes = this.db.prepare('DELETE FROM nodes WHERE tree_type = ?')
     const removeRegistry = this.db.prepare('DELETE FROM projects WHERE scope = ?')
     this.withTransaction(() => {
-      for (const row of doomed) {
-        removeNodes.run(row.scope)
-        removeRegistry.run(row.scope)
+      for (const scope of doomed) {
+        removeNodes.run(scope)
+        removeRegistry.run(scope)
       }
     })
-    return doomed.map((row) => row.scope)
+    return doomed
   }
 
   /**
@@ -675,11 +713,11 @@ export class MemoryDB {
   }
 
   /**
-   * 工程清单自愈维护：先清理零记忆工程（豁免当前活跃工程），再消除同名工程。
-   * 幂等，可在插件启动与每次清单读取前安全重复调用。
-   * keepScope 传宿主当前工程 scope —— 它是看板的「当前工程就绪」锚点，零记忆也保留。
+   * 工程清单自愈维护：先清理零记忆工程与白名单外的孤儿工程（豁免宿主当前活跃的**合法**
+   * 工作区），再消除同名工程。幂等，可在插件启动与每次清单读取前安全重复调用。
+   * keepScope 传宿主当前工程 scope；isScopeAllowed 传宿主工作区白名单判定。
    */
-  public maintainProjects(options: { keepScope?: string | null } = {}): ProjectMaintenance {
+  public maintainProjects(options: ProjectPruneOptions = {}): ProjectMaintenance {
     return {
       purgedScopes: this.pruneEmptyProjects(options),
       renamed: this.normalizeDuplicateNames(),
@@ -690,10 +728,14 @@ export class MemoryDB {
    * 列出所有工程作用域：以「库里真实存在的记忆记录」为准（按 tree_type 去重聚合），
    * 并补上仅在登记表中存在、尚无记忆的已登记工程（含宿主当前工程）。
    *
+   * `workspaceNames` 是宿主工作区白名单的「scope → 工作区标题」投影，用于给每条
+   * 清单项带上 `workspaceName`，让看板能显示「工程名 [工作区名] (N条)」；传 null
+   * 表示无从判定（宿主登记表不可读），此时 workspaceName 一律为 null。
+   *
    * 注意：本方法只做聚合、不改数据。看板 GET /api/projects 会先调用
-   * maintainProjects() 清理零记忆工程与同名工程，再调用本方法取净化后的清单。
+   * maintainProjects() 清理白名单外与零记忆工程、收敛同名工程，再调用本方法取净化清单。
    */
-  public listProjects(): ProjectSummary[] {
+  public listProjects(workspaceNames: ReadonlyMap<string, string> | null = null): ProjectSummary[] {
     const rows = this.db
       .prepare(`
         SELECT tree_type AS scope,
@@ -720,6 +762,7 @@ export class MemoryDB {
         scope: row.scope,
         name: meta?.name || row.scope,
         root: meta?.root ?? null,
+        workspaceName: workspaceNames?.get(row.scope) ?? null,
         nodeCount: Number(row.node_count ?? 0),
         leafCount: Number(row.leaf_count ?? 0),
         updatedAt: Number(row.updated_at ?? 0),
@@ -731,6 +774,7 @@ export class MemoryDB {
         scope: meta.scope,
         name: meta.name || meta.scope,
         root: meta.root ?? null,
+        workspaceName: workspaceNames?.get(meta.scope) ?? null,
         nodeCount: 0,
         leafCount: 0,
         updatedAt: 0,

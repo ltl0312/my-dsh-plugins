@@ -34,6 +34,12 @@ export interface ProjectDto {
   scope: string
   name: string
   root: string | null
+  /**
+   * 所属**宿主工作区**名称（服务端按 DSH 工作区登记表附带）。
+   * 与 `name` 不同：`name` 可被用户手工重命名，本字段始终是宿主侧的工作区标题，
+   * 用于回答「这个工程到底属于哪个工作区」；无从判定（宿主登记表不可读）时为 null。
+   */
+  workspaceName?: string | null
   nodeCount: number
   leafCount: number
   updatedAt: number
@@ -82,7 +88,7 @@ export const useMemoryStore = defineStore('memory', () => {
       let entry = map.get(scope)
       if (entry === undefined) {
         const name = scope.startsWith('repo:') ? `工程 ${scope.slice(5, 13)}` : scope
-        entry = { scope, name, root: null, nodeCount: 0, leafCount: 0, updatedAt: 0 }
+        entry = { scope, name, root: null, workspaceName: null, nodeCount: 0, leafCount: 0, updatedAt: 0 }
         map.set(scope, entry)
       }
       entry.nodeCount += 1
@@ -95,6 +101,12 @@ export const useMemoryStore = defineStore('memory', () => {
   const currentProject = computed<ProjectDto | null>(
     () => projectOptions.value.find((item) => item.scope === currentProjectScope.value) ?? null,
   )
+
+  /**
+   * 当前工程所属的宿主工作区名称；未选择工程 / 不属于任何已登记工作区时为 ''。
+   * 顶栏工程名旁据此展示工作区标识，让「这个工程属于哪个工作区」一目了然。
+   */
+  const currentWorkspaceName = computed<string>(() => currentProject.value?.workspaceName ?? '')
 
   /**
    * 作用域查询串：/api/nodes 与 /api/search 共用。
@@ -540,6 +552,7 @@ export const useMemoryStore = defineStore('memory', () => {
     wsConnected,
     selectedNode,
     currentProject,
+    currentWorkspaceName,
     scopeQuery,
     scopeLabel,
     scopedNodes,

@@ -15,6 +15,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { MemoryDB } from './db.js'
+import type { ProjectSummary } from './types.js'
+import { loadWorkspaceRegistry, type WorkspaceRegistry } from './workspaces.js'
 
 /** 宿主当前所在工程的身份（由装配层注入，用于 /api/projects 标记默认选中项） */
 export interface CurrentProject {
@@ -134,8 +136,38 @@ export class MemoryServer {
       error: (...args: unknown[]) => void
     },
     private currentProject?: CurrentProject,
+    /**
+     * 宿主合法工作区白名单的来源（默认读 DSH 的 `$DSH_HOME/storages/workspace.json`）。
+     *
+     * 传入 null 表示**关闭白名单过滤**：工程清单只按「零记忆」清理，不按工作区归属。
+     * 该形态仅供不依赖 DSH 宿主环境的嵌入式用例（单测直接构造本服务，用合成 scope
+     * 验证登记/命名契约）使用；插件装配（src/index.ts）永远传入真实读取器，
+     * 因此线上所有清单读取都经过工作区白名单校验。
+     */
+    private workspaceRegistryProvider: (() => WorkspaceRegistry | null) | null = loadWorkspaceRegistry,
   ) {
     this.distPath = resolveWebDist()
+  }
+
+  /**
+   * 取宿主合法工作区白名单；读取器抛错或不可用一律视为「无从判定」（返回 null），
+   * 调用方据此关闭过滤 —— 绝不因读取失败把用户的工程当孤儿清空。
+   */
+  private workspaceRegistry(): WorkspaceRegistry | null {
+    try {
+      return this.workspaceRegistryProvider?.() ?? null
+    } catch (err) {
+      this.logger?.warn?.('[tlmemory-server] 读取宿主工作区登记表失败，本轮跳过白名单过滤:', err)
+      return null
+    }
+  }
+
+  /**
+   * 工程清单（已按宿主工作区白名单附带 workspaceName）。
+   * 所有返回清单的端点统一走这里，避免某一条响应缺字段。
+   */
+  private projectList(registry: WorkspaceRegistry | null = this.workspaceRegistry()): ProjectSummary[] {
+    return this.db.listProjects(registry?.scopes ?? null)
   }
 
   public get actualPort(): number {
@@ -355,14 +387,24 @@ export class MemoryServer {
 
       // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）。
       // 读取前先做一次自愈维护（幂等）：清掉「没有任何记忆文件」的历史遗留工程、
-      // 消除同名工程；**豁免宿主当前活跃工程**（方案 B）—— 它零记忆时也保留，
-      // 作为「当前工程就绪、可随时新建沉淀」的心智锚点常驻下拉框。
+      // 清掉**不属于宿主合法工作区**的孤儿工程（以用户主目录启动而临时产生的工程、
+      // 宿主已删除的历史目录）、消除同名工程；**豁免宿主当前正在打开的合法工作区**
+      // （方案 B）—— 它零记忆时也保留，作为「当前工程就绪、可随时新建沉淀」的锚点。
       if (req.method === 'GET' && pathname === '/api/projects') {
+        const registry = this.workspaceRegistry()
         const current = this.currentProject
-        const maintenance = this.db.maintainProjects({ keepScope: current?.scope ?? null })
+        // 白名单校验（方案 B 锚点约束）：当前工程**只有本身属于宿主合法工作区**时
+        // 才配得上「零记忆也保留」的豁免；非合法工作区即使被当作当前工程传入，
+        // 也绝不呈现为锚点 —— 否则看板又会冒出一个本不该存在的工程。
+        const currentAllowed =
+          current !== undefined && (registry === null || registry.has(current.scope))
+        const maintenance = this.db.maintainProjects({
+          keepScope: currentAllowed ? current.scope : null,
+          isScopeAllowed: registry === null ? null : (scope: string) => registry.has(scope),
+        })
         if (maintenance.purgedScopes.length > 0) {
           this.logger?.info?.(
-            `[tlmemory-server] 自动清理 ${maintenance.purgedScopes.length} 个零记忆工程: ${maintenance.purgedScopes.join(', ')}`,
+            `[tlmemory-server] 自动清理 ${maintenance.purgedScopes.length} 个工程（零记忆或不属于宿主合法工作区）: ${maintenance.purgedScopes.join(', ')}`,
           )
         }
         for (const change of maintenance.renamed) {
@@ -370,18 +412,24 @@ export class MemoryServer {
             `[tlmemory-server] 工程重名自愈: ${change.scope} 「${change.from}」→「${change.to}」`,
           )
         }
-        // 展示保证（方案 B）：当前活跃工程必须常驻清单（记忆数标记为 0），
+        // 展示保证（方案 B）：当前活跃的合法工作区必须常驻清单（记忆数标记为 0），
         // 看板才能显示 `xxx (0)`、允许选中并切入空树后新建，形成「当前工程就绪」的锚点。
         // 正常路径它的登记项已被 keepScope 豁免保留；这里用幂等登记再兜一层 ——
         // 多宿主并存时另一宿主的维护周期不知道我们的活跃 scope，仍可能清掉它，
         // 而「scope 有记忆却没有登记项」的历史形态也会让工程名退化成裸哈希。
-        if (current && !this.db.hasProject(current.scope)) {
+        if (currentAllowed && !this.db.hasProject(current.scope)) {
           this.db.registerProject(current.scope, current.name, current.root)
         }
+        // 清单再按白名单过滤一层（纵深防御）：即便本轮维护因故没落库清理，
+        // 也绝不把非合法工作区暴露给下拉框。
+        const list =
+          registry === null
+            ? this.projectList(registry)
+            : this.projectList(registry).filter((item) => registry.has(item.scope))
         this.sendJson(res, 200, {
-          data: this.db.listProjects(),
-          current: current?.scope ?? null,
-          currentName: current?.name ?? null,
+          data: list,
+          current: currentAllowed ? current.scope : null,
+          currentName: currentAllowed ? current.name : null,
         })
         return
       }
@@ -406,7 +454,7 @@ export class MemoryServer {
           this.sendJson(res, 409, { error: '工程重命名失败：名称不可用' })
           return
         }
-        this.sendJson(res, 200, { success: true, data: this.db.listProjects() })
+        this.sendJson(res, 200, { success: true, data: this.projectList() })
         return
       }
 
@@ -513,7 +561,7 @@ export class MemoryServer {
           return
         }
         this.notifyTreeChanged(resolved)
-        this.sendJson(res, 200, { success, data: this.db.listProjects() })
+        this.sendJson(res, 200, { success, data: this.projectList() })
         return
       }
 

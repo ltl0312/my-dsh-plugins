@@ -20,6 +20,14 @@ export interface ProjectSummary {
   name: string
   /** 工程根目录绝对路径；未登记过则为 null */
   root: string | null
+  /**
+   * 所属**宿主工作区**名称（来自 DSH 工作区登记表 `storages/workspace.json`）。
+   *
+   * 与 `name` 的区别：`name` 是可被用户手工重命名的工程显示名，`workspaceName` 是
+   * 宿主侧的工作区标题 —— 前者改过之后，后者仍能说明「这个工程到底属于哪个工作区」。
+   * 工程不属于任何已登记工作区（或宿主登记表不可读）时为 null。
+   */
+  workspaceName: string | null
   /** 该作用域下的全部节点数（含分类目录） */
   nodeCount: number
   /** 该作用域下的记忆叶子数（真正可阅读的条目） */

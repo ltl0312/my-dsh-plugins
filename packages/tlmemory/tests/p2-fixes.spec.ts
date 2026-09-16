@@ -36,7 +36,8 @@ describe('P2-1 / P2-8 / P2-9：服务端契约', () => {
   beforeEach(async () => {
     db = new MemoryDB(':memory:')
     db.upsertLeaf('repo:p2test', ['工程化'], 'pnpm放行', 'pnpm 11 需要配置原生依赖构建放行键', ['pnpm'])
-    server = new MemoryServer(db, 0)
+    // 第 5 参 null：关闭宿主工作区白名单过滤（本用例 scope 为合成种子数据）
+    server = new MemoryServer(db, 0, undefined, undefined, null)
     server.start()
     const port = await waitForPort(server)
     base = `http://127.0.0.1:${port}`
