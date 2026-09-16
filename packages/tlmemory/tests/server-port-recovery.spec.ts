@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import http from 'node:http'
 import { MemoryDB } from '../src/db.js'
-import { MemoryServer } from '../src/server.js'
+import { MemoryServer, isFetchForbiddenPort } from '../src/server.js'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -161,5 +161,48 @@ describe('端口冲突自愈（零配置自启）', () => {
     const res = await fetch(`http://127.0.0.1:${firstPort}/api/health`)
     const body = (await res.json()) as { ok: boolean; service: string }
     expect(body).toMatchObject({ ok: true, service: 'tlmemory' })
+  })
+
+  // ——— 禁区端口自检（2026-09-16 加固）———
+  // 背景：本机临时端口段是**连续递增**分配的，而 Fetch 规范封禁端口（3659 / 4045 /
+  // 4190 / 5060 / 5061 / 6000 / 6566 …）恰好落在其中。一旦绑定到禁区端口，症状是
+  // 「服务在岗但谁都用不了」：浏览器 ERR_UNSAFE_PORT 打不开看板，undici 的 fetch
+  // 直接抛 `Error: bad port`。这曾让服务端集成用例随机红（同一文件单独跑必绿、
+  // 全量并发跑随机红，失败用例每次不同），故在 start() 内固化为自检 + 换端口。
+  it('显式配置的封禁端口被连续跳过，最终绑定到禁区外的可用端口', { timeout: 15000 }, async () => {
+    const db = new MemoryDB(':memory:')
+    // 6667/6668/6669 连续三个都在封禁表内：正好验证「连续跨越禁区」的顺延能力
+    const server = new MemoryServer(db, 6667, undefined, undefined, null)
+    cleanup.push(() => {
+      server.stop()
+      db.close()
+    })
+
+    const outcome = await server.start()
+    expect(outcome).toBe('bound')
+    const port = await waitForPort(server)
+
+    expect(isFetchForbiddenPort(port)).toBe(false)
+    expect(port).toBeGreaterThan(6669)
+
+    // 顺延后的端口必须真的能被 undici 的 fetch 访问（禁区端口在此抛 bad port）
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`)
+    const body = (await res.json()) as { ok: boolean; service: string }
+    expect(body).toMatchObject({ ok: true, service: 'tlmemory' })
+  })
+
+  it('serverPort=0 连续自启：实际端口永不落在封禁禁区', { timeout: 20000 }, async () => {
+    const seen: number[] = []
+    for (let round = 0; round < 5; round++) {
+      const db = new MemoryDB(':memory:')
+      const server = new MemoryServer(db, 0, undefined, undefined, null)
+      await server.start()
+      seen.push(await waitForPort(server))
+      server.stop()
+      db.close()
+    }
+
+    expect(seen.every((port) => port > 0)).toBe(true)
+    expect(seen.filter((port) => isFetchForbiddenPort(port))).toEqual([])
   })
 })

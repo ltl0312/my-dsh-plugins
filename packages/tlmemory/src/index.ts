@@ -35,10 +35,11 @@ import type {
 export { MemoryDB } from './db.js'
 export { MemoryExtractor } from './extractor.js'
 export { MemoryCompactor } from './compactor.js'
-export { registerMemoryTools } from './tools.js'
+export { registerMemoryTools, toContentBlocks, toToolResult } from './tools.js'
+export type { ToolResultEnvelope, ToolTextBlock } from './tools.js'
 export { MemoryRecallEngine } from './recall.js'
 // 阶段三/六交付物：嵌入式 REST 与 WebSocket 实时中继服务 + 轮次跟踪器
-export { MemoryServer } from './server.js'
+export { MemoryServer, isFetchForbiddenPort } from './server.js'
 export { TurnTracker } from './turn-tracker.js'
 export type {
   MemoryNode,

@@ -121,6 +121,28 @@ export type ServerStartOutcome = 'bound' | 'delegated' | 'failed'
 /** 端口冲突自愈：从配置端口起最多向后顺延尝试的端口数（4890 → 4899） */
 const MAX_PORT_ATTEMPTS = 10
 
+/**
+ * Fetch 规范（browsers / undici 同源实现）明令封禁的端口表。
+ *
+ * 为什么必须自检：serverPort 为 0 或某个「看起来空闲」的端口时，OS 完全可能把禁区端口
+ * 派给我们 —— 本机临时端口段是**连续递增**分配的，实测会依次经过 3659 / 4045 / 4190 /
+ * 5060 / 5061 / 6000 / 6566 等禁区。绑定成功后症状是「服务在岗但谁都用不了」：
+ * 浏览器打不开看板（ERR_UNSAFE_PORT），undici 的 fetch 直接抛 `Error: bad port`，
+ * 表现为宿主看板空白 + 依赖 HTTP 的自动化链路随机失败。
+ */
+const FETCH_FORBIDDEN_PORTS: ReadonlySet<number> = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87,
+  95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139,
+  143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548,
+  554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659,
+  4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+])
+
+/** 端口是否落在浏览器 / fetch 共同封禁的禁区（导出供单测与排查复用） */
+export function isFetchForbiddenPort(port: number): boolean {
+  return FETCH_FORBIDDEN_PORTS.has(port)
+}
+
 export class MemoryServer {
   private server: http.Server | null = null
   private wss: WebSocketServer | null = null
@@ -206,6 +228,13 @@ export class MemoryServer {
         continue
       }
 
+      if (result === 'unsafe-port') {
+        // 命中浏览器/fetch 封禁端口：port=0 时保持 0 让 OS 重新派发（临时端口段连续
+        // 递增，下一轮必然越过错峰分布的禁区）；显式配置的端口则向后顺延一格。
+        if (this.port !== 0) port += 1
+        continue
+      }
+
       // 非 EADDRINUSE 的监听异常已在 listenOnce 内记日志，不再重试
       break
     }
@@ -220,8 +249,12 @@ export class MemoryServer {
     return 'failed'
   }
 
-  /** 单次尝试：在指定端口上完成整套运行时装配（HTTP + WS upgrade + 安全校验） */
-  private listenOnce(port: number): Promise<'bound' | 'eaddrinuse' | 'error'> {
+  /**
+   * 单次尝试：在指定端口上完成整套运行时装配（HTTP + WS upgrade + 安全校验）。
+   * 绑定成功后还会自检实际端口是否落在浏览器/fetch 封禁的禁区
+   * （port 传 0 时 OS 可能派发禁区端口），命中则立即释放并回报 'unsafe-port'。
+   */
+  private listenOnce(port: number): Promise<'bound' | 'eaddrinuse' | 'unsafe-port' | 'error'> {
     return new Promise((resolve) => {
       const server = http.createServer((req, res) => {
         void this.handleHttp(req, res)
@@ -246,7 +279,7 @@ export class MemoryServer {
       })
 
       let settled = false
-      const settle = (value: 'bound' | 'eaddrinuse' | 'error'): void => {
+      const settle = (value: 'bound' | 'eaddrinuse' | 'unsafe-port' | 'error'): void => {
         if (settled) return
         settled = true
         resolve(value)
@@ -265,9 +298,22 @@ export class MemoryServer {
 
       // 绝对绑定至本地回环地址，严禁监听 0.0.0.0
       server.listen(port, LOOPBACK_HOST, () => {
+        const address = server.address()
+        const assigned = typeof address === 'object' && address !== null ? address.port : port
+        // 禁区端口自检：这类端口浏览器打不开看板、undici fetch 直接 bad port，
+        // 属于「看似在岗实则不可用」，必须释放换端口（见 FETCH_FORBIDDEN_PORTS 注释）
+        if (isFetchForbiddenPort(assigned)) {
+          this.logger?.warn?.(
+            `[tlmemory-server] 端口 ${assigned} 属于浏览器与 fetch 共同封禁的禁区，自动改用其他端口重试...`,
+          )
+          server.close(() => {})
+          settle('unsafe-port')
+          return
+        }
         this.server = server
         this.wss = wss
-        this.logger?.info?.(`[tlmemory-server] 本地管理服务就绪: http://127.0.0.1:${port}`)
+        // 注意：port 为 0 时必须打印**实际**分配端口，否则日志里的 :0 无法用于访问
+        this.logger?.info?.(`[tlmemory-server] 本地管理服务就绪: http://127.0.0.1:${assigned}`)
         settle('bound')
       })
     })

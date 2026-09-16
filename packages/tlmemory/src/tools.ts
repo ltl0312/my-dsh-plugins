@@ -1,9 +1,164 @@
 // packages/tlmemory/src/tools.ts
+//
+// 工具注册与**返回契约收敛层**。
+//
+// 事故复盘（content.some is not a function，会话不可恢复崩溃）：
+// DSH 宿主的工具流水线（@deepseek-ai/dsh-tools 的 createSuccessResult）按固定次序消费工具：
+//   1. snapshotToolValue(name, candidate)      —— 快照 execute 的返回值；
+//   2. validateJsonSchemaValue(output.schema)  —— 按本文件声明的 output.schema 校验；
+//   3. tool.output.render(exec.arguments, value) —— **双参**调用，产出 content；
+//   4. 宿主随后对 content 执行 `.some(block => ...)`。
+// 旧实现把 render 写成 `(result) => result?.message ?? JSON.stringify(result)`：第一个形参
+// 实际接到的是 exec.arguments（不是工具结果），`args.message` 恒为 undefined，于是恒定走
+// JSON.stringify 分支返回**裸字符串**；宿主把它当 ContentBlock[] 使用，在 `.some(...)` 处抛出
+// `TypeError: content.some is not a function`，工具调用链整体崩溃且无法恢复。
+//
+// 本文件的契约（三层同时钉死，见 tests/tools-contract.spec.ts）：
+//   A. execute 返回值恒为 MCP/DSH 规范信封 `{ content: [{ type: 'text', text }] }`；
+//   B. 该信封恒满足 output.schema（宿主第 2 步校验）；
+//   C. output.render(args, value) 恒返回合法文本块数组，且对畸形输入（字符串 / 裸对象 /
+//      裸值 / null）与旧宿主的单位调用形态都做兜底归一 —— 任何情况下都不再吐出非数组。
 import type { Context } from "cordis";
 import { sanitizeSegment } from "./db.js";
 import type { MemoryDB } from "./db.js";
 import { expandQueryCandidates } from "./query-expand.js";
 import type { SearchResult } from "./types.js";
+
+/** MCP 规范文本内容块（与 dsh-llm 的 TextBlock 逐字段一致） */
+export interface ToolTextBlock {
+  type: "text";
+  text: string;
+}
+
+/** MCP/DSH 规范工具返回信封：content 恒为数组 */
+export interface ToolResultEnvelope {
+  content: ToolTextBlock[];
+}
+
+/**
+ * 单个文本块的字符上限。工具返回值要经宿主 JSON 快照 + 落盘，超长正文既无助于模型
+ * 理解又会拖慢工具调用环，这里做一次确定性截断（截断标记本身也计入上限之外）。
+ */
+const MAX_TOOL_TEXT_CHARS = 60_000;
+
+/** 截断超长文本，保证 text 字段恒为可安全落盘的字符串 */
+function clampText(text: string): string {
+  return text.length > MAX_TOOL_TEXT_CHARS
+    ? `${text.slice(0, MAX_TOOL_TEXT_CHARS)}\n…（内容过长，已截断）`
+    : text;
+}
+
+/** JSON 序列化兜底：循环引用 / BigInt / undefined 等一律退化为 String()，绝不抛错 */
+function safeStringify(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  try {
+    const text = JSON.stringify(value);
+    return text === undefined ? String(value) : text;
+  } catch {
+    return String(value);
+  }
+}
+
+/** 文本块判型守卫：宿主侧只认 { type: 'text', text: string } */
+function isTextBlock(value: unknown): value is ToolTextBlock {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === "text" &&
+    typeof (value as { text?: unknown }).text === "string"
+  );
+}
+
+/**
+ * 把任意 execute 产出规范化为 MCP/DSH 规范信封。
+ *
+ * 这是全插件唯一的工具返回出口：content 恒为「至少一个 text 块」的数组，
+ * text 恒为字符串（字符串原样透传，其余类型 JSON 序列化）。
+ */
+export function toToolResult(result: unknown): ToolResultEnvelope {
+  return {
+    content: [
+      {
+        type: "text",
+        text: typeof result === "string" ? result : safeStringify(result),
+      },
+    ],
+  };
+}
+
+/** 从候选值中提取文本块（信封 / 块数组 / 裸字符串 / 带 message 的对象），无果返回空数组 */
+function extractTextBlocks(candidate: unknown): ToolTextBlock[] {
+  if (typeof candidate === "string") return [{ type: "text", text: clampText(candidate) }];
+  if (Array.isArray(candidate)) {
+    return candidate.filter(isTextBlock).map((block) => ({
+      type: "text" as const,
+      text: clampText(block.text),
+    }));
+  }
+  if (typeof candidate === "object" && candidate !== null) {
+    const record = candidate as Record<string, unknown>;
+    // 规范信封优先（宿主 render 的正规输入）
+    if (Array.isArray(record.content)) return extractTextBlocks(record.content);
+    // 旧实现遗留形态兜底：{ message } / { text }
+    if (typeof record.message === "string") return [{ type: "text", text: clampText(record.message) }];
+    if (typeof record.text === "string") return [{ type: "text", text: clampText(record.text) }];
+  }
+  return [];
+}
+
+/**
+ * 最终护栏：把任何候选值收敛为合法 ContentBlock[]（宿主 render 的返回类型契约）。
+ *
+ * 无论输入是信封、块数组、裸字符串、裸对象、null 还是畸形结构，返回值恒为
+ * 非空数组且元素恒为 { type: 'text', text: string } —— 从根上杜绝宿主
+ * `content.some is not a function`。
+ */
+export function toContentBlocks(candidate: unknown): ToolTextBlock[] {
+  const blocks = extractTextBlocks(candidate);
+  if (blocks.length > 0) return blocks;
+  return [{ type: "text", text: clampText(safeStringify(candidate)) }];
+}
+
+/**
+ * 兼容宿主 render 的双参契约 (args, value) 与历史单位调用 (value)：
+ * value 为 undefined（旧宿主把结果塞进第一个形参）时退回 args。
+ */
+function pickProjectionCandidate(args: unknown, value: unknown): unknown {
+  return value === undefined ? args : value;
+}
+
+/** 工具 output.schema：宿主在 render 之前会用它校验 execute 的返回值 */
+const TOOL_RESULT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    content: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "内容块类型，恒为 text" },
+          text: { type: "string", description: "供模型读取的文本内容" },
+        },
+        required: ["type", "text"],
+      },
+      description: "MCP 规范内容块数组，至少含一个 text 块",
+    },
+  },
+  required: ["content"],
+};
+
+/**
+ * 工具 output 段：schema 钉死信封结构，render 把信封（或任何兜底形态）投影为文本块数组。
+ * render 必须用剩余参数接收 —— 宿主以 (args, value) 双参调用，历史宿主以 (value) 单参调用。
+ */
+function toolOutput(): { schema: Record<string, unknown>; render: (...params: unknown[]) => ToolTextBlock[] } {
+  return {
+    schema: TOOL_RESULT_SCHEMA,
+    render: (...params: unknown[]) =>
+      toContentBlocks(pickProjectionCandidate(params[0], params[1])),
+  };
+}
 
 export function registerMemoryTools(
   ctx: Context,
@@ -56,18 +211,7 @@ export function registerMemoryTools(
         "keywords",
       ],
     },
-    output: {
-      schema: {
-        type: "object",
-        properties: {
-          status: { type: "string", description: "执行状态" },
-          message: { type: "string", description: "详细提示信息" },
-          node_id: { type: "string", description: "记忆节点唯一标识" },
-        },
-        required: ["status", "message", "node_id"],
-      },
-      render: (result: any) => result?.message ?? JSON.stringify(result),
-    },
+    output: toolOutput(),
     async execute(args: {
       tree_scope: "global" | "project";
       path_segments: string[];
@@ -91,11 +235,10 @@ export function registerMemoryTools(
         args.keywords || [sanitizedName],
       );
 
-      return {
-        status: "success",
-        message: `记忆已成功入库 [${node.tree_type}]: ${node.path}${node.name}`,
-        node_id: node.id,
-      };
+      // 契约 A：恒返回 MCP 信封，绝不返回裸对象
+      return toToolResult(
+        `记忆已成功入库 [${node.tree_type}]: ${node.path}${node.name}`,
+      );
     },
   });
 
@@ -122,40 +265,7 @@ export function registerMemoryTools(
       },
       required: ["query"],
     },
-    output: {
-      schema: {
-        type: "object",
-        properties: {
-          status: { type: "string", description: "执行状态" },
-          hits_count: { type: "number", description: "命中条数" },
-          memories: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                tree: { type: "string" },
-                path: { type: "string" },
-                content: { type: "string" },
-                score: { type: "number" },
-              },
-            },
-            description: "命中的记忆列表",
-          },
-        },
-        required: ["status", "hits_count", "memories"],
-      },
-      render: (result: any) => {
-        if (!result.memories || result.memories.length === 0) {
-          return "未检索到相关的长期记忆。";
-        }
-        return result.memories
-          .map(
-            (m: any) =>
-              `* [${m.tree}] ${m.path}: ${m.content} (得分: ${m.score.toFixed(1)})`,
-          )
-          .join("\n");
-      },
-    },
+    output: toolOutput(),
     async execute(args: {
       query: string;
       scope?: "all" | "global" | "project";
@@ -185,16 +295,19 @@ export function registerMemoryTools(
         .sort((a, b) => b.score - a.score)
         .slice(0, maxCount);
 
-      return {
-        status: "success",
-        hits_count: results.length,
-        memories: results.map((r) => ({
-          tree: r.tree_type === "global" ? "全局偏好" : "当前工程",
-          path: `${r.path}${r.name}`,
-          content: r.content ?? "",
-          score: r.score,
-        })),
-      };
+      // 契约 A：同样收敛为信封；文本沿用人类可读列表（零命中给确定性提示，
+      // 不返回空串、更不返回空数组）
+      const text =
+        results.length === 0
+          ? "未检索到相关的长期记忆。"
+          : results
+              .map(
+                (r) =>
+                  `* [${r.tree_type === "global" ? "全局偏好" : "当前工程"}] ${r.path}${r.name}: ${r.content ?? ""} (得分: ${r.score.toFixed(1)})`,
+              )
+              .join("\n");
+
+      return toToolResult(text);
     },
   });
 
