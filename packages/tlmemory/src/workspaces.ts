@@ -18,26 +18,92 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * 工程作用域（SQLite tree_type）的规范算法：`repo:` + 仓库根目录绝对路径 sha256 前 12 位。
+ * 路径规范化（**scope 计算前必须跑的唯一前置步骤**）。
+ *
+ * 为什么必须收敛：同一个目录在 Windows 上至少有三种常见写法 ——
+ * `D:\Code\x`（资源管理器 / `path.normalize`）、`D:/Code/x`（配置里手写的正斜杠）、
+ * `d:\code\x`（大小写不敏感的盘符/目录名）。旧实现直接拿 `path.normalize(root)`
+ * 参与 sha256，于是**同一个工作区算出多个不同 scope**，看板里凭空多出「同名但不同
+ * scope」的孪生工程，白名单还会把只认其中一个 hash 的存量记忆判成非法孤儿。
+ *
+ * 统一规则：`path.normalize` → 反斜杠转正斜杠 → 去尾斜杠 → 全小写。
+ * `projectScopeOf` 与本模块的别名集合都以此为准。
+ */
+export function normalizeRoot(root: string): string {
+  const raw = String(root ?? '').trim()
+  if (!raw) return ''
+  return path
+    .normalize(raw)
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase()
+}
+
+/**
+ * 工程作用域（SQLite tree_type）的规范算法：`repo:` + 规范化路径 sha256 前 12 位。
  *
  * 收敛为单一实现是硬性要求 —— 历史记忆库的 tree_type 由它决定，任何一处算法漂移
  * 都会让既有记忆「找不到家」。`resolveProjectIdentity` 与工作区白名单必须逐字节一致。
  */
 export function projectScopeOf(root: string): string {
-  const hash = crypto.createHash('sha256').update(path.normalize(root)).digest('hex')
-  return `repo:${hash.slice(0, 12)}`
+  return `repo:${sha12(normalizeRoot(root))}`
+}
+
+/**
+ * 同一根目录在**历史版本**下可能算出的全部 scope（权威值排第一）。
+ *
+ * 为什么需要别名：hash 输入一旦变过（旧版用 `path.normalize` 原文，含反斜杠与原
+ * 大小写），存量记忆的 tree_type 就停留在旧值上。若白名单只认新 hash，这些**有真实
+ * 记忆**的工程会被当成「不属于任何工作区」的孤儿 —— 这正是「有记忆的工程被误杀」
+ * 的根因。这里把四种写法全部登记为合法别名，做到「同一目录的任何历史 hash 都认」。
+ */
+export function projectScopeVariants(root: string): string[] {
+  const raw = String(root ?? '').trim()
+  if (!raw) return []
+  const normalized = path.normalize(raw)
+  const canonical = normalizeRoot(raw)
+  const inputs = [
+    canonical, // 权威：小写 + 正斜杠
+    normalized, // 旧版 v0.1–v0.6：path.normalize 原文（Windows 反斜杠 + 原大小写）
+    normalized.replace(/\\/g, '/'), // 原大小写 + 正斜杠
+    normalized.toLowerCase(), // 小写 + 反斜杠
+  ]
+  const out: string[] = []
+  for (const input of inputs) {
+    const scope = `repo:${sha12(input)}`
+    if (!out.includes(scope)) out.push(scope)
+  }
+  return out
+}
+
+function sha12(input: string): string {
+  return crypto.createHash('sha256').update(input).digest('hex').slice(0, 12)
 }
 
 /** 宿主合法工作区白名单（不可变视图） */
 export interface WorkspaceRegistry {
-  /** 合法工作区 scope → 工作区标题（DSH 里展示的名字） */
+  /** 合法工作区 scope → 工作区标题（DSH 里展示的名字；仅权威 hash，不含历史别名） */
   readonly scopes: ReadonlyMap<string, string>
   /** 合法工作区根目录（已规范化，小写用于跨平台比较） */
   readonly roots: ReadonlySet<string>
-  /** 该 scope 是否属于宿主已登记工作区 */
+  /** 合法工作区标题集合（原样大小写，供「工程名与工作区同名」的存量数据对齐） */
+  readonly titles: ReadonlySet<string>
+  /**
+   * 该 scope 是否属于宿主已登记工作区。
+   * **包含历史 hash 别名** —— 老版本算出的 scope 同样算数，避免存量记忆被判孤儿。
+   */
   has(scope: string): boolean
-  /** 取所属工作区标题；未登记返回 null */
+  /** 取所属工作区标题（含别名）；未登记返回 null */
   nameOf(scope: string): string | null
+  /**
+   * 「同名对齐」容错：工程名与某个合法工作区标题同名（忽略大小写与首尾空白）时，
+   * 返回该工作区标题，否则 null。
+   *
+   * 解决的是存量数据的归属问题：宿主从别的目录启动时，插件可能把工程登记成
+   * `名称=my-dsh-plugins、scope=别的 hash` 的形态；仅凭 scope 判断会把它当孤儿，
+   * 而它其实明确指向某个已登记工作区。
+   */
+  alignTitleByName(projectName: string): string | null
 }
 
 /** 解析 DSH 家目录：优先环境变量（测试与多 profile 场景），否则 `~/.dsh` */
@@ -61,30 +127,55 @@ function buildRegistry(parsed: unknown): WorkspaceRegistry | null {
   if (!workspaces || typeof workspaces !== 'object') return null
 
   const scopes = new Map<string, string>()
+  const aliases = new Map<string, string>()
   const roots = new Set<string>()
+  const titles = new Set<string>()
+  const byTitle = new Map<string, string>()
   for (const entry of Object.values(workspaces as Record<string, unknown>)) {
     if (!entry || typeof entry !== 'object') continue
     const record = entry as Record<string, unknown>
     const rawPath = record.path
     if (typeof rawPath !== 'string' || !rawPath.trim()) continue
     const root = path.normalize(rawPath.trim())
-    const scope = projectScopeOf(root)
     const rawTitle = record.title
     const title =
-      typeof rawTitle === 'string' && rawTitle.trim() ? rawTitle.trim() : path.basename(root) || scope
-    if (!scopes.has(scope)) scopes.set(scope, title)
-    roots.add(root.toLowerCase())
+      typeof rawTitle === 'string' && rawTitle.trim() ? rawTitle.trim() : path.basename(root) || 'workspace'
+    const variants = projectScopeVariants(root)
+    if (variants.length === 0) continue
+    const [canonical, ...legacy] = variants
+    if (!scopes.has(canonical)) scopes.set(canonical, title)
+    // 历史 hash 变体同样算合法工作区作用域（存量记忆的 tree_type 可能是旧算法产出的）
+    for (const alias of legacy) {
+      if (!scopes.has(alias) && !aliases.has(alias)) aliases.set(alias, title)
+    }
+    roots.add(normalizeRoot(root))
+    titles.add(title)
+    const titleKey = title.toLowerCase()
+    if (!byTitle.has(titleKey)) byTitle.set(titleKey, title)
   }
   if (scopes.size === 0) return null
+
+  /** 权威 scope 与历史别名合并成一张查询表（权威优先） */
+  const lookup = (scope: unknown): string | null => {
+    const key = String(scope ?? '').trim()
+    if (!key) return null
+    return scopes.get(key) ?? aliases.get(key) ?? null
+  }
 
   return {
     scopes,
     roots,
+    titles,
     has(scope: string): boolean {
-      return scopes.has(String(scope ?? '').trim())
+      return lookup(scope) !== null
     },
     nameOf(scope: string): string | null {
-      return scopes.get(String(scope ?? '').trim()) ?? null
+      return lookup(scope)
+    },
+    alignTitleByName(projectName: string): string | null {
+      const key = String(projectName ?? '').trim().toLowerCase()
+      if (!key) return null
+      return byTitle.get(key) ?? null
     },
   }
 }

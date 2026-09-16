@@ -144,6 +144,40 @@ export const useMemoryStore = defineStore('memory', () => {
     () => new Set(searchResults.value.map((item) => item.id)),
   )
 
+  /**
+   * 从清单里挑一个「安全落点」：优先有记忆的工程（leafCount 最多），其次首个，
+   * 都没有则空串。
+   *
+   * 为什么必须自愈：服务端清单会随维护周期变化（工程被改名、schema 变更导致 scope
+   * 归属漂移、当前选中的工程不再出现在清单里）。此时若死守旧 scope，取树会命中空
+   * 结果或失效作用域，顶栏又因为「选中项不在下拉列表里」而不可点 —— 用户侧看到的是
+   * 「暂无工程记忆 + 下拉框点不开」的死锁。自动回退到清单里第一个有记忆的工程即可解开。
+   */
+  function pickFallbackScope(list: ProjectDto[]): string {
+    if (list.length === 0) return ''
+    const withMemory = list.filter((item) => Number(item.leafCount) > 0)
+    const pool = withMemory.length > 0 ? withMemory : list
+    return [...pool].sort((a, b) => Number(b.leafCount) - Number(a.leafCount))[0]?.scope ?? ''
+  }
+
+  /**
+   * 校对当前选中项：选中的 scope 不在可见清单里时自动回退。
+   * 顺序：宿主当前工程（若在清单内）→ 第一个有记忆的工程 → 清单首项。
+   * 返回是否发生了回退（调用方据此决定要不要重拉节点树）。
+   */
+  function ensureValidSelection(reported: string): boolean {
+    const list = projectOptions.value
+    if (list.length === 0) return false
+    if (currentProjectScope.value && list.some((item) => item.scope === currentProjectScope.value)) {
+      return false
+    }
+    const preferred = list.some((item) => item.scope === reported) ? reported : ''
+    const next = preferred || pickFallbackScope(list)
+    if (!next || next === currentProjectScope.value) return false
+    currentProjectScope.value = next
+    return true
+  }
+
   /** 拉取工程清单；首次加载时把默认选中项锁定到宿主当前所在工程 */
   async function fetchProjects() {
     projectsLoading.value = true
@@ -154,16 +188,12 @@ export const useMemoryStore = defineStore('memory', () => {
       projects.value = list
       const reported = typeof json.current === 'string' ? json.current : ''
       currentProjectName.value = typeof json.currentName === 'string' ? json.currentName : ''
-      // 用户已选过则以用户选择为准，否则用后端上报的当前工程（默认选中项的
-      // 最终兜底在 bootstrap 里做，那里还能看到节点反推的工程清单）。
+      // 用户已选过则以用户选择为准，否则用后端上报的当前工程；两种情况都过一遍
+      // 自愈校对 —— 选中的工程可能已不在清单里（服务端清理、scope 口径变化等）。
       if (!currentProjectScope.value) {
         currentProjectScope.value = reported
-      } else if (!list.some((item) => item.scope === currentProjectScope.value)) {
-        // 选中的工程已不在清单里（删掉最后一个记忆 → 服务端自动清理了该工程）：
-        // 回落到宿主当前工程，再退回清单首项，避免顶栏停在一个已不存在的工程上。
-        // 注意当前工程零记忆时也不在清单里，但仍是合法落点，所以优先回落到它。
-        currentProjectScope.value = reported || list[0]?.scope || ''
       }
+      ensureValidSelection(reported)
     } catch (e) {
       console.error('拉取工程列表失败:', e)
     } finally {
@@ -171,13 +201,26 @@ export const useMemoryStore = defineStore('memory', () => {
     }
   }
 
+  /**
+   * 拉取当前作用域的节点树。
+   *
+   * 容错（v0.6.5）：作用域失效时服务端回 200 + 空数组并带 message，这里要：
+   *   1. 先判 `res.ok`，4xx/5xx 不能把 `nodes` 写成 undefined（那会让下方整块报错）；
+   *   2. 空数组与解析失败都收敛为 `[]`，看板按空态渲染而不是崩溃。
+   * 额外注意：服务端同时给出 `data` 与 `nodes` 两个字段，任一存在即可用。
+   */
   async function fetchNodes() {
     try {
       const res = await fetch(`/api/nodes?${scopeQuery.value}`)
-      const json = await res.json()
-      nodes.value = json.data || []
+      if (!res.ok) {
+        nodes.value = []
+        return
+      }
+      const json = (await res.json()) as { data?: MemoryNodeDto[]; nodes?: MemoryNodeDto[] }
+      nodes.value = json.data ?? json.nodes ?? []
     } catch (e) {
       console.error('拉取节点数据失败:', e)
+      nodes.value = []
     }
   }
 
@@ -186,12 +229,15 @@ export const useMemoryStore = defineStore('memory', () => {
     const scopeBefore = currentProjectScope.value
     await Promise.all([fetchProjects(), fetchNodes()])
     if (!currentProjectScope.value) {
-      // 后端未上报当前工程：退回到清单第一项（含节点反推的兜底项）。
-      currentProjectScope.value = projectOptions.value[0]?.scope ?? ''
+      // 后端未上报当前工程：退回到清单里第一个有记忆的工程（含节点反推的兜底项），
+      // 都比「没有可选项」要好 —— 下拉框必须有落点。
+      currentProjectScope.value = pickFallbackScope(projectOptions.value)
+    } else {
+      ensureValidSelection(currentProjectScope.value)
     }
     // 并行首拉时作用域尚未确定（空 scope = 全工程查询）。默认工程确定后若发生过
     // 变化，按最终作用域重拉一次节点，保证顶栏选中与下方树一致。
-    if (!scopeBefore && currentProjectScope.value) {
+    if (currentProjectScope.value !== scopeBefore) {
       await fetchNodes()
     }
   }

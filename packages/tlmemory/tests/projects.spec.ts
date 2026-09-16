@@ -412,11 +412,22 @@ describe('dsh-plugin-tlmemory 多项目记忆选择', () => {
     expect(allBody.data.length).toBeGreaterThan(allProjectsBody.data.length)
   })
 
-  it('未知工程名返回 404，而不是静默给出一棵空树', async () => {
+  it('未知工程名不再 404：回 200 + 空树 + 可读提示（避免看板记忆归零与下拉死锁）', async () => {
     const res = await fetch(`${base}/api/nodes?scope=project&project=不存在的工程`)
-    expect(res.status).toBe(404)
+    expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.error).toContain('不存在的工程')
+    // 契约：data 与 nodes 双字段空数组 + 可读 message + 原样回显请求的工程标识
+    expect(body.data).toEqual([])
+    expect(body.nodes).toEqual([])
+    expect(body.message).toContain('不存在的工程')
+    expect(body.resolved).toBe(false)
+
+    // /api/search 共用同一份容错语义
+    const search = await fetch(`${base}/api/search?q=pnpm&scope=project&project=不存在的工程`)
+    expect(search.status).toBe(200)
+    const searchBody = await search.json()
+    expect(searchBody.data).toEqual([])
+    expect(searchBody.message).toContain('不存在的工程')
   })
 
   it('GET /api/memories?tree=global 的历史契约保持不变', async () => {

@@ -31,8 +31,16 @@ const canRename = computed<boolean>(
   () => store.currentTree === 'project' && store.currentProject !== null && !store.projectsLoading,
 )
 
+/**
+ * 展开 / 收起工程清单。
+ *
+ * 刻意**不**在「清单为空」时提前返回：那样按钮会变成一个永远点不开的死按钮，
+ * 用户既看不到「为什么没有工程」，也无法通过展开动作触发任何自愈（上一版即是
+ * 「暂无工程记忆 + 下拉框点不开」的死锁形态）。现在任何非加载态都可唤起，
+ * 空清单时弹出明确空态提示行。
+ */
 function toggle(): void {
-  if (store.projectsLoading || store.projectOptions.length === 0) return
+  if (store.projectsLoading) return
   open.value = !open.value
 }
 
@@ -121,7 +129,7 @@ onBeforeUnmount(() => {
     <button
       type="button"
       class="tlm-pick-btn"
-      :disabled="store.projectsLoading || store.projectOptions.length === 0"
+      :disabled="store.projectsLoading"
       :aria-expanded="open"
       aria-haspopup="listbox"
       :title="open ? '收起工程清单' : '切换工程记忆树'"
@@ -190,6 +198,10 @@ onBeforeUnmount(() => {
 
     <Transition name="tlm-pop">
       <div v-if="open" class="tlm-pick-menu" role="listbox" aria-label="工程记忆清单">
+        <!-- 空态：仍要弹出可读提示，绝不让按钮变成点不开的死按钮 -->
+        <p v-if="store.projectOptions.length === 0" class="tlm-pick-empty">
+          暂无可显示的工程记忆（可能刚被清理，或当前目录尚未登记为工作区）
+        </p>
         <button
           v-for="project in store.projectOptions"
           :key="project.scope"
@@ -197,7 +209,7 @@ onBeforeUnmount(() => {
           class="tlm-pick-item"
           :class="{ 'is-current': project.scope === store.currentProjectScope }"
           role="option"
-          :aria-selected="project.scope === store.currentProjectScope && store.currentTree === 'project'"
+          :aria-selected="project.scope === store.currentProjectScope"
           :title="
             project.workspaceName
               ? `${project.name} [工作区 ${project.workspaceName}] · ${project.leafCount} 条记忆`
@@ -205,8 +217,10 @@ onBeforeUnmount(() => {
           "
           @click="choose(project.scope)"
         >
+          <!-- 勾选标记跟「当前选中的工程」走，而不是跟页签走：
+               切到全局偏好页签时工程仍是被选中的，下拉里失去勾选会让人以为没选中 -->
           <svg
-            v-if="project.scope === store.currentProjectScope && store.currentTree === 'project'"
+            v-if="project.scope === store.currentProjectScope"
             class="tlm-pick-item-check"
             viewBox="0 0 16 16"
             fill="none"

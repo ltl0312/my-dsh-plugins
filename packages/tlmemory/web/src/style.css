@@ -416,6 +416,15 @@ body {
   transition: background-color var(--tlm-motion);
 }
 
+/* 空清单提示行：下拉框在任何状态下都能唤起，空态用可读文案代替「点不开」 */
+.tlm-pick-empty {
+  margin: 0;
+  padding: 8px 9px;
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--tlm-fg-faint);
+}
+
 .tlm-pick-item:hover {
   background: var(--tlm-surface-hover);
 }

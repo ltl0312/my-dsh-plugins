@@ -191,24 +191,31 @@ export function apply(ctx: Context, config: Config): () => void {
     workspaceRegistry === null || workspaceRegistry.has(scope)
   /** 当前工程是否属于宿主合法工作区 —— 决定它能否登记、能否当看板锚点 */
   const projectIsAllowed = isAllowedWorkspaceScope(projectScope)
+  /**
+   * 当前工程即便不属于任何已登记工作区，只要**它已经有记忆数据**，也必须登记 ——
+   * 「有记忆的工程绝不隐藏」：少了登记项，看板只能拿裸 scope 哈希当工程名展示。
+   */
+  const projectHasData = db.countNodes(projectScope) > 0
 
-  if (projectIsAllowed) {
+  if (projectIsAllowed || projectHasData) {
     // 登记之后再打开看板，下拉框里出现的才是 my-dsh-plugins 这样的名字而非 repo:<hash>。
     db.registerProject(project.scope, project.name, project.root)
   } else {
     ctx.logger?.warn?.(
-      `[tlmemory] 当前目录不属于宿主已登记工作区，跳过工程登记（记忆看板不会显示该工程）: ${project.root}`,
+      `[tlmemory] 当前目录不属于宿主已登记工作区且尚无记忆，跳过工程登记（记忆看板不会显示该空壳工程）: ${project.root}`,
     )
   }
 
-  // 工程清单自愈：清掉历史遗留的「零记忆工程」与**不属于宿主合法工作区的孤儿工程**，
-  // 并把重名工程收敛为唯一名；keepScope 只豁免「当前正在打开的合法工作区」——
-  // 它零记忆也保留，作为「当前工程就绪」的看板锚点。每次启动都跑一次，
+  // 工程清单自愈：清掉**零节点的空壳登记**（以用户主目录启动产生的临时登记、宿主已删除
+  // 的历史目录留下的空记录）与名单内的零记忆工程，并把重名工程收敛为唯一名；
+  // keepScope 只豁免「当前正在打开的工程」—— 它零记忆也保留，作为「当前工程就绪」的
+  // 看板锚点。**有记忆的工程永远不会被这里清掉**（第一铁律）。每次启动都跑一次，
   // 看板不必等到打开才被清理。
   try {
     const maintenance = db.maintainProjects({
-      keepScope: projectIsAllowed ? projectScope : null,
+      keepScope: projectIsAllowed || projectHasData ? projectScope : null,
       isScopeAllowed: workspaceRegistry === null ? null : isAllowedWorkspaceScope,
+      workspaceTitles: workspaceRegistry?.titles ?? null,
     })
     if (maintenance.purgedScopes.length > 0) {
       ctx.logger?.info?.(
@@ -253,12 +260,17 @@ export function apply(ctx: Context, config: Config): () => void {
    * 为什么必须重复登记：零记忆工程会被看板读取/启动时的维护周期清理（合规要求），
    * 而登记项是「可读工程名」的唯一来源 —— 少了它，新落库的记忆会让看板
    * 以裸 scope 哈希显示整个工程。每次沉淀前补登记，成本可忽略（沉淀本身要调 LLM）。
-   * 白名单外的工程不补登记（它不属于宿主合法工作区，本就不该出现在看板里）。
+   *
+   * 白名单外的工程：原本一并跳过，但**只要它已经或即将持有记忆数据就必须登记** ——
+   * 「有记忆的工程绝不隐藏」是硬要求，而裸 `repo:<hash>` 当工程名同样属于「没好好
+   * 显示」。只有当它确实是零记忆的空壳时才不补登记，避免再造幽灵工程。
    */
   const ensureProjectRegistered = (scope: string): void => {
-    if (!isAllowedWorkspaceScope(scope)) return
     const identity = identityByScope.get(scope)
     if (!identity) return
+    // 名单外的空壳不补登记（避免再造幽灵工程）；已有数据的必须登记，否则看板只能
+    // 拿裸 repo:<hash> 当工程名 —— 「有记忆的工程绝不隐藏」包含「绝不匿名显示」。
+    if (!isAllowedWorkspaceScope(scope) && db.countNodes(scope) === 0) return
     db.registerProject(identity.scope, identity.name, identity.root)
   }
 

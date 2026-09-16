@@ -187,9 +187,34 @@ export class MemoryServer {
   /**
    * 工程清单（已按宿主工作区白名单附带 workspaceName）。
    * 所有返回清单的端点统一走这里，避免某一条响应缺字段。
+   *
+   * 归属补全分两步：
+   *   1. scope 命中工作区（含历史 hash 别名）→ 用该工作区的标题；
+   *   2. scope 认不出来、但**工程名与某工作区同名** → 视同属于该工作区（存量数据对齐）。
    */
   private projectList(registry: WorkspaceRegistry | null = this.workspaceRegistry()): ProjectSummary[] {
-    return this.db.listProjects(registry?.scopes ?? null)
+    const list = this.db.listProjects(null)
+    if (registry === null) return list
+    return list.map((item) => ({
+      ...item,
+      workspaceName: registry.nameOf(item.scope) ?? registry.alignTitleByName(item.name),
+    }))
+  }
+
+  /**
+   * 清单项是否允许呈现给看板。
+   *
+   * **第一铁律：有记忆的工程绝不隐藏。** 白名单只用来过滤「零节点的空壳登记」
+   * （如宿主以用户主目录启动产生的临时登记），只要该工程在库里还有节点，
+   * 无论 scope 是否在 workspace.json 名单里都照常展示 —— 上一版在这里对 scope
+   * 做无条件过滤，把 hash 规范化口径变更后的存量工程整条隐藏，配合落库侧的清理
+   * 直接造成「下拉框空掉、记忆归零」，这是本次修复的核心。
+   */
+  private isProjectVisible(item: ProjectSummary, registry: WorkspaceRegistry | null): boolean {
+    if (registry === null) return true // 无从判定 ⇒ 关闭过滤
+    if (registry.has(item.scope)) return true
+    if (item.workspaceName !== null && item.workspaceName !== undefined) return true // 同名对齐
+    return item.nodeCount > 0
   }
 
   public get actualPort(): number {
@@ -432,25 +457,32 @@ export class MemoryServer {
       }
 
       // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）。
-      // 读取前先做一次自愈维护（幂等）：清掉「没有任何记忆文件」的历史遗留工程、
-      // 清掉**不属于宿主合法工作区**的孤儿工程（以用户主目录启动而临时产生的工程、
-      // 宿主已删除的历史目录）、消除同名工程；**豁免宿主当前正在打开的合法工作区**
-      // （方案 B）—— 它零记忆时也保留，作为「当前工程就绪、可随时新建沉淀」的锚点。
+      // 读取前先做一次自愈维护（幂等）：只清掉**零节点的空壳登记**（以用户主目录启动
+      // 产生的临时空登记、宿主已删除的历史目录留下的空记录）与名单内零记忆工程，
+      // 消除同名工程；**有记忆的工程一律不动**（第一铁律，见 isProjectVisible）。
+      // 豁免宿主当前正在打开的合法工作区（方案 B）—— 它零记忆时也保留，作为
+      // 「当前工程就绪、可随时新建沉淀」的锚点。
       if (req.method === 'GET' && pathname === '/api/projects') {
         const registry = this.workspaceRegistry()
         const current = this.currentProject
-        // 白名单校验（方案 B 锚点约束）：当前工程**只有本身属于宿主合法工作区**时
-        // 才配得上「零记忆也保留」的豁免；非合法工作区即使被当作当前工程传入，
-        // 也绝不呈现为锚点 —— 否则看板又会冒出一个本不该存在的工程。
+        // 白名单校验（方案 B 锚点约束）：当前工程本身属于宿主合法工作区、或其工程名
+        // 对齐到某个合法工作区、或**它已经有记忆数据**时，才配得上「零记忆也保留」的
+        // 豁免；否则不呈现为锚点 —— 避免看板冒出「以用户主目录启动」的空壳工程。
+        const currentHasData = current !== undefined && this.db.countNodes(current.scope) > 0
         const currentAllowed =
-          current !== undefined && (registry === null || registry.has(current.scope))
+          current !== undefined &&
+          (registry === null ||
+            registry.has(current.scope) ||
+            registry.alignTitleByName(current.name) !== null ||
+            currentHasData)
         const maintenance = this.db.maintainProjects({
           keepScope: currentAllowed ? current.scope : null,
           isScopeAllowed: registry === null ? null : (scope: string) => registry.has(scope),
+          workspaceTitles: registry?.titles ?? null,
         })
         if (maintenance.purgedScopes.length > 0) {
           this.logger?.info?.(
-            `[tlmemory-server] 自动清理 ${maintenance.purgedScopes.length} 个工程（零记忆或不属于宿主合法工作区）: ${maintenance.purgedScopes.join(', ')}`,
+            `[tlmemory-server] 自动清理 ${maintenance.purgedScopes.length} 个空壳工程（零节点或零记忆）: ${maintenance.purgedScopes.join(', ')}`,
           )
         }
         for (const change of maintenance.renamed) {
@@ -466,12 +498,8 @@ export class MemoryServer {
         if (currentAllowed && !this.db.hasProject(current.scope)) {
           this.db.registerProject(current.scope, current.name, current.root)
         }
-        // 清单再按白名单过滤一层（纵深防御）：即便本轮维护因故没落库清理，
-        // 也绝不把非合法工作区暴露给下拉框。
-        const list =
-          registry === null
-            ? this.projectList(registry)
-            : this.projectList(registry).filter((item) => registry.has(item.scope))
+        // 清单再过滤一层（纵深防御）：只滤掉「零节点的空壳」，**有记忆的工程绝不隐藏**。
+        const list = this.projectList(registry).filter((item) => this.isProjectVisible(item, registry))
         this.sendJson(res, 200, {
           data: list,
           current: currentAllowed ? current.scope : null,
@@ -519,7 +547,10 @@ export class MemoryServer {
         if (projectParam) {
           const resolved = this.resolveProjectScopeParam(projectParam)
           if (resolved === null) {
-            this.sendJson(res, 404, { error: `未找到工程 ${projectParam}` })
+            // 容错（v0.6.5）：查不到工程**不再回 404**。404 会让看板把整块记忆区
+            // 渲染成错误态 / 记忆归零，并在选中项失效时把下拉框锁死。这里回 200 + 空树
+            // 与可读提示，前端按「空工程」正常渲染并自愈回退到有记忆的工程。
+            this.sendJson(res, 200, this.emptyTreePayload(projectParam))
             return
           }
           this.sendJson(res, 200, { data: this.db.getNodesByScope(resolved) })
@@ -557,7 +588,8 @@ export class MemoryServer {
         if (projectParam) {
           const resolved = this.resolveProjectScopeParam(projectParam)
           if (resolved === null) {
-            this.sendJson(res, 404, { error: `未找到工程 ${projectParam}` })
+            // 与 /api/nodes 同一份容错契约：未知工程回空结果集而不是 404
+            this.sendJson(res, 200, { data: [], nodes: [], message: `未找到工程「${projectParam}」，已返回空结果` })
             return
           }
           treeType = resolved
@@ -859,6 +891,32 @@ export class MemoryServer {
     const ext = path.extname(safePath)
     res.writeHead(200, { 'Content-Type': MIME_MAP[ext] || 'application/octet-stream' })
     fs.createReadStream(safePath).pipe(res)
+  }
+
+  /**
+   * 「工程不存在 / 作用域失效」时的容错响应体（v0.6.5）。
+   *
+   * 契约要点：
+   *   - **HTTP 200 而不是 404**：看板把 404 当作链路错误，会让整块记忆区归零；
+   *     未知工程在语义上等价于「这棵树是空的」，应当按空态渲染并给出可读提示。
+   *   - `data` 与 `nodes` **同时**给出空数组：`data` 是看板既有字段，`nodes` 是本次
+   *     新增的显式别名，任何一侧的消费者都能拿到规范的空列表而无需判空。
+   *   - `message` 携带可读原因（含用户填写的工程标识），便于前端直接展示。
+   */
+  private emptyTreePayload(key: string): {
+    data: unknown[]
+    nodes: unknown[]
+    message: string
+    project: string
+    resolved: false
+  } {
+    return {
+      data: [],
+      nodes: [],
+      message: `未找到工程「${key}」，已返回空记忆树`,
+      project: key,
+      resolved: false,
+    }
   }
 
   private sendJson(res: http.ServerResponse, statusCode: number, data: unknown): void {
