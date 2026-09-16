@@ -2,8 +2,11 @@
      工程选择器：真正的下拉选择框（按钮 + 弹出清单）。
      * 按钮常显当前工程名称与记忆数（如 my-dsh-plugins (4)）；
      * 下拉列出所有可用工程（含各自的记忆数），点击即切换整棵树；
+       服务端已在清单读取时清理「零记忆工程」并收敛同名工程，所以这里只会出现
+       有记忆的工程 + 宿主当前工程，且名字两两不同；
      * 下拉框右侧集成「重命名」图标按钮（仅工程记忆态展示，全局偏好不出现），
        点击弹出简洁输入框，确认后 PATCH /api/projects 并即时更新下拉与树根名；
+       撞名时服务端回 409 并带上占用者名字，弹层原样展示该理由（工程名必须唯一）；
      * 加载中 / 真空态有明确占位 —— 只有「工程清单与节点数据都为空」才显示
        暂无工程记忆，绝不误报（/api/projects 失败时由 store 用节点数据反推兜底）。
      配色全部走 style.css 的 --tlm-* 令牌层，跨源 iframe 内随宿主主题自适应。 -->
@@ -54,7 +57,10 @@ function nextTickPromise(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
-/** 确认重命名：调用 store.renameProject（PATCH /api/projects），成功即刷新下拉与树根名 */
+/**
+ * 确认重命名：调用 store.renameProject（PATCH /api/projects），成功即刷新下拉与树根名。
+ * 失败时原样展示服务端理由（如「已被工程「xxx」占用」）—— 工程名必须全局唯一。
+ */
 async function confirmRename(): Promise<void> {
   const scope = store.currentProjectScope
   const name = renameValue.value.trim()
@@ -64,12 +70,12 @@ async function confirmRename(): Promise<void> {
   }
   renaming.value = true
   renameError.value = ''
-  const ok = await store.renameProject(scope, name)
+  const result = await store.renameProject(scope, name)
   renaming.value = false
-  if (ok) {
+  if (result.ok) {
     renameOpen.value = false
   } else {
-    renameError.value = '重命名失败，请稍后重试'
+    renameError.value = result.error
   }
 }
 

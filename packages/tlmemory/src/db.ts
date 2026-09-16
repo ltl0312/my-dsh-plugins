@@ -6,8 +6,24 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
+import crypto from 'node:crypto'
 import Database from 'better-sqlite3'
 import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './types.js'
+
+/** 工程清单自愈维护的改动明细（供日志与测试断言） */
+export interface ProjectMaintenance {
+  /** 因「没有任何记忆文件」而被清理掉的工程 scope */
+  purgedScopes: string[]
+  /** 因与其他工程重名而被改名的工程 */
+  renamed: Array<{ scope: string; from: string; to: string }>
+}
+
+/** 由 scope 导出的稳定短标识：同名工程去重后缀（repo:<hash> 取 hash 前 6 位） */
+function scopeTag(scope: string): string {
+  const hashStyle = /^repo:([0-9a-fA-F]{6,})$/.exec(scope)
+  if (hashStyle) return hashStyle[1].slice(0, 6).toLowerCase()
+  return crypto.createHash('sha256').update(scope).digest('hex').slice(0, 6)
+}
 
 /** 路径分段白名单正则：仅允许字母、数字、下划线、中文与连字符 */
 const SEGMENT_WHITELIST = /[^a-zA-Z0-9_\u4e00-\u9fa5\-]/g
@@ -445,14 +461,68 @@ export class MemoryDB {
   }
 
   /**
+   * 工程名唯一性查询：返回除 excludeScope 之外**占用该工程名**（忽略大小写）的工程。
+   *
+   * 为什么必须唯一：看板下拉框以工程名作为人的唯一线索，两个同名工程在界面上完全
+   * 无法区分；且 findProjectScope 按名字解析时只能取其一（重名即歧义）。因此
+   * 「注册」「重命名」两条写路径都必须先过这道闸。
+   */
+  public findProjectNameOwner(name: string, excludeScope?: string): { scope: string; name: string } | null {
+    const key = String(name ?? '').trim()
+    if (!key) return null
+    const row = this.db
+      .prepare('SELECT scope, name FROM projects WHERE lower(name) = lower(?) AND scope <> ? LIMIT 1')
+      .get(key, excludeScope ?? '') as { scope: string; name: string } | undefined
+    return row ?? null
+  }
+
+  /** 登记表里是否存在该 scope（用于「当前活跃工程登记项是否在位」的判定） */
+  public hasProject(scope: string): boolean {
+    const key = String(scope ?? '').trim()
+    if (!key) return false
+    return this.db.prepare('SELECT 1 AS ok FROM projects WHERE scope = ?').get(key) !== undefined
+  }
+
+  /**
+   * 为工程作用域解析**不与他人重名**的工程名。
+   *
+   * 场景：两个不同路径的仓库目录同名（两台机器上的 TLToolBox、monorepo 里多个
+   * 同名子包、目录改名后遗留的旧 scope），basename 天然撞车。此时给后来者追加
+   * scope 短标识（如 `TLToolBox (a1b2c3)`），既保住人类可读前缀，又保证全局唯一。
+   *
+   * 自愈性：短标识是按需追加的 —— 冲突方被清理后再次调用会自动摘掉后缀，
+   * 因此本函数幂等，可安全地在每次登记/兜底时重算。
+   */
+  private resolveUniqueProjectName(base: string, scope: string): string {
+    const cleanBase = String(base ?? '').trim() || scope
+    if (this.findProjectNameOwner(cleanBase, scope) === null) return cleanBase
+    const tag = scopeTag(scope)
+    const tagged = `${cleanBase} (${tag})`
+    if (this.findProjectNameOwner(tagged, scope) === null) return tagged
+    for (let i = 2; i < 100; i++) {
+      const candidate = `${cleanBase} (${tag}-${i})`
+      if (this.findProjectNameOwner(candidate, scope) === null) return candidate
+    }
+    // 理论不可达：兜底退化为以 scope 原文命名（scope 是主键，必然唯一）
+    return scope
+  }
+
+  /**
    * 自动登记工程作用域（宿主装配时调用）。
-   * 若该 scope 已被用户手工命名（is_manual=1），保留用户命名不覆盖。
+   * 1. 若该 scope 已被用户手工命名（is_manual=1），保留用户命名不覆盖；
+   * 2. 自动命名必须全局唯一 —— 与他人重名时自动追加 scope 短标识（见 resolveUniqueProjectName）。
    */
   public registerProject(scope: string, name: string, root?: string | null): void {
     const cleanScope = String(scope ?? '').trim()
     if (!cleanScope) return
     const cleanName = String(name ?? '').trim() || cleanScope
     const now = Date.now()
+    const existing = this.db.prepare('SELECT is_manual FROM projects WHERE scope = ?').get(cleanScope) as
+      | { is_manual: number }
+      | undefined
+    // 手工命名过的工程不参与自动重命名（名字由用户定），写入值会被下面的 CASE 忽略
+    const autoName =
+      existing?.is_manual === 1 ? cleanName : this.resolveUniqueProjectName(cleanName, cleanScope)
     this.db
       .prepare(`
         INSERT INTO projects (scope, name, root, is_manual, created_at, updated_at)
@@ -462,17 +532,20 @@ export class MemoryDB {
           root = COALESCE(excluded.root, projects.root),
           updated_at = excluded.updated_at
       `)
-      .run(cleanScope, cleanName, root ?? null, now, now)
+      .run(cleanScope, autoName, root ?? null, now, now)
   }
 
   /**
    * 手工命名工程作用域：把历史遗留的 repo:<hash> 改成可读名字。
    * 置 is_manual=1 后自动登记不再覆盖。
+   * **唯一性闸门**：目标名字若已被其它工程占用则拒绝（返回 false），
+   * 由服务端转译为 409 并带上占用者名字，杜绝「看板出现两个同名工程」。
    */
   public renameProject(scope: string, name: string): boolean {
     const cleanScope = String(scope ?? '').trim()
     const cleanName = String(name ?? '').trim()
     if (!cleanScope || !cleanName) return false
+    if (this.findProjectNameOwner(cleanName, cleanScope) !== null) return false
     const now = Date.now()
     const result = this.db
       .prepare(`
@@ -488,8 +561,137 @@ export class MemoryDB {
   }
 
   /**
+   * 清理「没有任何记忆文件」的工程（看板里不再堆积历史遗留的空工程）。
+   *
+   * 判定的四个关键点：
+   * 1. 以**叶子节点**（is_leaf=1，即真正的记忆文件）为准，而不是 nodes 总行数 ——
+   *    删除最后一条记忆时 deleteNode 只删子树、不剪父目录，若按 nodes 计数，
+   *    该工程会残留一串空目录骨架而永远不算「空」，看板里就会留下一个
+   *    只有空目录、没有任何记忆的工程；
+   * 2. 清理是**连带**的：既然该工程已无记忆，其空目录骨架与登记项一并删除，
+   *    否则 listProjects 仍会从 nodes 里把它们聚合回清单（删了等于没删）；
+   * 3. **豁免 keepScope（宿主当前活跃工程）**：它是「当前工程就绪、可随时新建沉淀」
+   *    的心智锚点 —— 看板需要它常驻下拉框（标记为 0 条）以便随时切入空树后新建，
+   *    因此零记忆也不清理（见 server 的 GET /api/projects 展示保证）；
+   * 4. 除当前工程外的历史遗留（路径漂移产生的无用 scope、只登记过没写过的目录等）
+   *    依然彻底清理。
+   *
+   * 候选集取「登记表 scope ∪ nodes 里出现过的 scope」的并集，覆盖
+   * 「只登记过没写过」与「只写过没登记过（历史库）」两种遗留形态。
+   * 返回被清理的 scope 列表；幂等，可安全重复调用。
+   */
+  public pruneEmptyProjects(options: { keepScope?: string | null } = {}): string[] {
+    const keep = String(options.keepScope ?? '').trim()
+    const doomed = this.db
+      .prepare(`
+        SELECT scope FROM (
+          SELECT scope FROM projects WHERE scope <> 'global'
+          UNION
+          SELECT DISTINCT tree_type AS scope FROM nodes WHERE tree_type <> 'global'
+        )
+        WHERE scope <> COALESCE(?, '')
+          AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.tree_type = scope AND n.is_leaf = 1)
+      `)
+      .all(keep) as Array<{ scope: string }>
+    if (doomed.length === 0) return []
+    // 叶子删除经 trg_nodes_ad 触发器同步清理 FTS5 索引，不留孤立句柄
+    const removeNodes = this.db.prepare('DELETE FROM nodes WHERE tree_type = ?')
+    const removeRegistry = this.db.prepare('DELETE FROM projects WHERE scope = ?')
+    this.withTransaction(() => {
+      for (const row of doomed) {
+        removeNodes.run(row.scope)
+        removeRegistry.run(row.scope)
+      }
+    })
+    return doomed.map((row) => row.scope)
+  }
+
+  /**
+   * 同名工程自愈：历史库可能已存在重名（新登记已由 registerProject 拦截）。
+   * 同一名字（忽略大小写）被多个 scope 持有时，按
+   * 「手工命名 > 记忆条数多 > 最近更新」选出保留原名者，其余追加 scope 短标识。
+   * 返回改动明细；幂等（重名消失后不再改动）。
+   */
+  public normalizeDuplicateNames(): Array<{ scope: string; from: string; to: string }> {
+    const rows = this.db
+      .prepare(`
+        SELECT p.scope AS scope,
+               p.name AS name,
+               p.is_manual AS is_manual,
+               p.updated_at AS updated_at,
+               (SELECT COUNT(*) FROM nodes n WHERE n.tree_type = p.scope AND n.is_leaf = 1) AS leaf_count
+        FROM projects p
+      `)
+      .all() as Array<{ scope: string; name: string; is_manual: number; updated_at: number; leaf_count: number }>
+
+    const groups = new Map<string, typeof rows>()
+    for (const row of rows) {
+      const key = row.name.trim().toLowerCase()
+      const bucket = groups.get(key)
+      if (bucket) bucket.push(row)
+      else groups.set(key, [row])
+    }
+
+    // 名字占用计数：改名过程中实时维护，保证生成的新名字本身也不与他人冲突
+    const held = new Map<string, number>()
+    const bump = (name: string, delta: number): void => {
+      const key = name.trim().toLowerCase()
+      const next = (held.get(key) ?? 0) + delta
+      if (next <= 0) held.delete(key)
+      else held.set(key, next)
+    }
+    for (const row of rows) bump(row.name, 1)
+
+    const changes: Array<{ scope: string; from: string; to: string }> = []
+    const update = this.db.prepare('UPDATE projects SET name = ?, updated_at = ? WHERE scope = ?')
+    this.withTransaction(() => {
+      for (const bucket of groups.values()) {
+        if (bucket.length < 2) continue
+        const ranked = [...bucket].sort(
+          (a, b) =>
+            b.is_manual - a.is_manual ||
+            Number(b.leaf_count ?? 0) - Number(a.leaf_count ?? 0) ||
+            b.updated_at - a.updated_at ||
+            a.scope.localeCompare(b.scope),
+        )
+        const winner = ranked[0]
+        for (const loser of ranked.slice(1)) {
+          const baseName = winner.name.trim() || winner.scope
+          const tag = scopeTag(loser.scope)
+          bump(loser.name, -1)
+          let candidate = `${baseName} (${tag})`
+          let i = 2
+          while (held.has(candidate.trim().toLowerCase())) {
+            candidate = `${baseName} (${tag}-${i})`
+            i += 1
+          }
+          bump(candidate, 1)
+          update.run(candidate, Date.now(), loser.scope)
+          changes.push({ scope: loser.scope, from: loser.name, to: candidate })
+        }
+      }
+    })
+    return changes
+  }
+
+  /**
+   * 工程清单自愈维护：先清理零记忆工程（豁免当前活跃工程），再消除同名工程。
+   * 幂等，可在插件启动与每次清单读取前安全重复调用。
+   * keepScope 传宿主当前工程 scope —— 它是看板的「当前工程就绪」锚点，零记忆也保留。
+   */
+  public maintainProjects(options: { keepScope?: string | null } = {}): ProjectMaintenance {
+    return {
+      purgedScopes: this.pruneEmptyProjects(options),
+      renamed: this.normalizeDuplicateNames(),
+    }
+  }
+
+  /**
    * 列出所有工程作用域：以「库里真实存在的记忆记录」为准（按 tree_type 去重聚合），
-   * 并补上仅在登记表中存在、尚无记忆的当前工程，保证下拉框总能选中正在用的工程。
+   * 并补上仅在登记表中存在、尚无记忆的已登记工程（含宿主当前工程）。
+   *
+   * 注意：本方法只做聚合、不改数据。看板 GET /api/projects 会先调用
+   * maintainProjects() 清理零记忆工程与同名工程，再调用本方法取净化后的清单。
    */
   public listProjects(): ProjectSummary[] {
     const rows = this.db

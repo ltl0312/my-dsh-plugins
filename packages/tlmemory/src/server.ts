@@ -3,7 +3,12 @@
 // 安全基线（CVE-2026-82533 回环穿透防御）：
 // 1. listen 严格显式绑定 IPv4 回环 127.0.0.1，严禁监听 0.0.0.0；
 // 2. WebSocket upgrade 握手强校验 Host 与 Origin 双头，仅放行 127.0.0.1 / localhost；
-// 3. 静态资源经 path.normalize 归一化并强制锚定 dist 根内，拦截目录穿越逃逸。
+// 3. 静态资源经 path.normalize 归一化并强制锚定 dist 根内，拦截目录穿越逃逸；
+// 4. CORS 白名单回复（非通配符）：仅当请求头携带的 Origin 通过回环白名单校验时，
+//    才回写 Access-Control-Allow-Origin=<该具体 Origin>。宿主页面（如
+//    http://127.0.0.1:3080）与看板服务端（http://127.0.0.1:4890）天然不同源，
+//    缺失 ACAO 会让浏览器的跨源探针 fetch 被 CORS policy 直接拦截，宿主据此误判
+//    服务离线并弹出遮罩 —— 白名单回复既修复该误判，又不向公网/未授权域名开口子。
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -57,6 +62,43 @@ function isAllowedOrigin(originHeader: string | undefined): boolean {
     // 畸形 Origin（非合法 URL）一律拒绝
     return false
   }
+}
+
+/** 预检放行的方法集合：与下方全部 API 路由实际使用的方法保持一致 */
+const CORS_ALLOW_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+
+/**
+ * 预检放行的请求头集合：看板的写操作统一以 application/json 提交（POST/PUT/PATCH/DELETE），
+ * 该 Content-Type 属非简单类型，浏览器必然先发 OPTIONS 预检，故必须显式放行 Content-Type。
+ */
+const CORS_ALLOW_HEADERS = 'Content-Type'
+
+/**
+ * 解析可回写 CORS 头的合法 Origin。
+ * 返回 null 表示「不回写任何 CORS 头」：包括无 Origin（同源请求/本地非浏览器客户端）
+ * 与白名单外的 Origin（恶意网页、公网域名）两类。
+ * 注意：**绝不使用通配符 `*`** —— 回写的必须是命中的具体 Origin，
+ * 且不带 Access-Control-Allow-Credentials（本服务全程无 Cookie 鉴权依赖）。
+ */
+function resolveCorsOrigin(originHeader: string | undefined): string | null {
+  if (!originHeader) return null
+  return isAllowedOrigin(originHeader) ? originHeader : null
+}
+
+/**
+ * 为通过白名单校验的跨源请求回写 CORS 响应头（在 writeHead 之前调用即可，
+ * Node 会把 setHeader 写入的头与后续 writeHead 的显式头合并保留）。
+ * `Vary: Origin` 保证中间缓存（含浏览器 HTTP 缓存）不会把带 ACAO 的响应
+ * 错配给另一个 Origin。
+ */
+function applyCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): string | null {
+  const origin = resolveCorsOrigin(req.headers.origin)
+  if (origin === null) return null
+  res.setHeader('Access-Control-Allow-Origin', origin)
+  res.setHeader('Access-Control-Allow-Methods', CORS_ALLOW_METHODS)
+  res.setHeader('Access-Control-Allow-Headers', CORS_ALLOW_HEADERS)
+  res.setHeader('Vary', 'Origin')
+  return origin
 }
 
 /** 解析 web/dist 静态产物根目录（兼容 CJS __dirname 与 ESM import.meta.url 双产物） */
@@ -263,10 +305,13 @@ export class MemoryServer {
   }
 
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    // P0-1 安全基线：不再返回任何 Access-Control-Allow-* 头。
-    // 看板与 API 同源（127.0.0.1:4890），同源请求天然不需要 CORS；
-    // 任何跨源网页发起的 fetch/DELETE 预检因无 ACAO 头而必然失败，
-    // 简单请求（GET）的响应也无法被跨源页面读取 —— 任意网页读写删记忆库的通道就此封死。
+    // P0-1 安全基线（保留）：CORS 绝不是无差别敞开 —— 仅对通过回环白名单校验的 Origin
+    // 回写 ACAO 具体值，绝不使用通配符 `*`。白名单外网页发起的 fetch/DELETE 预检
+    // 因拿不到 ACAO 头而必然失败，任意公网页面读写删记忆库的通道依旧封死。
+    //
+    // 白名单内跨源则是**必须**放行的合法场景：宿主页面（127.0.0.1:3080，另一端口
+    // 即另一 Origin）的在线探针会 fetch http://127.0.0.1:4890/api/health，
+    // 缺失 ACAO 时浏览器以 CORS policy 阻断响应，宿主将服务误判为离线并弹遮罩。
 
     // DNS rebinding 防御：普通 HTTP 请求与 WS upgrade 一致执行 Host 头白名单校验。
     // 恶意域名的 A 记录指向 127.0.0.1 时，浏览器发送的 Host 头是恶意域名本身，
@@ -274,6 +319,24 @@ export class MemoryServer {
     if (!isAllowedHost(req.headers.host)) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('Forbidden')
+      return
+    }
+
+    // 白名单命中的 Origin 回写 CORS 头（含后续 403/404/413 等业务响应一并携带，
+    // 避免宿主探针把「服务在岗但端点报错」误读成 CORS 拦截）
+    applyCorsHeaders(req, res)
+
+    // CORS 预检（OPTIONS）：白名单内的 Origin 直接 204 结束，不进入任何业务路由；
+    // 白名单外或畸形 Origin 明确回 403，不给「先探测再说」留余地。
+    if (req.method === 'OPTIONS') {
+      const origin = req.headers.origin
+      if (origin !== undefined && resolveCorsOrigin(origin) === null) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('Forbidden')
+        return
+      }
+      res.writeHead(204)
+      res.end()
       return
     }
 
@@ -290,17 +353,41 @@ export class MemoryServer {
         return
       }
 
-      // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）
+      // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）。
+      // 读取前先做一次自愈维护（幂等）：清掉「没有任何记忆文件」的历史遗留工程、
+      // 消除同名工程；**豁免宿主当前活跃工程**（方案 B）—— 它零记忆时也保留，
+      // 作为「当前工程就绪、可随时新建沉淀」的心智锚点常驻下拉框。
       if (req.method === 'GET' && pathname === '/api/projects') {
+        const current = this.currentProject
+        const maintenance = this.db.maintainProjects({ keepScope: current?.scope ?? null })
+        if (maintenance.purgedScopes.length > 0) {
+          this.logger?.info?.(
+            `[tlmemory-server] 自动清理 ${maintenance.purgedScopes.length} 个零记忆工程: ${maintenance.purgedScopes.join(', ')}`,
+          )
+        }
+        for (const change of maintenance.renamed) {
+          this.logger?.warn?.(
+            `[tlmemory-server] 工程重名自愈: ${change.scope} 「${change.from}」→「${change.to}」`,
+          )
+        }
+        // 展示保证（方案 B）：当前活跃工程必须常驻清单（记忆数标记为 0），
+        // 看板才能显示 `xxx (0)`、允许选中并切入空树后新建，形成「当前工程就绪」的锚点。
+        // 正常路径它的登记项已被 keepScope 豁免保留；这里用幂等登记再兜一层 ——
+        // 多宿主并存时另一宿主的维护周期不知道我们的活跃 scope，仍可能清掉它，
+        // 而「scope 有记忆却没有登记项」的历史形态也会让工程名退化成裸哈希。
+        if (current && !this.db.hasProject(current.scope)) {
+          this.db.registerProject(current.scope, current.name, current.root)
+        }
         this.sendJson(res, 200, {
           data: this.db.listProjects(),
-          current: this.currentProject?.scope ?? null,
-          currentName: this.currentProject?.name ?? null,
+          current: current?.scope ?? null,
+          currentName: current?.name ?? null,
         })
         return
       }
-
-      // 手工命名工程（把历史遗留的 repo:<hash> 改成可读名字）
+      // 手工命名工程（把历史遗留的 repo:<hash> 改成可读名字）。
+      // 唯一性闸门：目标名字被其它工程占用时返回 409 并指明占用者，
+      // 不让看板出现两个同名工程（同名工程在界面上无法区分，按名解析也会歧义）。
       if (req.method === 'PATCH' && pathname === '/api/projects') {
         const body = await this.readBodyOr413(req, res)
         if (body === null) return
@@ -310,7 +397,16 @@ export class MemoryServer {
           this.sendJson(res, 400, { error: 'scope 与 name 均为必填' })
           return
         }
-        this.sendJson(res, 200, { success: this.db.renameProject(scope, name), data: this.db.listProjects() })
+        const owner = this.db.findProjectNameOwner(name.trim(), scope)
+        if (owner !== null) {
+          this.sendJson(res, 409, { error: this.nameConflictMessage(name.trim()) })
+          return
+        }
+        if (!this.db.renameProject(scope, name)) {
+          this.sendJson(res, 409, { error: '工程重命名失败：名称不可用' })
+          return
+        }
+        this.sendJson(res, 200, { success: true, data: this.db.listProjects() })
         return
       }
 
@@ -327,7 +423,7 @@ export class MemoryServer {
 
         // 显式工程名 / scope 原文：收敛到唯一工程
         if (projectParam) {
-          const resolved = this.db.findProjectScope(projectParam)
+          const resolved = this.resolveProjectScopeParam(projectParam)
           if (resolved === null) {
             this.sendJson(res, 404, { error: `未找到工程 ${projectParam}` })
             return
@@ -365,7 +461,7 @@ export class MemoryServer {
 
         let treeType: string | undefined
         if (projectParam) {
-          const resolved = this.db.findProjectScope(projectParam)
+          const resolved = this.resolveProjectScopeParam(projectParam)
           if (resolved === null) {
             this.sendJson(res, 404, { error: `未找到工程 ${projectParam}` })
             return
@@ -405,8 +501,18 @@ export class MemoryServer {
           return
         }
         const resolved = this.db.findProjectScope(key) ?? key
+        // 与 PATCH /api/projects 同一道唯一性闸门（两个端点必须给出完全一致的语义）
+        const owner = this.db.findProjectNameOwner(newName, resolved)
+        if (owner !== null) {
+          this.sendJson(res, 409, { error: this.nameConflictMessage(newName) })
+          return
+        }
         const success = this.db.renameProject(resolved, newName)
-        if (success) this.notifyTreeChanged(resolved)
+        if (!success) {
+          this.sendJson(res, 409, { error: '工程重命名失败：名称不可用' })
+          return
+        }
+        this.notifyTreeChanged(resolved)
         this.sendJson(res, 200, { success, data: this.db.listProjects() })
         return
       }
@@ -437,13 +543,16 @@ export class MemoryServer {
             this.sendJson(res, 400, { error: 'scope 为 project 时归属工程（project）不能为空' })
             return
           }
-          const resolved = this.db.findProjectScope(project)
-          if (resolved !== null) {
-            treeType = resolved
-          } else {
-            treeType = project
-            this.db.registerProject(treeType, project, null)
-          }
+          // 当前工程零记忆时不占登记表，这里必须能解析回它的 scope（否则第一条记忆建不出来）
+          treeType = this.resolveProjectScopeParam(project) ?? project
+          // 写入即登记：零记忆工程已被维护清理，一旦有记忆落库就必须重建登记项，
+          // 否则看板只会拿到裸 scope 哈希当工程名。当前工程用可读名兜底。
+          const isCurrent = treeType === this.currentProject?.scope
+          this.db.registerProject(
+            treeType,
+            isCurrent ? (this.currentProject?.name ?? treeType) : treeType,
+            isCurrent ? (this.currentProject?.root ?? null) : null,
+          )
         }
 
         try {
@@ -569,18 +678,66 @@ export class MemoryServer {
   }
 
   /**
-   * readJsonBody 的统一入口：超限时直接回 413 并销毁连接（响应写完后才销毁，
-   * 保证客户端能读到状态码），返回 null 表示调用方必须立即终止处理。
+   * 工程重名冲突的可读提示（两个重命名端点共用）。
+   *
+   * 为什么只提「另一个工程」而不回显对方名字：唯一性是**按名字查得**的
+   * （findProjectNameOwner 用 lower(name) 匹配），所以冲突对方的名字必然与所求
+   * 名字相同 —— 回显只会变成「已被工程「X」占用」而 X 就是用户刚输入的那个名字，
+   * 徒增困惑。这里改为点明冲突性质与下一步动作。
+   */
+  private nameConflictMessage(name: string): string {
+    return `工程名「${name}」已被另一个工程占用（同名工程在界面上无法区分），请换一个名字`
+  }
+
+  /**
+   * 解析 ?project= / ?scope= 里的工程标识为确定 scope。
+   *
+   * 先走登记表 / 节点的常规解析（findProjectScope）；解析不出来时，若它正是
+   * **宿主当前工程的 scope 或名字**，则视为合法并指向当前工程。
+   *
+   * 为什么还要这层兜底：当前工程的登记项平时由 keepScope 豁免保留，但多宿主并存时
+   * 另一宿主的维护周期可能清掉它（对方不知道我们的活跃 scope）。此时看板在自己工程上
+   * 取树仍必须拿到**空树而不是 404**，否则「新建第一条记忆」的入口就断了。
+   *
+   * 注意顺序：常规解析优先，所以当前工程的名字若被另一个**有记忆**的工程占用，
+   * 仍然解析到那个工程（不劫持），只有真的无从解析时才兜底到当前工程。
+   */
+  private resolveProjectScopeParam(key: string): string | null {
+    const resolved = this.db.findProjectScope(key)
+    if (resolved !== null) return resolved
+    if (this.currentProject) {
+      if (key === this.currentProject.scope || key === this.currentProject.name) {
+        return this.currentProject.scope
+      }
+    }
+    return null
+  }
+
+  /**
+   * readJsonBody 的统一入口：超限时回 413 并**保持连接语义**（不做任何强断），
+   * 返回 null 表示调用方必须立即终止处理。
+   *
+   * 413 投递可靠性加固（2026-09-16，实测数据见 tests/p2-fixes.spec.ts）：
+   * 曾经的实现是 `res.end(..., () => req.destroy())`，意图「超限客户端不值得继续占用」，
+   * 但这会让**响应字节与对端仍在途的请求体赛跑**：TCP 语义下 destroy() 在接收缓冲仍有
+   * 未读数据时发出的是 RST 而非 FIN，RST 会让对端内核直接丢弃接收缓冲 —— 客户端因此
+   * 拿到 ECONNRESET 而不是 413。压测实测（40×300KB / 20×8MB / 并发 24×600KB）：
+   *   旧实现 300KB 失败 8/40，8MB 失败 20/20，并发 600KB 失败 24/24；
+   *   仅去掉 req.destroy() 后 300KB 与 600KB 全通，但 8MB 仍失败 15/20
+   *   —— 因为 `Connection: close` 会让 Node 在响应 finish 时立即 `destroySoon()`，
+   *   与客户端在途请求体同样产生 RST；
+   *   本实现（不强断、不声明 Connection: close）三个场景全部 0 失败。
+   * 代价与兜底：超限请求体的剩余字节会被继续消费并丢弃（readJsonBody 在超限后即停止
+   * 累积，内存占用仍严格封顶在 MAX_BODY_BYTES），连接资源由 Node 的 requestTimeout /
+   * keepAliveTimeout 兜底回收，不再由本方法手工强断。
    */
   private async readBodyOr413(req: http.IncomingMessage, res: http.ServerResponse): Promise<Record<string, unknown> | null> {
     const { body, tooLarge } = await this.readJsonBody(req)
     if (!tooLarge) return body
-    res.setHeader('Connection', 'close')
+    // 显式保证剩余请求体继续被消费丢弃：既不阻塞对端写入，也避免连接停在半途
+    req.resume()
     res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ error: `请求体超过 ${MAX_BODY_BYTES} 字节上限` }), () => {
-      // 响应落盘后再关闭连接：超限客户端不值得继续占用
-      req.destroy()
-    })
+    res.end(JSON.stringify({ error: `请求体超过 ${MAX_BODY_BYTES} 字节上限` }))
     return null
   }
 

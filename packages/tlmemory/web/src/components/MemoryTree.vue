@@ -61,7 +61,9 @@ function requestDelete(node: MemoryNodeDto) {
 
 <template>
   <div class="flex flex-col gap-2">
-    <div v-if="groups.length === 0" class="tlm-empty">当前记忆树暂无叶子沉淀</div>
+    <!-- 空状态：当前工程还没有任何记忆（零记忆工程在方案 B 下会常驻下拉框），
+         文案给出下一步动作，而不是只陈述「暂无」 -->
+    <div v-if="groups.length === 0" class="tlm-empty">暂无记忆，点击上方「+ 新建记忆」开始沉淀</div>
 
     <section v-for="group in groups" :key="group.path" class="tlm-group">
       <!-- 分组头：整行可点；箭头是统一尺寸的 SVG，旋转过渡表达展开 / 收起 -->

@@ -291,8 +291,9 @@ watch(
       </button>
     </div>
 
+    <!-- 空状态：与列表视图共用同一引导文案（选中 0 条记忆的工程时优雅占位） -->
     <div v-if="store.scopedNodes.length === 0" class="tlm-graph-blank tlm-empty">
-      当前记忆树暂无叶子沉淀
+      暂无记忆，点击上方「+ 新建记忆」开始沉淀
     </div>
     <div v-else class="tlm-graph-hint">拖拽平移 · 滚轮缩放</div>
   </div>

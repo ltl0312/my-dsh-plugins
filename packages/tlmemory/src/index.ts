@@ -173,12 +173,31 @@ export function apply(ctx: Context, config: Config): () => void {
   const projectScope = project.scope
   db.registerProject(project.scope, project.name, project.root)
 
+  // 工程清单自愈：清掉历史遗留的「零记忆工程」，并把重名工程收敛为唯一名；
+  // keepScope 豁免当前活跃工程 —— 它零记忆也保留，作为「当前工程就绪」的看板锚点。
+  // 每次启动都跑一次，看板不必等到打开才被清理。
+  try {
+    const maintenance = db.maintainProjects({ keepScope: projectScope })
+    if (maintenance.purgedScopes.length > 0) {
+      ctx.logger?.info?.(
+        `[tlmemory] 自动清理 ${maintenance.purgedScopes.length} 个零记忆工程: ${maintenance.purgedScopes.join(', ')}`,
+      )
+    }
+    for (const change of maintenance.renamed) {
+      ctx.logger?.warn?.(`[tlmemory] 工程重名自愈: ${change.scope} 「${change.from}」→「${change.to}」`)
+    }
+  } catch (err) {
+    ctx.logger?.error?.('[tlmemory] 工程清单维护异常:', err)
+  }
+
   // P1-5 会话级工程身份解析：GUI 宿主可能同时服务多个 workspace 的会话，
   // 进程级固定 scope 会把 A 仓库的沉淀写进 B 仓库的记忆树（记忆错账）。
   // 事件回调携带 session 对象时，优先从其 workspace 线索按会话解析身份并缓存
   // （WeakMap 随会话对象生命周期自动回收）；解析不出回退进程级身份。
   const sessionIdentityCache = new WeakMap<object, ProjectIdentity>()
   const registeredScopes = new Set<string>([projectScope])
+  /** scope → 工程身份（可读名 / 根目录），沉淀前据此重建可能已被维护清掉的登记项 */
+  const identityByScope = new Map<string, ProjectIdentity>([[projectScope, project]])
   const resolveSessionScope = (session: unknown): string => {
     if (!session || typeof session !== 'object') return projectScope
     const cached = sessionIdentityCache.get(session)
@@ -187,12 +206,25 @@ export function apply(ctx: Context, config: Config): () => void {
     if (!workspaceDir) return projectScope
     const identity = resolveProjectIdentity(workspaceDir)
     sessionIdentityCache.set(session, identity)
+    identityByScope.set(identity.scope, identity)
     // 每个新解析出的工程身份都登记（保留用户手工命名），保证看板下拉框可见
     if (!registeredScopes.has(identity.scope)) {
       registeredScopes.add(identity.scope)
       db.registerProject(identity.scope, identity.name, identity.root)
     }
     return identity.scope
+  }
+
+  /**
+   * 沉淀前确保登记项在位（幂等 upsert）。
+   * 为什么必须重复登记：零记忆工程会被看板读取/启动时的维护周期清理（合规要求），
+   * 而登记项是「可读工程名」的唯一来源 —— 少了它，新落库的记忆会让看板
+   * 以裸 scope 哈希显示整个工程。每次沉淀前补登记，成本可忽略（沉淀本身要调 LLM）。
+   */
+  const ensureProjectRegistered = (scope: string): void => {
+    const identity = identityByScope.get(scope)
+    if (!identity) return
+    db.registerProject(identity.scope, identity.name, identity.root)
   }
 
   // P2-4 沉淀链路限流：多轮快速结算时多个提炼任务并行无上限（token 费用 +
@@ -209,6 +241,11 @@ export function apply(ctx: Context, config: Config): () => void {
         if (disposed) return
         activeExtractionAbort = controller
         const timer = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS)
+        try {
+          ensureProjectRegistered(scope)
+        } catch (err) {
+          ctx.logger?.error?.('[tlmemory] 工程登记补录异常:', err)
+        }
         return extractor
           .extractAndConsolidate(item, scope, { signal: controller.signal })
           .then(() => server.notifyTreeChanged(scope))

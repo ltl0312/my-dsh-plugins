@@ -50,6 +50,8 @@ export const useMemoryStore = defineStore('memory', () => {
   /** 当前选中的工程 scope（tree_type 原文）；空串表示尚未确定，后端会回退为全部工程 */
   const currentProjectScope = ref<string>('')
   const projects = ref<ProjectDto[]>([])
+  /** 服务端上报的宿主当前工程名；当前工程零记忆时不占清单位，靠它如实展示方位 */
+  const currentProjectName = ref<string>('')
   /** /api/projects 是否已结算（成功或失败）：决定顶栏显示「加载中」还是真实空态 */
   const projectsLoading = ref(true)
   const viewMode = ref<ViewMode>('list')
@@ -89,7 +91,7 @@ export const useMemoryStore = defineStore('memory', () => {
     return Array.from(map.values())
   })
 
-  /** 当前选中的工程（未选中或工程已消失时为 null） */
+  /** 当前选中的工程（未选中、或该工程零记忆不占清单位时为 null） */
   const currentProject = computed<ProjectDto | null>(
     () => projectOptions.value.find((item) => item.scope === currentProjectScope.value) ?? null,
   )
@@ -109,7 +111,10 @@ export const useMemoryStore = defineStore('memory', () => {
   /** 图谱根节点标题 / 列表分组标题 */
   const scopeLabel = computed<string>(() => {
     if (currentTree.value === 'global') return '全局偏好'
-    return currentProject.value?.name ?? '当前工程'
+    if (currentProject.value !== null) return currentProject.value.name
+    // 当前工程零记忆时不占清单位（服务端已按「零记忆即清理」维护），
+    // 但仍要如实告诉用户「你在哪个工程、它还没有记忆」，而不是笼统的「当前工程」
+    return currentProjectName.value ? `${currentProjectName.value}（无记忆）` : '当前工程'
   })
 
   /** 当前作用域内的节点（后端已按作用域收敛，这里仅做防御式过滤） */
@@ -133,11 +138,19 @@ export const useMemoryStore = defineStore('memory', () => {
     try {
       const res = await fetch('/api/projects')
       const json = await res.json()
-      projects.value = json.data || []
+      const list = (json.data || []) as ProjectDto[]
+      projects.value = list
+      const reported = typeof json.current === 'string' ? json.current : ''
+      currentProjectName.value = typeof json.currentName === 'string' ? json.currentName : ''
       // 用户已选过则以用户选择为准，否则用后端上报的当前工程（默认选中项的
       // 最终兜底在 bootstrap 里做，那里还能看到节点反推的工程清单）。
       if (!currentProjectScope.value) {
-        currentProjectScope.value = json.current || ''
+        currentProjectScope.value = reported
+      } else if (!list.some((item) => item.scope === currentProjectScope.value)) {
+        // 选中的工程已不在清单里（删掉最后一个记忆 → 服务端自动清理了该工程）：
+        // 回落到宿主当前工程，再退回清单首项，避免顶栏停在一个已不存在的工程上。
+        // 注意当前工程零记忆时也不在清单里，但仍是合法落点，所以优先回落到它。
+        currentProjectScope.value = reported || list[0]?.scope || ''
       }
     } catch (e) {
       console.error('拉取工程列表失败:', e)
@@ -304,22 +317,28 @@ export const useMemoryStore = defineStore('memory', () => {
     }
   }
 
-  /** 工程重命名：PATCH /api/projects，成功后刷新工程清单（下拉框与树根名随之更新） */
-  async function renameProject(scope: string, name: string): Promise<boolean> {
+  /**
+   * 工程重命名：PATCH /api/projects，成功后刷新工程清单（下拉框与树根名随之更新）。
+   * 服务端强制工程名唯一 —— 撞名时回 409 与占用者名字，这里原样透出给弹层展示，
+   * 不再笼统坍缩成「失败，请稍后重试」。
+   */
+  async function renameProject(scope: string, name: string): Promise<{ ok: boolean; error: string }> {
     try {
       const res = await fetch('/api/projects', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scope, name }),
       })
-      if (!res.ok) return false
-      const json = await res.json()
-      const ok = Boolean(json.success)
-      if (ok) await fetchProjects()
-      return ok
+      const json = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string }
+      if (!res.ok || !json.success) {
+        const message = typeof json.error === 'string' && json.error ? json.error : '重命名失败，请稍后重试'
+        return { ok: false, error: message }
+      }
+      await fetchProjects()
+      return { ok: true, error: '' }
     } catch (e) {
       console.error('工程重命名失败:', e)
-      return false
+      return { ok: false, error: '重命名失败：网络异常' }
     }
   }
 

@@ -81,6 +81,41 @@ describe('P2-1 / P2-8 / P2-9：服务端契约', () => {
     })
     expect(res.status).toBe(201)
   })
+
+  it('P2-9: 超限 413 必须可靠投递（连续 10 次大体积上传，不得退化为 ECONNRESET）', async () => {
+    // 回归固化（2026-09-16 加固）：旧实现在响应结束后 req.destroy()，与对端仍在途的请求体
+    // 赛跑 —— RST 会让对端内核丢弃接收缓冲里的 413，客户端拿到 ECONNRESET。
+    // 2MB 上传下旧实现几乎必然失败（8MB 实测 20/20 失败），故本用例对回归有确定性拦截力。
+    const oversized = 'x'.repeat(2 * 1024 * 1024)
+    const payload = JSON.stringify({ content: oversized })
+    const statuses: number[] = []
+    for (let i = 0; i < 10; i++) {
+      const res = await fetch(`${base}/api/nodes/1`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      })
+      statuses.push(res.status)
+      // 响应体必须完整可读（不只是状态码「碰巧」回来了）
+      const json = (await res.json()) as { error?: string }
+      expect(json.error).toContain('字节上限')
+    }
+    expect(statuses).toEqual(new Array(10).fill(413))
+  })
+
+  it('P2-9: 超限请求被拒后连接可继续复用（不残留半关闭连接）', async () => {
+    const oversized = 'x'.repeat(400 * 1024)
+    const rejected = await fetch(`${base}/api/nodes/1`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: oversized }),
+    })
+    expect(rejected.status).toBe(413)
+    // 紧随其后的小请求必须照常成功：证明超限拒绝没有把服务的请求管道带偏
+    const healthy = await fetch(`${base}/api/health`)
+    expect(healthy.status).toBe(200)
+    expect((await healthy.json()) as { service?: string }).toMatchObject({ ok: true, service: 'tlmemory' })
+  })
 })
 
 describe('P2-3：查询候选展开配额分配', () => {
