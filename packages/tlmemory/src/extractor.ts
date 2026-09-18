@@ -24,7 +24,11 @@ import type { RawReflectionItem, ReflectionResponse, SearchResult, TurnTrackItem
  */
 function traceExtract(line: string): void {
   try {
-    const file = path.join(os.homedir(), '.dsh', 'tlmemory-extract.log')
+    // 测试（vitest 设 NODE_ENV=test）绝不写真实日志：21:27 实测跑一次全量测试
+    // 会把合成夹具的 dispatch/结果混进生产追踪，干扰线上诊断的可读性。
+    // TLMEMORY_EXTRACT_LOG 可把追踪改道到指定文件（诊断实验用）。
+    if (process.env.NODE_ENV === 'test') return
+    const file = process.env.TLMEMORY_EXTRACT_LOG || path.join(os.homedir(), '.dsh', 'tlmemory-extract.log')
     try {
       if (fs.existsSync(file) && fs.statSync(file).size > 512 * 1024) fs.writeFileSync(file, '')
     } catch {
