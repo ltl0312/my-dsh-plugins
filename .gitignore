@@ -128,6 +128,11 @@ dist
 # pnpm
 .pnpm-store
 
+# 非 pnpm 锁文件：本仓库只用 pnpm（见 AGENTS.md），此类文件出现即视为误操作，兜底不进仓库
+package-lock.json
+yarn.lock
+npm-shrinkwrap.json
+
 # yarn v3
 .pnp.*
 .yarn/*

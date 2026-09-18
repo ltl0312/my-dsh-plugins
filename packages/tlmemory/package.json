@@ -4,6 +4,13 @@
   "license": "MIT",
   "description": "Cross-session and cross-project memory manager for dsh (silent turn-end sedimentation + native web client embedding)",
   "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "onFail": "error"
+    }
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

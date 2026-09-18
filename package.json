@@ -3,6 +3,17 @@
   "version": "1.0.0",
   "license": "MIT",
   "private": true,
+  "packageManager": "pnpm@12.4.2",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "onFail": "error"
+    }
+  },
   "scripts": {
     "build": "pnpm -r --filter \"./packages/**\" run build",
     "dev": "pnpm -r --filter \"./packages/**\" run dev",
