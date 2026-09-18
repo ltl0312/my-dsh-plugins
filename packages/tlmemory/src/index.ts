@@ -159,13 +159,31 @@ function shouldConsolidate(item: TurnTrackItem): boolean {
  * 从会话对象防御式提取 workspace 目录线索。
  * 宿主 session 对象结构未在官方契约中冻结，这里按常见命名做鸭子类型探测，
  * 全部不命中返回 undefined（由调用方回退进程级身份）。
+ *
+ * v0.6.9 关键补充：DSH 宿主的 `SessionService` 把会话工作目录收在 **`session.header.cwd`**，
+ * 顶层**没有** `workspaceDir / workspace / cwd / root` 任何一键 —— 旧实现四键全落空，
+ * 只能回退进程级身份（宿主 cwd，常为用户主目录），造成「会话记忆归到主目录伪工程」的
+ * 作用域错账（召回 0 命中 + 沉淀写错树，且当主目录恰在白名单内时防漂移闸门不触发，
+ * 错账完全静默）。
+ *
+ * `header.cwd` 是宿主认可的工作区根权威值：`dsh-workspace` 在把会话挂到工作区时
+ * 强制 `header.cwd` realpath === `workspace.record.path`（宿主源码
+ * `dsh-workspace/lib/index.js:114-123`），系统提示词的 `cwd` 变量也取同一字段
+ * （`dsh-agent-loop/lib/index.js:1536`）。
  */
 function extractSessionWorkspaceDir(session: unknown): string | undefined {
   if (!session || typeof session !== 'object') return undefined
   const record = session as Record<string, unknown>
+  // 旧四键优先：兼容「直接把工作目录挂在顶层」的宿主形态与非 DSH 宿主
   for (const key of ['workspaceDir', 'workspace', 'cwd', 'root']) {
     const value = record[key]
     if (typeof value === 'string' && value.trim()) return value
+  }
+  // DSH 宿主真实形态：cwd 收在会话创建头里
+  const header = record.header
+  if (header && typeof header === 'object') {
+    const cwd = (header as Record<string, unknown>).cwd
+    if (typeof cwd === 'string' && cwd.trim()) return cwd
   }
   return undefined
 }
@@ -188,6 +206,19 @@ export function apply(ctx: Context, config: Config): () => void {
   // （registry === null）时视为「无从判定」，退回旧行为以保证记忆不丢。
   const project = resolveProjectIdentity()
   const projectScope = project.scope
+  // 会话作用域可观测性（v0.6.9）：进程级身份是「会话未携带工作区线索时的兜底降落点」。
+  // 若它不是仓库根（向上找不到 .git），一旦宿主以任意目录启动，所有会话记忆都会归到该目录；
+  // 且当该目录恰在宿主白名单内时，下面的防漂移闸门不会触发，错账**完全静默**
+  // （2026-09-18 实证：宿主 cwd = 用户主目录，召回永远 0 命中、沉淀写进主目录伪工程，
+  //  靠对照实验的 projects.updated_at 才反推出来）。这里只告警不阻断：
+  // 进程级身份也可能是合法选择（宿主确实运行在无 .git 的目录）。
+  if (!fs.existsSync(path.join(project.root, '.git'))) {
+    ctx.logger?.warn?.(
+      `[tlmemory] 进程级工程身份 ${project.scope}（${project.root}）不是仓库根（未找到 .git）。` +
+        '会话未携带工作区线索时将回退到它 —— 若这不是预期，请从含 .git 的目录启动宿主，' +
+        '或设置 DSH_WORKSPACE_DIR 指向目标仓库。',
+    )
+  }
   const workspaceRegistry: WorkspaceRegistry | null = loadWorkspaceRegistry()
   /** 宿主工作区白名单判定：登记表不可读时全部放行（宁可多显示，也不误删用户记忆） */
   const isAllowedWorkspaceScope = (scope: string): boolean =>
@@ -301,18 +332,25 @@ export function apply(ctx: Context, config: Config): () => void {
   // 进程级固定 scope 会把 A 仓库的沉淀写进 B 仓库的记忆树（记忆错账）。
   // 事件回调携带 session 对象时，优先从其 workspace 线索按会话解析身份并缓存
   // （WeakMap 随会话对象生命周期自动回收）；解析不出回退进程级身份。
-  const sessionIdentityCache = new WeakMap<object, ProjectIdentity>()
+  //
+  // v0.6.9 修正（会话作用域错账的第二处根因）：缓存的是**经防漂移闸门解析后**
+  // 的作用域，而不是原始 ProjectIdentity。旧实现缓存原始身份并在后续事件直接
+  // 返回 `identity.scope`，导致「名单外会话只有第一个事件被降级，其后的
+  // user/message 召回与 turn/end 提炼仍用名单外原始 scope 落库」。
+  // 真实宿主里同一会话的全部事件共用同一个 SessionService 实例，缓存必然命中，
+  // 因此该缺陷在真实环境是常态而非边缘情况（2026-09-18 由 scope-guard 新增用例暴露：
+  // 旧测试每次 emit 都传新对象字面量，WeakMap 永不命中，所以一直没测出来）。
+  const sessionScopeCache = new WeakMap<object, string>()
   const registeredScopes = new Set<string>([projectScope])
   /** scope → 工程身份（可读名 / 根目录），沉淀前据此重建可能已被维护清掉的登记项 */
   const identityByScope = new Map<string, ProjectIdentity>([[projectScope, project]])
   const resolveSessionScope = (session: unknown): string => {
     if (!session || typeof session !== 'object') return resolveSafeScope(projectScope)
-    const cached = sessionIdentityCache.get(session)
-    if (cached) return cached.scope
+    const cached = sessionScopeCache.get(session)
+    if (cached) return cached
     const workspaceDir = extractSessionWorkspaceDir(session)
     if (!workspaceDir) return resolveSafeScope(projectScope)
     const identity = resolveProjectIdentity(workspaceDir)
-    sessionIdentityCache.set(session, identity)
     identityByScope.set(identity.scope, identity)
     // 每个新解析出的**合法工作区**工程身份都登记（保留用户手工命名），保证看板下拉框可见；
     // 工作区之外的目录不登记 —— 它只会在看板里制造幽灵工程，随后被维护周期清掉。
@@ -322,7 +360,9 @@ export function apply(ctx: Context, config: Config): () => void {
     }
     // v0.6.6 防漂移：会话工作区不在白名单（如宿主会话游离在用户主目录）时，
     // 记忆降级写入合法工作区，绝不把名单外 scope 当 project_key 落库
-    return resolveSafeScope(identity.scope)
+    const resolved = resolveSafeScope(identity.scope)
+    sessionScopeCache.set(session, resolved)
+    return resolved
   }
 
   /**

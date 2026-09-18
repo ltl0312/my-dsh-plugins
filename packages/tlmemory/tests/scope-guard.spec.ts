@@ -243,4 +243,130 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
       ),
     ).toBe(true)
   })
+
+  // ── v0.6.9 会话作用域错账修复（2026-09-18 取证）───────────────────────────
+  // 真实宿主的 SessionService 顶层没有 workspaceDir/workspace/cwd/root 任何一键，
+  // 会话工作目录收在创建头里（session.header.cwd）。旧实现四键全落空 ⇒ 回退进程身份
+  // （宿主 cwd，实测为用户主目录）⇒ 召回只查「主目录 scope + global」永远 0 命中，
+  // 且当主目录恰在白名单内时防漂移闸门不触发，错账完全静默。
+  // 宿主权威佐证：dsh-workspace 把会话挂到工作区时强制 header.cwd realpath ===
+  // workspace.record.path，即 header.cwd 就是工作区根。
+
+  it('真实宿主形态：会话只带 header.cwd（无顶层键）⇒ 沉淀落库该工作区 scope', async () => {
+    setupDshHome()
+    const dbPath = tempDbPath()
+    const { ctx, emit } = createFakeCtx()
+    const disposer = apply(ctx, { dbPath, serverPort: 0 })
+
+    const session = { header: { cwd: PLUGINS_ROOT } }
+    emit(session, { type: 'turn/start', data: { turn: 3 } })
+    emit(
+      session,
+      { type: 'user/message', data: { content: [{ type: 'text', text: USER_TEXT }], source: { kind: 'user' } } },
+    )
+    emit(
+      session,
+      {
+        type: 'assistant/message',
+        data: { turn: 3, step: 1, message: { content: [{ type: 'text', text: ASSISTANT_TEXT }] } },
+      },
+    )
+    emit(session, { type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } })
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    disposer()
+
+    const db = new MemoryDB(dbPath)
+    expect(
+      db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+    ).toBe(true)
+    // 绝不落到主目录伪工程
+    expect(db.countNodes(ORPHAN_SCOPE)).toBe(0)
+    db.close()
+  })
+
+  it('header.cwd 指向名单外目录：防漂移闸门对新来源同样生效', async () => {
+    setupDshHome()
+    const dbPath = tempDbPath()
+    const { ctx, emit } = createFakeCtx()
+    const disposer = apply(ctx, { dbPath, serverPort: 0 })
+
+    const session = { header: { cwd: ORPHAN_ROOT } }
+    emit(session, { type: 'turn/start', data: { turn: 4 } })
+    emit(
+      session,
+      { type: 'user/message', data: { content: [{ type: 'text', text: USER_TEXT }], source: { kind: 'user' } } },
+    )
+    emit(
+      session,
+      {
+        type: 'assistant/message',
+        data: { turn: 4, step: 1, message: { content: [{ type: 'text', text: ASSISTANT_TEXT }] } },
+      },
+    )
+    emit(session, { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } })
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    disposer()
+
+    const db = new MemoryDB(dbPath)
+    expect(
+      db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+    ).toBe(true)
+    expect(db.countNodes(ORPHAN_SCOPE)).toBe(0)
+    db.close()
+  })
+
+  it('会话无任何线索（连 header 都没有）⇒ 回退进程身份，且进程身份非仓库根时有告警', async () => {
+    setupDshHome()
+    const dbPath = tempDbPath()
+    // 把进程 cwd 挪到一个无 .git 的目录，复现「宿主以用户主目录启动」的现场
+    const noGit = fs.mkdtempSync(path.join(os.tmpdir(), 'tlm-nogit-'))
+    tempDirs.push(noGit)
+    const savedCwd = process.cwd()
+    process.chdir(noGit)
+    try {
+      const { ctx, logger, emit } = createFakeCtx()
+      const disposer = apply(ctx, { dbPath, serverPort: 0 })
+
+      const session = {}
+      emit(session, { type: 'turn/start', data: { turn: 5 } })
+      emit(
+        session,
+        { type: 'user/message', data: { content: [{ type: 'text', text: USER_TEXT }], source: { kind: 'user' } } },
+      )
+      emit(
+        session,
+        {
+          type: 'assistant/message',
+          data: { turn: 5, step: 1, message: { content: [{ type: 'text', text: ASSISTANT_TEXT }] } },
+        },
+      )
+      emit(session, { type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
+
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      disposer()
+
+      // 回退进程身份（非仓库、名单外）→ 防漂移降级到白名单首位合法工作区
+      const db = new MemoryDB(dbPath)
+      expect(
+        db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+      ).toBe(true)
+      db.close()
+      // R-S2 可观测性：进程级身份不是仓库根 ⇒ 装配期即告警
+      expect(
+        logger.warn.mock.calls.some((call) =>
+          call.some((arg) => typeof arg === 'string' && arg.includes('不是仓库根')),
+        ),
+      ).toBe(true)
+      // 降级路径日志同样在场
+      expect(
+        logger.warn.mock.calls.some((call) =>
+          call.some((arg) => typeof arg === 'string' && arg.includes('已降级写入合法工作区')),
+        ),
+      ).toBe(true)
+    } finally {
+      process.chdir(savedCwd)
+    }
+  })
 })
