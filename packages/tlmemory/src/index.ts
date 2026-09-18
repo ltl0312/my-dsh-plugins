@@ -188,6 +188,42 @@ function extractSessionWorkspaceDir(session: unknown): string | undefined {
   return undefined
 }
 
+/** 随提炼派发的会话级 LLM 上下文（宿主 llm.stream 契约必需项） */
+interface ExtractionRouteContext {
+  route?: { provider: string; model: string }
+  sessionId?: string
+}
+
+/**
+ * 从会话对象防御式提取宿主 LLM 路由（provider+model）与会话 id。
+ * DSH 宿主的 SessionService 暴露 requestHeader()（对 request/header 事件的缓存折叠），
+ * 其 config 携带 {provider, model, ...}；宿主自身的后台 LLM 调用（dsh-session-title-llm）
+ * 正是取该值构造 stream options 的 route。非 DSH 宿主 / 未发过请求的会话返回空对象。
+ */
+function extractSessionRouteContext(session: unknown): ExtractionRouteContext {
+  if (!session || typeof session !== 'object') return {}
+  const record = session as Record<string, unknown>
+  const context: ExtractionRouteContext = {}
+  if (typeof record.id === 'string' && record.id.trim()) context.sessionId = record.id
+  if (typeof record.requestHeader === 'function') {
+    try {
+      const headerFold = (record.requestHeader as () => unknown)()
+      const config = headerFold && typeof headerFold === 'object'
+        ? (headerFold as Record<string, unknown>).config
+        : undefined
+      if (config && typeof config === 'object') {
+        const { provider, model } = config as Record<string, unknown>
+        if (typeof provider === 'string' && provider.trim() && typeof model === 'string' && model.trim()) {
+          context.route = { provider, model }
+        }
+      }
+    } catch {
+      // requestHeader 在极早期会话可能抛错（日志折叠未初始化），按无 route 降级
+    }
+  }
+  return context
+}
+
 export function apply(ctx: Context, config: Config): () => void {
   ctx.logger?.info?.(`[tlmemory] 插件装配启动中...`)
 
@@ -391,7 +427,7 @@ export function apply(ctx: Context, config: Config): () => void {
   let activeExtractionAbort: AbortController | null = null
   let disposed = false
 
-  const dispatchExtraction = (item: TurnTrackItem, scope: string): void => {
+  const dispatchExtraction = (item: TurnTrackItem, scope: string, extra: ExtractionRouteContext = {}): void => {
     const controller = new AbortController()
     const run = extractionChain
       .then(() => {
@@ -404,7 +440,7 @@ export function apply(ctx: Context, config: Config): () => void {
           ctx.logger?.error?.('[tlmemory] 工程登记补录异常:', err)
         }
         return extractor
-          .extractAndConsolidate(item, scope, { signal: controller.signal })
+          .extractAndConsolidate(item, scope, { signal: controller.signal, ...extra })
           .then(() => server.notifyTreeChanged(scope))
           .catch((err) => ctx.logger?.error?.('[tlmemory] 后台静默沉淀任务异常:', err))
           .finally(() => {
@@ -506,8 +542,10 @@ export function apply(ctx: Context, config: Config): () => void {
         if (item && (config.enableAutoReflection ?? true) && shouldConsolidate(item)) {
           // 主响应流已完成结算，进入后台执行：M2 干活信号门控通过后
           // 才付费调用 LLM（见 shouldConsolidate），链式串行 + 超时中止（P2-4），
-          // 提炼失败仅记日志，绝不阻塞、绝不打扰会话对话流
-          dispatchExtraction(item, sessionScope)
+          // 提炼失败仅记日志，绝不阻塞、绝不打扰会话对话流。
+          // D2：随派发携带会话 route（provider/model）与 sessionId —— 宿主
+          // llm.stream 契约必需，缺 route 会导致后台调用拿到空流。
+          dispatchExtraction(item, sessionScope, extractSessionRouteContext(session))
         } else if (item) {
           ctx.logger?.info?.('[tlmemory] 本轮无干活信号与决策表述，跳过 LLM 提炼（零成本门控）')
         }

@@ -294,6 +294,93 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
     db.close()
   })
 
+  it('D2：会话携带 requestHeader ⇒ 提炼调用按宿主 llm.stream 契约携带 route/sessionId/purpose', async () => {
+    setupDshHome()
+    const dbPath = tempDbPath()
+    const { ctx, emit } = createFakeCtx()
+    const disposer = apply(ctx, { dbPath, serverPort: 0 })
+
+    // 真实宿主形态：SessionService 暴露 id 与 requestHeader()（缓存折叠，含 config.route）。
+    // 全部事件复用同一对象 —— 与真实宿主一致（WeakMap 缓存必然命中）。
+    const session = {
+      id: 'sess-d2',
+      header: { cwd: PLUGINS_ROOT },
+      requestHeader: () => ({ config: { provider: 'deepseek', model: 'chat-model' } }),
+    }
+    emit(session, { type: 'turn/start', data: { turn: 7 } })
+    emit(
+      session,
+      { type: 'user/message', data: { content: [{ type: 'text', text: USER_TEXT }], source: { kind: 'user' } } },
+    )
+    emit(
+      session,
+      {
+        type: 'assistant/message',
+        data: { turn: 7, step: 1, message: { content: [{ type: 'text', text: ASSISTANT_TEXT }] } },
+      },
+    )
+    emit(session, { type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } })
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    disposer()
+
+    // llm.stream 必须按宿主契约被调用（route 是必需项，缺了就是空流）
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+    const opts = ctx.llm.stream.mock.calls[0][0] as Record<string, unknown>
+    expect(opts.provider).toBe('deepseek')
+    expect(opts.model).toBe('chat-model')
+    expect(opts.sessionId).toBe('sess-d2')
+    expect(opts.purpose).toBe('tlmemory-reflection')
+    expect(typeof opts.system).toBe('string')
+    expect((opts.system as string).length).toBeGreaterThan(0)
+    const messages = opts.messages as Array<Record<string, unknown>>
+    expect(messages).toHaveLength(1)
+    expect(messages[0].role).toBe('user')
+    expect(messages[0].source).toEqual({ kind: 'plugin', plugin: 'dsh-plugin-tlmemory' })
+
+    // 且提炼照常落库（route 路径下全链路仍通）
+    const db = new MemoryDB(dbPath)
+    expect(
+      db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+    ).toBe(true)
+    db.close()
+  })
+
+  it('D2 降级：会话无 requestHeader ⇒ 提炼仍按旧契约调用（非 DSH 宿主兼容）', async () => {
+    setupDshHome()
+    const dbPath = tempDbPath()
+    const { ctx, emit } = createFakeCtx()
+    const disposer = apply(ctx, { dbPath, serverPort: 0 })
+
+    const session = { workspaceDir: PLUGINS_ROOT }
+    emit(session, { type: 'turn/start', data: { turn: 8 } })
+    emit(
+      session,
+      { type: 'user/message', data: { content: [{ type: 'text', text: USER_TEXT }], source: { kind: 'user' } } },
+    )
+    emit(
+      session,
+      {
+        type: 'assistant/message',
+        data: { turn: 8, step: 1, message: { content: [{ type: 'text', text: ASSISTANT_TEXT }] } },
+      },
+    )
+    emit(session, { type: 'turn/end', data: { turn: 8, reason: { kind: 'completed' } } })
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    disposer()
+
+    // 旧契约形态：裸 messages + temperature，不带 route
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+    const opts = ctx.llm.stream.mock.calls[0][0] as Record<string, unknown>
+    expect(opts.provider).toBeUndefined()
+    expect(opts.model).toBeUndefined()
+    expect(opts.temperature).toBe(0.1)
+    const messages = opts.messages as Array<Record<string, unknown>>
+    expect(messages).toHaveLength(2)
+    expect(messages[0].role).toBe('system')
+  })
+
   it('header.cwd 指向名单外目录：防漂移闸门对新来源同样生效', async () => {
     setupDshHome()
     const dbPath = tempDbPath()

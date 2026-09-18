@@ -183,11 +183,12 @@ export class MemoryExtractor {
   public async extractAndConsolidate(
     turnItem: TurnTrackItem,
     projectScope: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; route?: { provider: string; model: string }; sessionId?: string } = {},
   ): Promise<void> {
     const { userText, assistantText } = turnItem
     const gateOk = this.passesEitherGate(userText, assistantText)
-    traceExtract(`dispatch: scope=${projectScope} userText=${userText.length}ch assistantText=${assistantText.length}ch gate=${gateOk ? 'pass' : 'reject'}`)
+    const routeLabel = options.route ? `${options.route.provider}/${options.route.model}` : 'missing'
+    traceExtract(`dispatch: scope=${projectScope} route=${routeLabel} userText=${userText.length}ch assistantText=${assistantText.length}ch gate=${gateOk ? 'pass' : 'reject'}`)
     if (!gateOk) return
 
     if (!this.ctx.llm?.stream) {
@@ -199,14 +200,37 @@ export class MemoryExtractor {
     const conversationContext = `[用户输入]\n${userText}\n\n[智能体答复与操作]\n${assistantText}`
 
     try {
-      const stream = this.ctx.llm.stream({
-        messages: [
-          { role: 'system', content: REFLECTION_SYSTEM_PROMPT },
-          { role: 'user', content: conversationContext },
-        ],
-        temperature: 0.1,
-        ...(options.signal ? { signal: options.signal } : {}),
-      })
+      // D2（v0.6.9）：宿主 llm.stream 的契约要求 route（provider+model）。宿主自身的后台调用
+      // 参照实现（dsh-session-title-llm）传 {provider, model, messages(宿主消息格式), system,
+      // maxTokens, sessionId, purpose, signal}，route 取自会话 request/header 的 header.config。
+      // 只传裸 messages ⇒ 运行时无法解析模型 ⇒ 空流（L3 实测 rawOutput=0ch）。
+      // route 缺失时回退旧调用形态（非 DSH 宿主 / 旧版宿主兼容），由追踪日志标记。
+      const streamOptions = options.route
+        ? {
+            provider: options.route.provider,
+            model: options.route.model,
+            messages: [
+              {
+                role: 'user',
+                content: [{ type: 'text', text: conversationContext }],
+                source: { kind: 'plugin', plugin: 'dsh-plugin-tlmemory' },
+              },
+            ],
+            system: REFLECTION_SYSTEM_PROMPT,
+            maxTokens: 2048,
+            ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+            purpose: 'tlmemory-reflection',
+            ...(options.signal ? { signal: options.signal } : {}),
+          }
+        : {
+            messages: [
+              { role: 'system', content: REFLECTION_SYSTEM_PROMPT },
+              { role: 'user', content: conversationContext },
+            ],
+            temperature: 0.1,
+            ...(options.signal ? { signal: options.signal } : {}),
+          }
+      const stream = this.ctx.llm.stream(streamOptions)
 
       let rawOutput = ''
       for await (const chunk of stream) {

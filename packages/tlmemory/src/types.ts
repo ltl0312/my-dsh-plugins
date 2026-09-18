@@ -208,8 +208,21 @@ declare module 'cordis' {
       variable: (name: string, provider: (context: unknown) => string | undefined) => () => void
     }
     llm?: {
+      // 宿主 llm.stream 契约（对照 dsh-session-title-llm 的后台调用）：
+      // route 路径传 {provider, model, messages(宿主消息格式), system, maxTokens,
+      // sessionId, purpose, signal}；裸 messages(+temperature) 为旧形态降级路径。
       stream: (options: {
-        messages: Array<{ role: string; content: string }>
+        messages: Array<{
+          role: string
+          content: string | Array<{ type: string; text: string }>
+          source?: { kind: string; plugin?: string }
+        }>
+        provider?: string
+        model?: string
+        system?: string
+        maxTokens?: number
+        sessionId?: string
+        purpose?: string
         temperature?: number
         signal?: AbortSignal
       }) => AsyncIterable<{ type: string; delta?: string; text?: string; content?: string }>
