@@ -177,6 +177,13 @@ export type ScopeResolver = (session?: unknown) => string
 function extractExecSession(exec: unknown): unknown {
   if (!exec || typeof exec !== 'object') return undefined
   const record = exec as Record<string, unknown>
+  // v0.6.9：真实宿主把会话挂在 **exec.agent.session** 下 —— 宿主源码
+  // `dsh-tools/lib/index.js:1265` 有 `exec.agent?.session.append("tool/ptc-dispatch-start", …)`
+  // 的直接用法。旧实现只探 exec.session / exec.context.session，全部落空 ⇒
+  // 工具路径回退进程级身份，tlmemory_save 的记忆被写进宿主 cwd 的伪工程
+  // （2026-09-18 实证：pnpm 约定经 tlmemory_save 落在了 repo:7af7de66d3a0/ZhuanZ）。
+  const viaAgent = (record.agent as Record<string, unknown> | undefined)?.session
+  if (viaAgent && typeof viaAgent === 'object') return viaAgent
   const direct = record.session
   if (direct && typeof direct === 'object') return direct
   const nested = record.context

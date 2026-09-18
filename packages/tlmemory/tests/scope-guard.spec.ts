@@ -21,6 +21,8 @@ const PLUGINS_ROOT = path.normalize('D:/Code/my-dsh-plugins')
 const PLUGINS_SCOPE = projectScopeOf(PLUGINS_ROOT)
 const ORPHAN_ROOT = path.normalize('C:/Users/ZhuanZ')
 const ORPHAN_SCOPE = projectScopeOf(ORPHAN_ROOT)
+const TOOLBOX_ROOT = path.normalize('D:/Code/Rust/TLToolBox')
+const TOOLBOX_SCOPE = projectScopeOf(TOOLBOX_ROOT)
 
 const USER_TEXT = '请记住：对外 HTTP API 路由统一 kebab-case 命名。'
 const ASSISTANT_TEXT = '已记住：对外 HTTP API 路由统一 kebab-case 命名（决定，以后一律遵守）。'
@@ -32,13 +34,19 @@ interface EventListener {
 function createFakeCtx() {
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
   let listener: EventListener | null = null
+  const tools: Array<{ name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }> = []
   const ctx = {
     logger,
     on: (name: string, fn: EventListener) => {
       if (name === 'session/event') listener = fn
       return () => true
     },
-    tools: { register: () => () => {} },
+    tools: {
+      register: (definition: { name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }) => {
+        tools.push(definition)
+        return () => {}
+      },
+    },
     systemPrompt: { section: () => () => {}, variable: () => () => {} },
     llm: {
       stream: vi.fn().mockReturnValue(
@@ -64,6 +72,7 @@ function createFakeCtx() {
   return {
     ctx: ctx as unknown as Context,
     logger,
+    tools,
     /** 与真实宿主一致：session/event 监听器第一参携带会话对象 */
     emit: (session: unknown, event: { type: string; data: unknown }) => listener?.(session, event),
   }
@@ -368,5 +377,65 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
     } finally {
       process.chdir(savedCwd)
     }
+  })
+
+  // ── v0.6.9 工具路径作用域（exec.agent.session）────────────────────────────
+  // 真实宿主把会话挂在 exec.agent.session 下（dsh-tools:1265 有
+  // exec.agent?.session.append(...) 的直接用法）。旧实现只探 exec.session /
+  // exec.context.session，全落空 ⇒ tlmemory_save 回退进程身份，记忆写进宿主 cwd
+  // 的伪工程（2026-09-18 实证：pnpm 约定落在了 repo:7af7de66d3a0/ZhuanZ）。
+  // 判据要有区分度：fixture 放两个工作区，进程身份（cwd 派生）与工具会话身份分属两树。
+  it('工具路径：exec 把会话挂在 agent.session 下 ⇒ tlmemory_save 落库正确 scope', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tlm-scope-tools-'))
+    tempDirs.push(home)
+    fs.mkdirSync(path.join(home, 'storages'), { recursive: true })
+    fs.writeFileSync(
+      path.join(home, 'storages', 'workspace.json'),
+      JSON.stringify({
+        unit: { name: 'workspace', version: 2 },
+        global: { initialized: true, workspaceIds: ['ws-1', 'ws-2'] },
+        tables: {
+          workspaces: {
+            'ws-1': { path: PLUGINS_ROOT, title: 'my-dsh-plugins', sessionIds: [], createdAt: '', updatedAt: '' },
+            'ws-2': { path: TOOLBOX_ROOT, title: 'TLToolBox', sessionIds: [], createdAt: '', updatedAt: '' },
+          },
+        },
+      }),
+      'utf8',
+    )
+    savedDshHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    delete process.env.DSH_WORKSPACE_DIR
+    resetWorkspaceRegistryCache()
+
+    const dbPath = tempDbPath()
+    const { ctx, tools } = createFakeCtx()
+    const disposer = apply(ctx, { dbPath, serverPort: 0 })
+
+    const save = tools.find((t) => t.name === 'tlmemory_save')
+    expect(save, 'tlmemory_save 必须已注册').toBeTruthy()
+    await save!.execute(
+      {
+        tree_scope: 'project',
+        path_segments: ['工程化', '包管理'],
+        rule_name: 'pnpm唯一包管理器',
+        content: '本仓库一律用pnpm管依赖与跑脚本，禁用npm',
+        keywords: ['pnpm'],
+      },
+      // 真实宿主形态：会话在 exec.agent.session 下，且属于 TLToolBox 工作区
+      { agent: { session: { header: { cwd: TOOLBOX_ROOT } } } },
+    )
+    disposer()
+
+    const db = new MemoryDB(dbPath)
+    // 记忆必须落进 exec 会话所属的工作区
+    expect(
+      db.getNodesByScope(TOOLBOX_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'pnpm唯一包管理器'),
+    ).toBe(true)
+    // 进程身份（cwd 派生的 my-dsh-plugins）不该收到这条
+    expect(
+      db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'pnpm唯一包管理器'),
+    ).toBe(false)
+    db.close()
   })
 })
