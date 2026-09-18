@@ -4,10 +4,37 @@
 // 容错基线：整条链路处于异步后台微任务内，任何一步失败均被 try-catch 收敛为
 // 一条 warn/error 日志，绝不向上抛错、绝不阻塞或打断宿主会话对话流。
 import type { Context } from 'cordis'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { sanitizeSegment } from './db.js'
 import type { MemoryDB } from './db.js'
 import { expandQueryCandidates } from './query-expand.js'
 import type { RawReflectionItem, ReflectionResponse, SearchResult, TurnTrackItem } from './types.js'
+
+/**
+ * 提炼链路的**文件级追踪**（v0.6.9，行为检测整改的产物）。
+ *
+ * 为什么必须落文件：提炼整条链路设计为静默降级，任何失败都只进 `ctx.logger`
+ * —— 而宿主以无重定向的后台方式拉起，这些日志**无处可读**。2026-09-18 的对照
+ * 实验里，提炼连续两轮零产出且三种可能（llm 未就绪 / 结果为空 / 异常）无法区分，
+ * 只能靠加追踪才能定谳。诊断能力不应依赖宿主的日志基建。
+ *
+ * 约束：写入失败一律吞掉（绝不影响会话）；文件超 512KB 时一次性截断，避免无限增长。
+ */
+function traceExtract(line: string): void {
+  try {
+    const file = path.join(os.homedir(), '.dsh', 'tlmemory-extract.log')
+    try {
+      if (fs.existsSync(file) && fs.statSync(file).size > 512 * 1024) fs.writeFileSync(file, '')
+    } catch {
+      // 截断失败不阻断本次写入
+    }
+    fs.appendFileSync(file, `${new Date().toISOString()} ${line}\n`)
+  } catch {
+    // 追踪是尽力而为：任何异常都不得影响会话
+  }
+}
 
 const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。请审视刚才这一轮人机交互，提取长期有效的高价值信息并固化为原子断言规则。
 
@@ -159,9 +186,12 @@ export class MemoryExtractor {
     options: { signal?: AbortSignal } = {},
   ): Promise<void> {
     const { userText, assistantText } = turnItem
-    if (!this.passesEitherGate(userText, assistantText)) return
+    const gateOk = this.passesEitherGate(userText, assistantText)
+    traceExtract(`dispatch: scope=${projectScope} userText=${userText.length}ch assistantText=${assistantText.length}ch gate=${gateOk ? 'pass' : 'reject'}`)
+    if (!gateOk) return
 
     if (!this.ctx.llm?.stream) {
+      traceExtract('abort: ctx.llm 未就绪（无 stream 方法）')
       this.ctx.logger?.warn?.('[tlmemory] 宿主 ctx.llm 未就绪，跳过本轮静默沉淀（零影响降级）')
       return
     }
@@ -182,20 +212,34 @@ export class MemoryExtractor {
       for await (const chunk of stream) {
         rawOutput += chunk.delta || chunk.text || chunk.content || ''
       }
+      traceExtract(`llm: stream 完成 rawOutput=${rawOutput.length}ch`)
 
       const cleanJson = sanitizeJsonString(rawOutput)
       const parsed: ReflectionResponse = JSON.parse(cleanJson)
 
       if (!parsed.reflections || !Array.isArray(parsed.reflections)) {
+        traceExtract(`result: 非法结构（reflections 非数组），raw=${rawOutput.slice(0, 200)}`)
         this.ctx.logger?.info?.('[tlmemory] 本轮提炼结果为空，无新记忆沉淀')
         return
+      }
+      traceExtract(`result: ${parsed.reflections.length} 条 reflection`)
+      if (parsed.reflections.length === 0) {
+        traceExtract('result: 空数组（LLM 判定本轮无可沉淀内容）')
       }
 
       // P2-5：单轮提炼结果截断（≤5 条），LLM 输出失控时不再无限入库
       for (const item of parsed.reflections.slice(0, MAX_REFLECTIONS_PER_TURN)) {
-        this.processSingleReflection(item, projectScope)
+        try {
+          this.processSingleReflection(item, projectScope)
+          traceExtract(`item: 已处理 name=${String(item?.name ?? '?')} tree=${String(item?.tree ?? '?')}`)
+        } catch (itemErr) {
+          // 单条失败不再拖垮同轮其余条目：旧实现一条抛错即整轮静默丢弃
+          traceExtract(`item: 处理异常 name=${String(item?.name ?? '?')} err=${(itemErr as Error)?.message ?? itemErr}`)
+          this.ctx.logger?.warn?.('[tlmemory] 单条提炼处理异常，已跳过该条:', (itemErr as Error)?.message ?? itemErr)
+        }
       }
     } catch (err) {
+      traceExtract(`error: ${(err as Error)?.message ?? err}`)
       // 静默降级：仅记录日志，绝不向调用方抛错
       this.ctx.logger?.warn?.('[tlmemory] 异步反思提炼过程异常，已静默跳过:', (err as Error)?.message ?? err)
     }
