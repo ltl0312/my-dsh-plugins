@@ -101,8 +101,19 @@ describe('M3：矛盾检测（LLM 摊薄）', () => {
     // 旧记忆拨回窗口之前：它不属于本批，而是作为既有记忆参与候选
     backdate(db, oldId, 60_000)
 
-    // 新结论入库（confirmed，created_at 在窗口内）
-    const newNode = db.upsertLeaf('repo:p2t', ['工程化'], '包管理器迁移', '本项目已迁移到 pnpm 管理全部依赖', ['pnpm'])
+    // 新结论入库（confirmed，created_at 在窗口内）。
+    // 必须显式声明 source:'auto'：矛盾检测的取数口径本就是「本批 auto 沉淀」
+    // （listLeavesCreatedSince 带 source='auto' 过滤），手写条目（看板/工具）
+    // 不该被自动降级为 pending。此前该用例靠 upsertLeaf 的缺省 'auto' 才命中，
+    // 属测试固化了有缺陷的缺省值。
+    const newNode = db.upsertLeaf(
+      'repo:p2t',
+      ['工程化'],
+      '包管理器迁移',
+      '本项目已迁移到 pnpm 管理全部依赖',
+      ['pnpm'],
+      { source: 'auto' },
+    )
 
     const llmOutput = JSON.stringify({
       conflicts: [{ old_id: oldId, new_id: newNode.id, reason: '包管理器结论互斥' }],

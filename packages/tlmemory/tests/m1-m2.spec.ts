@@ -81,10 +81,21 @@ describe('M1：schema 增量迁移与待确认区隔离', () => {
     expect(rows[0].source).toBe('manual')
     expect(rows[0].status).toBe('confirmed')
 
-    // 补列后的新写入携带正确的来源 / 状态
+    // 补列后的新写入携带正确的来源 / 状态。
+    // ⚠ 语义已修正（行为检测取证）：upsertLeaf 的 source 缺省值必须是 'manual'。
+    // 旧实现缺省 'auto'，使「不传 options 的调用方」（典型：tlmemory_save 工具）
+    // 被误标为自动沉淀，与提炼链路在库中无法区分 ⇒ source='auto' 这个
+    // 「自动记录」判定标记失效（假阳性）。只有**显式声明**才叫自动沉淀。
     const leaf = db.upsertLeaf('repo:legacy', ['新目录'], '新记忆', '新的断言内容', [])
-    expect(leaf.source).toBe('auto')
+    expect(leaf.source).toBe('manual')
     expect(leaf.status).toBe('confirmed')
+
+    // 反向固化：显式传 source:'auto' 的调用方（提炼链路形态）仍必须落 auto
+    const autoLeaf = db.upsertLeaf('repo:legacy', ['新目录'], '提炼记忆', '提炼出的断言内容', [], {
+      source: 'auto',
+    })
+    expect(autoLeaf.source).toBe('auto')
+    expect(autoLeaf.status).toBe('confirmed')
   })
 
   it('pending 记忆不参与 FTS 检索与 LIKE 兜底，confirmed 正常召回', () => {

@@ -51,12 +51,19 @@ export interface MemoryNode {
   is_leaf: number             // 0: 分类目录, 1: 记忆叶子
   content: string | null      // 原子断言规则（严格限制在80字以内）
   keywords: string | null     // 关键词，空格分隔
-  reinforce_count: number     // 强化权重计数
+  reinforce_count: number     // 强化权重计数（召回排序权重；重沉淀/去重强化会加、衰减会减）
   is_pinned: number           // 是否强制置顶 (0/1)
   /** 来源标记：'auto'（静默沉淀）/'manual'（看板/工具手工），审计与撤回的基础 */
   source: string
   /** 审核状态：'pending' 为待确认区（不参与召回），'confirmed' 为正常入库 */
   status: string
+  /**
+   * 注入指示器：最近一次「被真实召回并注入系统提示词切片」的时间戳（毫秒）。
+   * 单调只增，且**唯一写入点是 MemoryRecallEngine.recall()** —— 因此它是判定
+   * 「自动调用/注入链路是否生效」的确定性标记；未注入过为 0。
+   * 不要用 reinforce_count 做这个判定：它同时被重沉淀、去重强化与衰减改写。
+   */
+  last_injected_at: number
   created_at: number
   updated_at: number
 }

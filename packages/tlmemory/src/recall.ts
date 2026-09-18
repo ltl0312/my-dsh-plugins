@@ -60,7 +60,13 @@ export class MemoryRecallEngine {
 
     // 召回即强化：命中并被注入上下文的记忆叶子断言计数 +1（reinforce_count），
     // 高频被调用的记忆在长期使用中自然获得更高权重沉淀。
-    this.db.reinforceByIds(results.filter((r) => r.is_leaf === 1).map((r) => r.id))
+    const injectedLeafIds = results.filter((r) => r.is_leaf === 1).map((r) => r.id)
+    this.db.reinforceByIds(injectedLeafIds)
+    // 注入指示器（单调时间戳）：这里是**全库唯一**写 last_injected_at 的位置，
+    // 因此「last_injected_at 晚于某时刻」等价于「该记忆在该时刻之后被真实注入过」。
+    // 与 reinforce_count 分工明确：后者是召回排序权重（重沉淀会加、衰减会减），
+    // 前者只用于「注入是否真的发生」的确定性判定，不受其它写入路径干扰。
+    this.db.markInjected(injectedLeafIds)
 
     return results
   }

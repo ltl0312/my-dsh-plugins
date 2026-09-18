@@ -176,6 +176,12 @@ export class MemoryDB {
         is_pinned INTEGER NOT NULL DEFAULT 0,
         source TEXT NOT NULL DEFAULT 'manual',
         status TEXT NOT NULL DEFAULT 'confirmed',
+        -- 注入指示器（专用）：仅由 MemoryRecallEngine.recall() 在命中叶子被真正
+        -- 注入系统提示词切片时刷新为当前时间，**单调递增、只增不减**。
+        -- 与 reinforce_count 分离的原因：reinforce_count 是召回排序权重，同时被
+        -- ON CONFLICT 重沉淀、近似去重强化与 compaction 衰减写入（增减都有），
+        -- 无法作为「注入是否发生」的确定性证据；本列则只有唯一写入点。
+        last_injected_at INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE (tree_type, path, name)
@@ -225,6 +231,12 @@ export class MemoryDB {
     if (!columns.includes('status')) {
       this.db.exec("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed'")
     }
+    // 注入指示器增量迁移：存量库补列，历史节点一律 0（= 从未观测到注入）。
+    // 不回填成 reinforce_count 或 updated_at —— 那两个值掺有重沉淀与衰减的成分，
+    // 回填等于伪造审计痕迹（与 source 的历史 14 条 auto 同一条纪律）。
+    if (!columns.includes('last_injected_at')) {
+      this.db.exec('ALTER TABLE nodes ADD COLUMN last_injected_at INTEGER NOT NULL DEFAULT 0')
+    }
   }
 
   /**
@@ -269,7 +281,10 @@ export class MemoryDB {
         // P2-6：目录创建走 ensureDirectory（已存在即复用，不递增强化计数）。
         // 此前走 upsertDirectory → upsertNode 的 ON CONFLICT 分支，每次沉淀
         // 都让目录 reinforce_count 无意义地虚增，还会用 NULL 覆盖 content 字段。
-        parentId = this.ensureDirectory(treeType, parentId, `${fullPath}/`, seg, 'auto')
+        // 目录链的 source 必须与叶子同源：旧实现硬编码 'auto'，即使叶子已修正为
+        // 'manual'，工具/看板写入顺手建出的分类目录仍会被打上 'auto'
+        // —— 看板的 source 分布统计（含目录节点）照样被污染，判定标记依旧失效。
+        parentId = this.ensureDirectory(treeType, parentId, `${fullPath}/`, seg, options.source ?? 'manual')
       }
 
       return this.upsertNode(
@@ -280,7 +295,14 @@ export class MemoryDB {
         1,
         cleanContent,
         cleanKeywords,
-        options.source ?? 'auto',
+        // P0 修复（行为检测取证）：缺省值必须是 'manual' 而非 'auto'。
+        // 旧实现写 'auto'，而 tools.ts 的 tlmemory_save 调 upsertLeaf 时不传 options
+        // ⇒ 模型显式存记忆也落 'auto'，与自动提炼链路在库中完全不可区分，
+        // 使 source='auto' 这个「自动记录」判定标记失效（假阳性）。
+        // 语义定为：**只有显式声明 source:'auto' 的调用方（提炼链路）才算自动沉淀**。
+        // 建表处的 SQL 列默认值 'manual' 从未生效（两条 INSERT 都显式绑定该列），
+        // 真正决定行为的是这里的 JS 缺省值 —— 现两者已对齐。
+        options.source ?? 'manual',
         options.status ?? 'confirmed',
       )
     })
@@ -374,7 +396,9 @@ export class MemoryDB {
     isLeaf: number,
     content: string | null,
     keywords: string | null,
-    source: string = 'auto',
+    // 必填（原为缺省 'auto'）：底层写入口绝不能再有静默的 source 兜底，
+    // 否则任何新增调用点都会不知不觉被打上「自动沉淀」标记。
+    source: string,
     status: string = 'confirmed',
   ): MemoryNode {
     const now = Date.now()
@@ -813,7 +837,7 @@ export class MemoryDB {
 
     const insertDir = this.db.prepare(`
       INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 0, NULL, NULL, 1, 0, 'manual', 'confirmed', ?, ?)
+      VALUES (?, ?, ?, ?, 0, NULL, NULL, 1, 0, ?, 'confirmed', ?, ?)
     `)
     const findDir = this.db.prepare('SELECT id FROM nodes WHERE tree_type = ? AND path = ? AND name = ?')
     const mergeLeaf = this.db.prepare(`
@@ -824,13 +848,14 @@ export class MemoryDB {
         content = CASE WHEN @updated_at >= updated_at THEN @content ELSE content END,
         keywords = CASE WHEN @updated_at >= updated_at THEN @keywords ELSE keywords END,
         status = CASE WHEN status = 'pending' AND @status = 'confirmed' THEN 'confirmed' ELSE status END,
+        last_injected_at = MAX(last_injected_at, @last_injected_at),
         created_at = MIN(created_at, @created_at),
         updated_at = MAX(updated_at, @updated_at)
       WHERE id = @id
     `)
     const insertLeaf = this.db.prepare(`
-      INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, last_injected_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     for (const row of rows) {
@@ -850,6 +875,8 @@ export class MemoryDB {
             content: row.content ?? null,
             keywords: row.keywords ?? null,
             status: String(row.status ?? 'confirmed'),
+            // 注入痕迹保真：合并后的身份曾有过注入即为有过（取大，与 reinforce 同语义）
+            last_injected_at: Number(row.last_injected_at ?? 0),
             created_at: Number(row.created_at ?? now),
             updated_at: Number(row.updated_at ?? now),
             id: Number(existing.id),
@@ -868,6 +895,8 @@ export class MemoryDB {
             Number(row.is_pinned ?? 0),
             String(row.source ?? 'manual'),
             String(row.status ?? 'confirmed'),
+            // 注入痕迹保真：搬家不该抹掉「这条记忆曾被注入过」的审计事实
+            Number(row.last_injected_at ?? 0),
             Number(row.created_at ?? now),
             Number(row.updated_at ?? now),
           )
@@ -879,7 +908,18 @@ export class MemoryDB {
         if (existing) {
           idMap.set(sourceId, Number(existing.id))
         } else {
-          const inserted = insertDir.run(to, targetParentId, nodePath, nodeName, Number(row.created_at ?? now), now)
+          const inserted = insertDir.run(
+            to,
+            targetParentId,
+            nodePath,
+            nodeName,
+            // 保真：原样搬运 source。旧实现硬编码 'manual'，会把提炼链路建的
+            // auto 目录在归并后悄悄改写为 manual —— 既丢审计信息，也让
+            // 「source=auto」计数在归并后无故缩水，污染行为检测基线。
+            String(row.source ?? 'manual'),
+            Number(row.created_at ?? now),
+            now,
+          )
           idMap.set(sourceId, Number(inserted.lastInsertRowid))
         }
       }
@@ -1237,6 +1277,37 @@ export class MemoryDB {
   }
 
   /**
+   * 注入指示器刷新（行为检测取证用，**全库唯一写入点**）。
+   *
+   * 为什么需要它：`reinforce_count` 虽是「读取面写副作用」，却同时被
+   * `upsertNode` 的 ON CONFLICT 重沉淀分支、`extractor` 的近似去重强化
+   * （两者都 +1）以及 `decayStaleReinforce`（减半）改写，因此**增减都不能
+   * 单独归因于注入**，用它判定会出现假阳性与假阴性。
+   *
+   * 本方法只做一件事：把「该叶子断言此刻被真实召回并注入系统提示词切片」这一
+   * 事实写成一个**单调、只增不减**的时间戳。判定方式因此从「增量比较」变成
+   * 「是否晚于某个时刻」，对衰减、重沉淀、去重强化全都免疫。
+   *
+   * 仅接受 `is_leaf = 1` 的行（目录节点不进召回，也不该留下注入痕迹）；
+   * 真值取 `max(现值, now)`，保证即使系统时钟回拨也不会退化为非单调。
+   *
+   * @param ids 命中的叶子节点 id（允许混入非法值，自动过滤）
+   * @returns 实际刷新的行数
+   */
+  public markInjected(ids: Array<string | number>): number {
+    const numericIds = [...new Set(ids.map((id) => Number(id)).filter((n) => Number.isInteger(n) && n > 0))]
+    if (numericIds.length === 0) return 0
+    const placeholders = numericIds.map(() => '?').join(', ')
+    const result = this.db
+      .prepare(
+        `UPDATE nodes SET last_injected_at = MAX(last_injected_at, ?)
+         WHERE is_leaf = 1 AND id IN (${placeholders})`,
+      )
+      .run(Date.now(), ...numericIds)
+    return result.changes
+  }
+
+  /**
    * M3 强化衰减：长期未被命中（updated_at 早于衰减窗口）的叶子记忆
    * reinforce_count 减半（下限 1）。updated_at 由召回强化与沉淀写入共同刷新，
    * 因此该条件等价于「超过衰减窗口没有任何触碰」。返回受影响行数。
@@ -1287,6 +1358,9 @@ export class MemoryDB {
       is_pinned: Number(row.is_pinned ?? 0),
       source: String(row.source ?? 'manual'),
       status: String(row.status ?? 'confirmed'),
+      // 缺省 0 而非 Date.now()：读不到该列（旧库/旧副本）时必须表现为「未观测到注入」，
+      // 绝不能凭空造出一个「刚刚注入过」的时间戳 —— 那会让检测器误判注入生效。
+      last_injected_at: Number(row.last_injected_at ?? 0),
       created_at: Number(row.created_at ?? 0),
       updated_at: Number(row.updated_at ?? 0),
     }

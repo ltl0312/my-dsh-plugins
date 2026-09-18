@@ -268,6 +268,11 @@ export function registerMemoryTools(
         sanitizedName,
         boundedContent,
         args.keywords || [sanitizedName],
+        // P0 修复（行为检测取证）：显式声明 source，不再依赖缺省值。
+        // 工具是**模型显式调用**的手工写入，必须落 'manual' —— 落 'auto' 会让它
+        // 与 turn/end 后台提炼链路在库中无法区分，直接毁掉 source='auto' 这个
+        // 「自动记录」判定标记。显式传参也让此处语义不随 db 缺省值变动而漂移。
+        { source: 'manual' },
       );
 
       // 契约 A：恒返回 MCP 信封，绝不返回裸对象
