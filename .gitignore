@@ -147,3 +147,7 @@ vite.config.ts.timestamp-*
 # dsh plugin 增强层的本地备份与还原点（不随仓库分发）
 .backup-dsh-cli-*/
 .backup-dsh-cli-latest.txt
+
+# 项目内部文档（评审稿 / 计划书 / 取证记录）只在本地留存，一律不进仓库
+# 规则来源：2026-09-18 约定「doc 里面的文档都不提交」
+/doc/
