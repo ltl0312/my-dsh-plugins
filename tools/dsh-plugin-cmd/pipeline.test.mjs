@@ -88,7 +88,7 @@ function makeCtx(profileDir, overrides = {}) {
 
 /* ------------------------------------------------ 纯函数：spec 解析与 diff */
 
-test('resolveSpecPackageName 解析 file: 与相对路径形态', () => {
+test('resolveSpecPackageName 解析 file: 与相对路径形态', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     const local = path.join(dir, 'local-plugin')
@@ -107,14 +107,14 @@ test('resolveSpecPackageName 解析 file: 与相对路径形态', () => {
   }
 })
 
-test('diffDependencies 只报新增项', () => {
+test('diffDependencies 只报新增项', async () => {
   const added = diffDependencies({ dependencies: { a: '1' } }, { dependencies: { a: '1', b: '2' } })
   assert.deepEqual(added, ['b'])
 })
 
 /* ------------------------------------------------------------- add 管线 */
 
-test('add：给声明了 dsh 元数据的插件自动落补丁，并放行原生模块', () => {
+test('add：给声明了 dsh 元数据的插件自动落补丁，并放行原生模块', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     // 模拟 pnpm 刚装好：插件 + 它的原生依赖 better-sqlite3
@@ -146,7 +146,7 @@ test('add：给声明了 dsh 元数据的插件自动落补丁，并放行原生
   }
 })
 
-test('add：幂等 —— 已挂载的插件不重复插入', () => {
+test('add：幂等 —— 已挂载的插件不重复插入', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'dsh-plugin-tlmemory', version: '0.2.2', dsh: { client: {} } })
@@ -166,7 +166,7 @@ test('add：幂等 —— 已挂载的插件不重复插入', () => {
   }
 })
 
-test('add：bundle 类插件交给层栈托管，不写补丁', () => {
+test('add：bundle 类插件交给层栈托管，不写补丁', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'dsh-context', version: '0.47.0', dsh: { bundle: { patch: './cordis.patch.yml' } } })
@@ -179,7 +179,7 @@ test('add：bundle 类插件交给层栈托管，不写补丁', () => {
   }
 })
 
-test('add：普通库只提示、绝不自动挂载（挂错会让 profile 起不来）', () => {
+test('add：普通库只提示、绝不自动挂载（挂错会让 profile 起不来）', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'lodash', version: '4.17.21' })
@@ -193,7 +193,7 @@ test('add：普通库只提示、绝不自动挂载（挂错会让 profile 起�
   }
 })
 
-test('add：--no-mount 与自定义 --id/--config', () => {
+test('add：--no-mount 与自定义 --id/--config', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'dsh-plugin-x', version: '1.0.0', dsh: { client: {} } })
@@ -213,7 +213,7 @@ test('add：--no-mount 与自定义 --id/--config', () => {
   }
 })
 
-test('add：--dry-run 不产生任何写入', () => {
+test('add：--dry-run 不产生任何写入', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'dsh-plugin-dry', version: '1.0.0', dsh: { client: {} } })
@@ -230,7 +230,7 @@ test('add：--dry-run 不产生任何写入', () => {
   }
 })
 
-test('add：pnpm 的 pendingBuilds 在本闭包内也被认可（含 git 型构建）', () => {
+test('add：pnpm 的 pendingBuilds 在本闭包内也被认可（含 git 型构建）', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     // 该包没有 install 脚本也没有 binding.gyp → 我方判定看不到，只能靠 pendingBuilds
@@ -253,7 +253,7 @@ test('add：pnpm 的 pendingBuilds 在本闭包内也被认可（含 git 型构�
   }
 })
 
-test('add：allowBuilds 里用户显式 false 不被覆盖', () => {
+test('add：allowBuilds 里用户显式 false 不被覆盖', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     fs.writeFileSync(
@@ -274,7 +274,7 @@ test('add：allowBuilds 里用户显式 false 不被覆盖', () => {
 
 /* ---------------------------------------------------------- remove 管线 */
 
-test('remove：先摘补丁再卸依赖，且清掉专属注释', () => {
+test('remove：先摘补丁再卸依赖，且清掉专属注释', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'dsh-plugin-tlmemory', version: '0.2.2', dsh: { client: {} } })
@@ -283,7 +283,7 @@ test('remove：先摘补丁再卸依赖，且清掉专属注释', () => {
 
     const calls = []
     const { ctx: ctx2 } = makeCtx(dir, { runPnpmRemove: (names) => (calls.push(names), 0) })
-    const result = applyRemoveWrites(ctx2, ['dsh-plugin-tlmemory'], {})
+    const result = await applyRemoveWrites(ctx2, ['dsh-plugin-tlmemory'], {})
     assert.equal(result.removed[0].removed, 1)
     assert.deepEqual(calls, [['dsh-plugin-tlmemory']])
     const after = fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
@@ -297,12 +297,12 @@ test('remove：先摘补丁再卸依赖，且清掉专属注释', () => {
   }
 })
 
-test('remove：未挂载的包不写文件、不报错', () => {
+test('remove：未挂载的包不写文件、不报错', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     const before = fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
     const { ctx } = makeCtx(dir)
-    const result = applyRemoveWrites(ctx, ['not-mounted'], {})
+    const result = await applyRemoveWrites(ctx, ['not-mounted'], {})
     assert.equal(result.removed[0].removed, 0)
     assert.equal(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'), before)
     assert.equal(result.backups.length, 0)
@@ -313,7 +313,7 @@ test('remove：未挂载的包不写文件、不报错', () => {
 
 /* ------------------------------------------------------------ list 视图 */
 
-test('list：区分层栈 / 补丁挂载 / 未挂载 / 仅依赖 / 悬空挂载', () => {
+test('list：区分层栈 / 补丁挂载 / 未挂载 / 仅依赖 / 悬空挂载', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
@@ -354,7 +354,7 @@ test('list：区分层栈 / 补丁挂载 / 未挂载 / 仅依赖 / 悬空挂载'
 
 /* ------------------------------------------------------- 读取与闭包工具 */
 
-test('readModules 容忍缺失与非法内容', () => {
+test('readModules 容忍缺失与非法内容', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     assert.deepEqual(readModules(dir), { pendingBuilds: [], allowBuilds: {} })
@@ -365,7 +365,7 @@ test('readModules 容忍缺失与非法内容', () => {
   }
 })
 
-test('walkDependencyClosure 走依赖树并标出需要构建的包', () => {
+test('walkDependencyClosure 走依赖树并标出需要构建的包', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'root-plugin', version: '1.0.0', dependencies: { mid: '1' } })
@@ -379,8 +379,21 @@ test('walkDependencyClosure 走依赖树并标出需要构建的包', () => {
   }
 })
 
-/** 在 .pnpm/<encoded>@<ver>/node_modules/<name> 里造一个包（isolated 链接布局） */
-function installIsolated(profileDir, manifest, files = []) {
+test('walkDependencyClosure 遇到解析不到的依赖时跳过而不是崩（被裁剪 / 未安装）', async () => {
+  const { dir, cleanup } = makeProfile()
+  try {
+    installPackage(dir, { name: 'root-plugin', version: '1.0.0', dependencies: { ghost: '1.0.0', mid: '1' } })
+    installPackage(dir, { name: 'mid', version: '1.0.0' })
+    // ghost 在依赖里但 node_modules 里没有：闭包应当继续走完其余节点
+    const { nodes, natives } = walkDependencyClosure(dir, ['root-plugin'])
+    assert.deepEqual([...nodes].sort(), ['ghost', 'mid', 'root-plugin'])
+    assert.deepEqual([...natives], [])
+  } finally {
+    cleanup()
+  }
+})
+
+/** 在 .pnpm/<encoded>@<ver>/node_modules/<name> 里造一个包（isolated 链接布局） */function installIsolated(profileDir, manifest, files = []) {
   const encoded = manifest.name.startsWith('@') ? manifest.name.replace('/', '+') : manifest.name
   const dir = path.join(profileDir, 'node_modules', '.pnpm', `${encoded}@${manifest.version}`, 'node_modules', manifest.name)
   fs.mkdirSync(dir, { recursive: true })
@@ -389,7 +402,7 @@ function installIsolated(profileDir, manifest, files = []) {
   return dir
 }
 
-test('resolveInstalledDir 兼容 pnpm 默认 isolated 布局（传递依赖不在顶层）', () => {
+test('resolveInstalledDir 兼容 pnpm 默认 isolated 布局（传递依赖不在顶层）', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     installPackage(dir, { name: 'root-plugin', version: '1.0.0', dependencies: { 'native-leaf': '1' } })
@@ -405,7 +418,7 @@ test('resolveInstalledDir 兼容 pnpm 默认 isolated 布局（传递依赖不�
   }
 })
 
-test('resolveInstalledDir 支持 scope 包的 .pnpm 编码（@scope/name → @scope+name）', () => {
+test('resolveInstalledDir 支持 scope 包的 .pnpm 编码（@scope/name → @scope+name）', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     const installed = installIsolated(dir, { name: '@scope/native', version: '2.0.0' }, ['binding.gyp'])
@@ -415,7 +428,7 @@ test('resolveInstalledDir 支持 scope 包的 .pnpm 编码（@scope/name → @sc
   }
 })
 
-test('add：本次安装新出现的 allowBuilds 占位项被自动批准，历史占位项不动', () => {
+test('add：本次安装新出现的 allowBuilds 占位项被自动批准，历史占位项不动', async () => {
   const { dir, cleanup } = makeProfile()
   try {
     // 历史遗留占位项（与本次无关，必须留着）；本包自身无需构建（无 install 脚本）
@@ -441,6 +454,6 @@ test('add：本次安装新出现的 allowBuilds 占位项被自动批准，历�
   }
 })
 
-test('readProfileManifest 对缺失文件返回空对象', () => {
+test('readProfileManifest 对缺失文件返回空对象', async () => {
   assert.deepEqual(readProfileManifest(path.join(os.tmpdir(), 'definitely-missing-dir-xyz')), {})
 })

@@ -35,6 +35,27 @@ dsh plugin --profile web add dsh-plugin-tlmemory
 另外 `dsh plugin --profile web list` 可查看挂载状态，`dsh plugin --profile web remove <包名>`
 可一键摘除补丁并卸载。
 
+> `--profile` 必须紧跟 `dsh plugin`，且只能出现一次：`dsh plugin --profile web add --profile=1`
+> 这类写法会**显式报错**并拒绝执行（旧版会静默丢弃参数、同时把整条命令改道到另一个 profile）。
+> 命令的失败以稳定退出码分类：`0` 成功 / `1` 用法或前置条件不满足 / `2` pnpm 缺失 /
+> `3` 清单非法 / `4` 归并不一致 / `124` pnpm 超时，其余透传 pnpm；每条诊断行都带
+> `dsh: diagnose: <code>:` 前缀，便于脚本与 agent 直接匹配。
+>
+> 本层全局选项（任何子命令都可用，且不会转发给 pnpm）：
+>
+> | 选项 | 作用 |
+> |---|---|
+> | `--json` | stdout 只输出一行结果 JSON（`phase` / `exitCode` / `pnpm` / `addedBundles` / `mounts` / `allowBuilds` / `diagnostics`…），人类日志改走 stderr；也可用 `DSH_PLUGIN_OUTPUT=json` |
+> | `--timeout <值>` | pnpm 超时（`1500` / `30s` / `5m`），超时以 `124` 结束；也可用 `DSH_PLUGIN_TIMEOUT` |
+> | `--yes` | 确认「用内置默认层栈首次创建无模板的同名 profile」；没有它时未知 profile 名的首次创建会被拒绝（避免手误留下半成品 profile） |
+> | `--no-lock` | 跳过 profile 互斥锁 |
+>
+> 其它内建保障：profile 自己是 workspace root 时自动给 `add`/`remove`/`update` 补 `-w`；
+> 会写盘的子命令默认持有 `<profile>/.dsh-plugin.lock`；回写 `package.json` 前先存
+> `.bak-dsh-plugin-manifest-<时间戳>` 并原子替换；pnpm 的输出被实时转发**同时**被捕获，
+> 失败时给出分类后的诊断（`adding-to-root` / `ignored-builds` / `fetch-404` /
+> `windows-file-locked` / `network` …）。
+
 ### 方式二：手工安装（等价于方式一的三步）
 
 进入你的 DSH profile 目录（例如 `~/.dsh/profiles/web`）：

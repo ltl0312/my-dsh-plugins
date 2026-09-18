@@ -7,22 +7,33 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  BUILD_APPROVAL_KEYS,
   BUILD_PLACEHOLDER,
+  GIT_SPEC_PATTERN,
+  LOCK_FILENAME,
+  PROXY_ENV_MAP,
   appendPatchItem,
   classifyDshPackage,
   declaredDefaultConfig,
   deriveEntryId,
   detectEol,
+  findForwardedProfileFlag,
   findMountedEntry,
   indentOf,
+  isInstallingSubcommand,
+  isMutatingSubcommand,
   listBuildPlaceholders,
   listMountedEntries,
+  parseGlobalFlags,
+  parsePluginSubcommand,
+  parseTimeoutToken,
   patchEntries,
   planAllowBuildsEdit,
   planPatchRemoval,
   renderInsertBlock,
   renderYamlScalar,
   requiresNativeBuild,
+  timestamp,
   toLines,
   topLevelItems,
   unquoteScalar,
@@ -360,4 +371,119 @@ test('requiresNativeBuild 复刻 pnpm 的判定（install 脚本或 binding.gyp�
   assert.equal(requiresNativeBuild({ scripts: { test: 'x' } }, []), false)
   assert.equal(requiresNativeBuild({}, ['binding.gyp', 'index.js']), true)
   assert.equal(requiresNativeBuild({}, ['index.js']), false)
+})
+
+/* ------------------------------------------------ 全局旗标与常量（P2/P3） */
+
+test('parseGlobalFlags 摘出本层全局旗标，其余原样留给 pnpm', () => {
+  const flags = parseGlobalFlags(['add', 'pkg', '--json', '--timeout', '30s', '--yes', '--no-lock', '-D'])
+  assert.equal(flags.json, true)
+  assert.equal(flags.timeoutMs, 30000)
+  assert.equal(flags.timeoutRaw, '30s')
+  assert.equal(flags.newProfile, true)
+  assert.equal(flags.lock, false)
+  assert.deepEqual(flags.rest, ['add', 'pkg', '-D'], '本层旗标不得转发给 pnpm')
+})
+
+test('parseGlobalFlags 支持 --k=v 写法、非法超时值与默认值', () => {
+  const equals = parseGlobalFlags(['list', '--json=false', '--timeout=1500'])
+  assert.equal(equals.json, false)
+  assert.equal(equals.timeoutMs, 1500)
+  assert.deepEqual(equals.rest, ['list'])
+
+  const noValue = parseGlobalFlags(['list', '--timeout'])
+  assert.equal(noValue.timeoutMs, undefined)
+  assert.equal(noValue.timeoutRaw, undefined, '缺值时按未给处理')
+
+  const garbage = parseGlobalFlags(['list', '--timeout=ten'])
+  assert.equal(garbage.timeoutMs, undefined)
+  assert.equal(garbage.timeoutRaw, 'ten', '非法值要留证据给上层报错')
+
+  assert.deepEqual(parseGlobalFlags(['why', 'x']), {
+    json: false,
+    timeoutMs: undefined,
+    timeoutRaw: undefined,
+    newProfile: false,
+    lock: true,
+    rest: ['why', 'x'],
+  })
+})
+
+test('parseTimeoutToken 支持 ms / s / m 与小数', () => {
+  assert.equal(parseTimeoutToken('1500'), 1500)
+  assert.equal(parseTimeoutToken('30s'), 30000)
+  assert.equal(parseTimeoutToken('5m'), 300000)
+  assert.equal(parseTimeoutToken('0.5s'), 500)
+  assert.equal(parseTimeoutToken('abc'), undefined)
+  assert.equal(parseTimeoutToken(undefined), undefined)
+})
+
+test('parsePluginSubcommand 把全局旗标与子命令自身旗标分开，并保留 flags', () => {
+  const add = parsePluginSubcommand(['add', 'pkg', '--id', 'x', '--json', '--dry-run', '--timeout=2s'])
+  assert.equal(add.kind, 'add')
+  assert.equal(add.flags.json, true)
+  assert.equal(add.flags.timeoutMs, 2000)
+  assert.equal(add.own.id, 'x')
+  assert.equal(add.own.dryRun, true)
+  assert.deepEqual(add.specs, ['pkg'], '全局旗标不该混进 add 的 spec')
+
+  const passthrough = parsePluginSubcommand(['--json', 'why', 'pkg'])
+  assert.equal(passthrough.kind, 'passthrough')
+  assert.deepEqual(passthrough.args, ['why', 'pkg'], '全局旗标不该混进转发参数')
+  assert.equal(passthrough.flags.json, true)
+
+  const help = parsePluginSubcommand(['--json', '--help'])
+  assert.equal(help.kind, 'help')
+  assert.equal(help.flags.json, true)
+  assert.equal(parsePluginSubcommand(['help']).kind, 'help')
+})
+
+test('isMutatingSubcommand / isInstallingSubcommand 的判定表（决定锁与审计）', () => {
+  for (const sub of ['install', 'i', 'add', 'remove', 'rm', 'uninstall', 'update', 'up', 'import', 'prune']) {
+    assert.equal(isMutatingSubcommand([sub]), true, sub)
+  }
+  for (const sub of ['why', 'list', 'ls', 'outdated', 'approve-builds']) {
+    assert.equal(isMutatingSubcommand([sub]), false, sub)
+  }
+  assert.equal(isMutatingSubcommand([]), false)
+  for (const sub of ['install', 'i', 'add', 'update', 'up']) assert.equal(isInstallingSubcommand([sub]), true, sub)
+  for (const sub of ['remove', 'why', 'list']) assert.equal(isInstallingSubcommand([sub]), false, sub)
+})
+
+test('findForwardedProfileFlag 抓的是「出现在子命令之后」的 --profile', () => {
+  assert.equal(findForwardedProfileFlag(['add', 'pkg']), undefined)
+  assert.equal(findForwardedProfileFlag(['add', 'pkg', '--profile=1']), '--profile=1')
+  assert.equal(findForwardedProfileFlag(['add', '--profile', '1']), '--profile')
+})
+
+test('GIT_SPEC_PATTERN 覆盖各宿主形态（比官方三条分支更全，P3-2）', () => {
+  const gitSpecs = [
+    'git+https://github.com/a/b.git',
+    'github:a/b',
+    'gitlab:a/b',
+    'bitbucket:a/b',
+    'git@github.com:a/b.git',
+    'ssh://git@github.com/a/b.git',
+    'https://github.com/a/b.git',
+    'https://github.com/a/b.git#v1',
+    'https://gitlab.com/a/b',
+  ]
+  for (const spec of gitSpecs) assert.equal(GIT_SPEC_PATTERN.test(spec), true, spec)
+  const others = ['dsh-plugin-tlmemory', '@scope/pkg', 'file:../x', 'https://registry.npmjs.org/x/-/x-1.0.0.tgz', 'x@1.2.3']
+  for (const spec of others) assert.equal(GIT_SPEC_PATTERN.test(spec), false, spec)
+})
+
+test('具名常量集中：锁文件名 / 构建放行键 / 代理键映射（建议 #15）', () => {
+  assert.equal(LOCK_FILENAME, '.dsh-plugin.lock')
+  assert.equal(BUILD_APPROVAL_KEYS.modern, 'allowBuilds')
+  assert.equal(BUILD_APPROVAL_KEYS.legacy, 'onlyBuiltDependencies')
+  const mapped = Object.fromEntries(PROXY_ENV_MAP)
+  assert.equal(mapped.HTTPS_PROXY, 'npm_config_https_proxy')
+  assert.equal(mapped.HTTP_PROXY, 'npm_config_proxy')
+  assert.equal(mapped.NO_PROXY, 'npm_config_noproxy')
+})
+
+test('timestamp 产出备份文件名可用的稳定格式', () => {
+  assert.equal(timestamp(new Date(2026, 8, 18, 11, 26, 7)), '20260918-112607')
+  assert.match(timestamp(), /^\d{8}-\d{6}$/)
 })

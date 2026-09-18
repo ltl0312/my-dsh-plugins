@@ -18,6 +18,45 @@ export const PATCH_FILENAME = 'cordis.patch.yml'
 /** pnpm 11 的「允许执行构建脚本」配置文件名 */
 export const WORKSPACE_FILENAME = 'pnpm-workspace.yaml'
 
+/** 回写被改动的文件前生成的备份后缀（中间再插时间戳） */
+export const BACKUP_INFIX = 'bak-dsh-plugin'
+
+/** profile 级互斥锁文件名（P2-4：取不到锁就明确失败，绝不并发覆盖） */
+export const LOCK_FILENAME = '.dsh-plugin.lock'
+
+/** 锁被视为陈旧（可接管）的毫秒数 */
+export const LOCK_STALE_MS = 10 * 60 * 1000
+
+/** profile 清单文件在回写前的备份后缀（P2-4） */
+export const MANIFEST_BACKUP_SUFFIX = `${BACKUP_INFIX}-manifest`
+
+/**
+ * 需要 `prepare` 构建的 git 形态 spec。
+ * 官方只有三条分支（`^git+` / `^github:` / `\\.git(#|$)`），漏掉 gitlab/bitbucket/裸
+ * https 与 ssh 形态；这些同样会触发 pnpm 的构建放行（P3-2）。
+ */
+export const GIT_SPEC_PATTERN = /^(?:git\+|github:|gitlab:|bitbucket:|git@)|\.git(?:#|$)|(?:^|\/\/)(?:www\.)?(?:github|gitlab|bitbucket)\.com\//i
+
+/**
+ * pnpm 记录「允许执行构建脚本」的配置键，按 pnpm 大版本区分（P3-2）：
+ *   - pnpm 10：`onlyBuiltDependencies`（数组）
+ *   - pnpm 11+：`allowBuilds`（映射，本增强层写的就是它）
+ */
+export const BUILD_APPROVAL_KEYS = Object.freeze({
+  modern: 'allowBuilds',
+  legacy: 'onlyBuiltDependencies',
+})
+
+/** 代理环境变量 → pnpm（npm 配置）认的键名（#12：把翻译下沉，消费者不必各自实现） */
+export const PROXY_ENV_MAP = Object.freeze([
+  ['HTTPS_PROXY', 'npm_config_https_proxy'],
+  ['https_proxy', 'npm_config_https_proxy'],
+  ['HTTP_PROXY', 'npm_config_proxy'],
+  ['http_proxy', 'npm_config_proxy'],
+  ['NO_PROXY', 'npm_config_noproxy'],
+  ['no_proxy', 'npm_config_noproxy'],
+])
+
 /**
  * pnpm 写入 pnpm-workspace.yaml 的「待人工确认」占位值。
  * pnpm 检测到需要构建脚本的依赖时会自动补一条 `包名: set this to true or false`，
@@ -32,6 +71,18 @@ export function detectEol(text) {
   const crlf = (text.match(/\r\n/g) ?? []).length
   const lf = (text.match(/(?<!\r)\n/g) ?? []).length
   return crlf > lf ? '\r\n' : '\n'
+}
+
+/**
+ * 当前时间戳（用于备份文件名与锁记录），形如 20260915-133600。
+ * 放在 core 里是因为 pipeline（备份）与 forward（清单备份、锁）都要用。
+ */
+export function timestamp(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0')
+  return (
+    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
+    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+  )
 }
 
 /** 拆行（丢换行符），保留空行以便行号与原文一一对应 */
@@ -606,21 +657,131 @@ const REMOVE_ALIASES = new Set(['remove', 'rm', 'uninstall'])
 const LIST_ALIASES = new Set(['list', 'ls'])
 
 /**
+ * 会改变「已安装依赖集合」的子命令。
+ * 这些走 passthrough 的用法在转发之后必须做一次激活审计（P1-2）：
+ * `dsh plugin install` 只装依赖，不会写 cordis.patch.yml，客户端型插件装完并不生效。
+ */
+const INSTALLING_ALIASES = new Set(['install', 'i', 'add', 'update', 'up'])
+
+/**
+ * 在**待转发**的参数里找 `--profile`（P1-3）。
+ *
+ * 启动器的 `--profile` 只能出现在子命令之前；一旦出现在待转发参数里（例如
+ * `dsh plugin --profile web add --profile=1`），它就是一条会丢失的参数或者一次静默的
+ * profile 改道 —— 两种都不可接受，必须显式报错而不是吞掉或覆盖。
+ * @param args - 待转发的参数
+ * @returns 命中的那个 token；没有则 undefined
+ */
+export function findForwardedProfileFlag(args) {
+  const argv = Array.isArray(args) ? args.map(String) : []
+  return argv.find((token) => token === '--profile' || token.startsWith('--profile='))
+}
+
+/**
+ * 该次转发是否会改动已安装依赖（决定要不要做激活审计）
+ * @param args - 待转发的参数
+ */
+export function isInstallingSubcommand(args) {
+  const argv = Array.isArray(args) ? args : []
+  return typeof argv[0] === 'string' && INSTALLING_ALIASES.has(argv[0])
+}
+
+/** 会写盘（需要拿 profile 锁）的子命令；查询类不加锁，避免只读操作被互相阻塞 */
+const MUTATING_ALIASES = new Set(['install', 'i', 'add', 'remove', 'rm', 'uninstall', 'update', 'up', 'import', 'prune'])
+
+/**
+ * 该次转发是否会改动 profile（决定要不要拿锁、要不要备份清单）
+ * @param args - 待转发的参数
+ */
+export function isMutatingSubcommand(args) {
+  const argv = Array.isArray(args) ? args : []
+  return typeof argv[0] === 'string' && MUTATING_ALIASES.has(argv[0])
+}
+
+/**
+ * 解析形如 `1500` / `30s` / `5m` 的超时值。
+ * @param raw - 原始 token
+ * @returns 毫秒数；无法解析返回 undefined（由调用方决定是否作为用法错误）
+ */
+export function parseTimeoutToken(raw) {
+  if (raw === undefined || raw === null) return undefined
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m)?$/.exec(String(raw).trim())
+  if (match === null) return undefined
+  const value = Number(match[1])
+  const unit = match[2] ?? 'ms'
+  const scaled = unit === 'm' ? value * 60_000 : unit === 's' ? value * 1_000 : value
+  return Math.max(0, Math.round(scaled))
+}
+
+/**
+ * 摘出属于**本增强层**的全局旗标（对 add / remove / list / passthrough 一律生效，
+ * 且不转发给 pnpm）。
+ *
+ * 为什么需要一层独立的全局旗标：`--json` / `--timeout` / `--yes` / `--no-lock`
+ * 描述的是「这条命令怎么跑」，而不是「pnpm 怎么跑」。之前它们只能靠每个子命令各自
+ * 解析，既容易漏，也会随子命令集合增长而漂移。
+ * @param args - `dsh plugin` 之后的 argv
+ * @returns `{ json, timeoutMs, timeoutRaw, newProfile, lock, rest }`
+ */
+export function parseGlobalFlags(args) {
+  const argv = Array.isArray(args) ? args.map(String) : []
+  const flags = { json: process.env.DSH_PLUGIN_OUTPUT === 'json', timeoutMs: undefined, timeoutRaw: undefined, newProfile: false, lock: true, rest: [] }
+  const envTimeout = parseTimeoutToken(process.env.DSH_PLUGIN_TIMEOUT)
+  if (envTimeout !== undefined) flags.timeoutMs = envTimeout
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--json') {
+      flags.json = true
+      continue
+    }
+    if (token.startsWith('--json=')) {
+      flags.json = token.slice('--json='.length) !== 'false'
+      continue
+    }
+    if (token === '--timeout') {
+      flags.timeoutRaw = argv[i + 1]
+      flags.timeoutMs = parseTimeoutToken(argv[i + 1])
+      i += 1
+      continue
+    }
+    if (token.startsWith('--timeout=')) {
+      flags.timeoutRaw = token.slice('--timeout='.length)
+      flags.timeoutMs = parseTimeoutToken(flags.timeoutRaw)
+      continue
+    }
+    if (token === '--yes' || token === '--new-profile') {
+      flags.newProfile = true
+      continue
+    }
+    if (token === '--no-lock') {
+      flags.lock = false
+      continue
+    }
+    flags.rest.push(token)
+  }
+  return flags
+}
+
+/**
  * 解析 `dsh plugin` 之后的参数。
  *
  * 设计原则：**只吃掉属于自己的参数，其余原样交给 pnpm**。因此 `why`、`update`、
  * `outdated`、`install` 等既有用法零影响；`add` 里混入的 pnpm 旗标（`-D`、`--save-exact`…）
- * 也会原样透传。
+ * 也会原样透传。本层全局旗标由 {@link parseGlobalFlags} 先摘掉。
  *
  * 已知权衡：`--dry-run` 被本层接管（不再是 pnpm 的 dry-run），因为「先看要写什么
  * 再决定要不要动 profile」是这里最重要的安全阀。
  * @param args - `dsh plugin` 之后的 argv
- * @returns 判别联合：`help` / `add` / `remove` / `list` / `passthrough`
+ * @returns 判别联合：`help` / `add` / `remove` / `list` / `passthrough`（附 `flags`）
  */
 export function parsePluginSubcommand(args) {
-  const argv = Array.isArray(args) ? args.map(String) : []
-  if (argv.length === 0) return { kind: 'help', reason: 'empty' }
-  if (argv[0] === '-h' || argv[0] === '--help' || argv[0] === 'help') return { kind: 'help', reason: 'asked' }
+  const raw = Array.isArray(args) ? args.map(String) : []
+  const flags = parseGlobalFlags(raw)
+  const argv = flags.rest
+
+  // 先摘全局旗标再判断帮助：`dsh plugin --json --help` 也该走帮助
+  if (argv.length === 0) return { kind: 'help', reason: raw.length === 0 ? 'empty' : 'asked', flags }
+  if (argv[0] === '-h' || argv[0] === '--help' || argv[0] === 'help') return { kind: 'help', reason: 'asked', flags }
 
   const sub = argv[0]
   const rest = argv.slice(1)
@@ -658,7 +819,7 @@ export function parsePluginSubcommand(args) {
       }
       specs.push(token)
     }
-    return { kind: 'add', specs, own }
+    return { kind: 'add', specs, own, flags }
   }
 
   if (REMOVE_ALIASES.has(sub)) {
@@ -671,12 +832,12 @@ export function parsePluginSubcommand(args) {
       }
       specs.push(token)
     }
-    return { kind: 'remove', specs, own }
+    return { kind: 'remove', specs, own, flags }
   }
 
-  if (LIST_ALIASES.has(sub)) return { kind: 'list', extra: rest }
+  if (LIST_ALIASES.has(sub)) return { kind: 'list', extra: rest, flags }
 
-  return { kind: 'passthrough', args: argv }
+  return { kind: 'passthrough', args: argv, flags }
 }
 
 /**
@@ -706,16 +867,30 @@ add 选项：
 remove 选项：
   --dry-run        只预览将删除的行范围
 
+全局选项（任何子命令都可用，不会转发给 pnpm）：
+  --json           只把结果以单行 JSON 输出到 stdout（人类可读日志改走 stderr）
+                   也可用 DSH_PLUGIN_OUTPUT=json 常开
+  --timeout <值>   pnpm 超时，支持 1500 / 30s / 5m；超时以退出码 124 结束
+                   也可用 DSH_PLUGIN_TIMEOUT 设置默认值（不设则不限时）
+  --yes            确认「用内置默认层栈首次创建无模板的同名 profile」
+                   （又名 --new-profile；没有它时，未知 profile 名的首次创建会被拒绝）
+  --no-lock        跳过 profile 互斥锁（默认会用 .dsh-plugin.lock 串行化写操作）
+
 示例：
   dsh plugin --profile ${profile} add dsh-plugin-tlmemory
   dsh plugin --profile ${profile} add file:D:/Code/my-dsh-plugins/packages/tlmemory
   dsh plugin --profile ${profile} add dsh-plugin-tlmemory --dry-run
-  dsh plugin --profile ${profile} list
+  dsh plugin --profile ${profile} list --json
   dsh plugin --profile ${profile} remove dsh-plugin-tlmemory
 
 说明：
   * 未指定 --profile 时默认使用 web（会先提示一行再执行）；
   * 写文件前一律生成 <文件名>.bak-dsh-plugin-<时间戳> 备份，写入后立即复读校验；
+  * 回写 package.json 前会另存一份 .bak-dsh-plugin-manifest-<时间戳>，并原子替换；
+  * 会写盘的子命令（add / remove / install / update…）默认持有 profile 锁，
+    拿不到锁就明确失败，绝不并发覆盖；
+  * pnpm 的输出会被实时转发**同时**被捕获：失败时给出带稳定前缀的分类诊断
+    （dsh: diagnose: <错误码>: …），退出码 0/2/3/4/124 为稳定契约，其余透传 pnpm；
   * 不改动 profile 里 cordis.patch.yml 的既有内容与注释，只做追加 / 精确摘除；
   * bundle 形态（声明 dsh.bundle.patch）的插件由 dsh.profile.bundles 层栈托管，
     本命令不会重复挂载。

@@ -5,7 +5,8 @@
 // 构建产物（带 hash 的文件名）。直接手改会有两个后果：升级即丢失、改坏即整个 CLI 报废。
 // 因此本安装器的原则是：
 //   * 业务代码放独立目录 lib/commands/，可整体重装刷新；
-//   * 对 bin.js 只做 4 处**可校验的最小替换**，替换前先备份、替换后先语法校验再落盘；
+//   * 对 bin.js 只做若干处**幂等、可校验的最小替换**（含 P1-3：plugin 子命令改用
+//     透传选项、`--profile` 给两次显式报错），替换前先备份、替换后先语法校验再落盘；
 //   * 任一步不满足预期就中止且不写盘（宁可没装上，不能把 CLI 弄坏）。
 //
 // 用法：
@@ -20,6 +21,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+import { pathDirs } from './forward.mjs'
 import { pluginHelpText } from './core.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -27,6 +29,8 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 /** 需要复制进 <dsh>/lib/commands/ 的文件（源名 → 目标名） */
 const MODULE_MAP = [
   ['core.mjs', 'core.mjs'],
+  ['pnpm.mjs', 'pnpm.mjs'],
+  ['forward.mjs', 'forward.mjs'],
   ['pipeline.mjs', 'pipeline.mjs'],
   ['command.mjs', 'plugin.js'],
 ]
@@ -40,6 +44,39 @@ const BACKUP_PREFIX = 'bin.js.bak-dsh-plugin-'
 /** plugin 子命令独有的参数描述：用作定位固化帮助文本的锚点 */
 const PLUGIN_ARGS_DESCRIPTION =
   '"pnpm arguments, forwarded verbatim (add <pkg>, remove <pkg>, why <pkg>, ...)"'
+
+/** plugin 子命令的 `.argument(...)` 调用整体（透传选项就加在它前面） */
+const PLUGIN_ARGUMENT_CALL = `.argument("[args...]", ${PLUGIN_ARGS_DESCRIPTION})`
+
+/** `.passThroughOptions()` 的目标形态 */
+const PLUGIN_PASSTHROUGH =
+  '.passThroughOptions().enablePositionalOptions().argument("[args...]", ' + PLUGIN_ARGS_DESCRIPTION + ')'
+
+/** `--profile` 选项的三种形态：上游原始 / 增强层 v1 / 增强层 v2（当前目标） */
+const PROFILE_OPTION_UPSTREAM =
+  '.requiredOption("--profile <name>", "the profile whose plugins to manage (initialized on first use)")'
+const PROFILE_OPTION_V1 =
+  '.option("--profile <name>", "the profile whose plugins to manage (default: web; initialized on first use)")'
+const PROFILE_OPTION_V2 =
+  '.option("--profile <name>", "the profile whose plugins to manage (default: web; initialized on first use)", collectProfile)'
+
+/** `--profile` 为可选后，官方那句 `rejectElectronProfile(plugin, options.profile)` 会因
+ *  undefined.toLowerCase() 抛错并被 commander 的 catch 静默吞成 exit 1 —— 于是
+ *  `dsh plugin`（无参数）与 `dsh plugin --help` 都变成「零输出 + 退出码 1」。这里把调用
+ *  收进 undefined 判断，重复给值也一并显式报错（P1-3）。 */
+const PROFILE_GUARD =
+  '\t\tif (Array.isArray(options.profile)) program.error("error: --profile was given more than once: " + ' +
+  'options.profile.map((value) => JSON.stringify(value)).join(", ") + " — it must appear once, before the pnpm arguments");\n' +
+  '\t\tif (options.profile !== void 0) rejectElectronProfile(plugin, options.profile);\n'
+
+/** 守卫已就位的判据（用于幂等/迁移判断） */
+const PROFILE_GUARD_MARKER = 'if (options.profile !== void 0) rejectElectronProfile(plugin, options.profile);'
+
+/** 注入的收集器定义：让「`--profile` 给两次」变成可判定的错误而不是静默覆盖（P1-3） */
+const PROFILE_COLLECTOR = [
+  '/** `--profile` 给两次是错误，不是静默覆盖 —— 保留两个值交给命令自己去拒绝。 */',
+  'const collectProfile = (value, previous) => previous === void 0 ? value : [...(Array.isArray(previous) ? previous : [previous]), value];',
+].join('\n')
 
 /* ------------------------------------------------------------ 定位安装 */
 
@@ -64,6 +101,14 @@ export function resolveDshDir(explicit) {
   candidates.push(path.join(os.homedir(), '.npm-global', 'lib', 'node_modules', '@deepseek-ai', 'dsh'))
   candidates.push('/usr/local/lib/node_modules/@deepseek-ai/dsh', '/usr/lib/node_modules/@deepseek-ai/dsh')
 
+  // 沿 PATH 找 dsh 垫片旁边的包目录。这条覆盖「跑安装器的 node 与装了 dsh 的 node
+  // 不是同一个前缀」的常见情况（本机就是：managed node 之外另有一套全局 dsh），
+  // 否则用户必须手工传 --dsh 才能装上。
+  for (const dir of pathDirs(process.env, process.platform)) {
+    candidates.push(path.join(dir, 'node_modules', '@deepseek-ai', 'dsh'))
+    candidates.push(path.resolve(dir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh'))
+  }
+
   for (const candidate of candidates) {
     const dir = path.resolve(candidate)
     if (fs.existsSync(path.join(dir, 'lib', 'bin.js'))) return dir
@@ -76,8 +121,9 @@ export function resolveDshDir(explicit) {
 /**
  * 生成打过补丁的 bin.js 内容。
  *
- * 4 处替换都锚定在 dsh CLI 里的**唯一**文本上；任何一处没命中就整体返回失败，
- * 由调用方中止（避免「只改了一半」的半残状态）。
+ * 每一步都锚定在 dsh CLI 里的**唯一**文本上，且都带「已应用」判据，因此本函数
+ * 幂等 —— 重复执行、以及在旧版增强层（v1）之上做升级，结果都一样。
+ * 任一步骤锚点缺失即整体返回失败，由调用方中止（避免「只改了一半」的半残状态）。
  * @param source - bin.js 原文
  * @param help - `dsh plugin --help` 的正文（安装时固化进去）
  * @returns `{ ok: true, text, applied }` 或 `{ ok: false, missing }`
@@ -87,36 +133,62 @@ export function patchBinJs(source, help) {
   const missing = []
   let text = source
 
-  const steps = [
-    {
-      name: 'profile 选项改为可选',
-      from: '.requiredOption("--profile <name>", "the profile whose plugins to manage (initialized on first use)")',
-      to: '.option("--profile <name>", "the profile whose plugins to manage (default: web; initialized on first use)")',
-    },
-    {
-      name: '注入 plugin 子命令帮助',
-      from:
-        '.argument("[args...]", "pnpm arguments, forwarded verbatim (add <pkg>, remove <pkg>, why <pkg>, ...)")',
-      to: (matched) => `${matched}.addHelpText("after", ${JSON.stringify(help)})`,
-    },
-    {
-      name: '无参数时改为打印帮助',
-      from:
-        '\t\tif (args.length === 0) program.error("error: plugin needs pnpm arguments to forward (e.g. add <package>)");\n',
-      to: '',
-    },
-  ]
-
-  for (const step of steps) {
-    const index = text.indexOf(step.from)
-    if (index === -1) {
+  /**
+   * 应用一条替换。
+   * @param step - `{ name, from: string|string[], to: string|function, already?: (text) => boolean }`
+   */
+  const apply = (step) => {
+    if (typeof step.already === 'function' && step.already(text)) return
+    const candidates = Array.isArray(step.from) ? step.from : [step.from]
+    const from = candidates.find((candidate) => text.includes(candidate))
+    if (from === undefined) {
       missing.push(step.name)
-      continue
+      return
     }
-    const replacement = typeof step.to === 'function' ? step.to(step.from) : step.to
-    text = text.slice(0, index) + replacement + text.slice(index + step.from.length)
+    const index = text.indexOf(from)
+    const replacement = typeof step.to === 'function' ? step.to(from) : step.to
+    text = text.slice(0, index) + replacement + text.slice(index + from.length)
     applied.push(step.name)
   }
+
+  apply({
+    name: 'profile 选项改为可选且重复即报错（P1-3）',
+    from: [PROFILE_OPTION_UPSTREAM, PROFILE_OPTION_V1],
+    to: PROFILE_OPTION_V2,
+    already: (value) => value.includes(PROFILE_OPTION_V2),
+  })
+  apply({
+    name: '注入 --profile 收集器',
+    from: 'const collect = (value, previous = []) => [...previous, value];',
+    to: (matched) => `${matched}\n${PROFILE_COLLECTOR}`,
+    already: (value) => value.includes('const collectProfile ='),
+  })
+  apply({
+    name: 'plugin 子命令改为透传选项（P1-3）',
+    from: PLUGIN_ARGUMENT_CALL,
+    to: (matched) => `.passThroughOptions().enablePositionalOptions()${matched}`,
+    already: (value) => value.includes(PLUGIN_PASSTHROUGH),
+  })
+  apply({
+    name: '重复/缺省 --profile 的处理（P1-3）',
+    from: '\t\trejectElectronProfile(plugin, options.profile);\n',
+    to: PROFILE_GUARD,
+    already: (value) => value.includes(PROFILE_GUARD_MARKER),
+  })
+  apply({
+    name: '注入 plugin 子命令帮助',
+    from: PLUGIN_ARGUMENT_CALL,
+    to: (matched) => `${matched}.addHelpText("after", ${JSON.stringify(help)})`,
+    // 官方 bin.js 自己也有 addHelpText（根命令的示例），因此只在 plugin 的参数
+    // 描述**紧邻**处判断是否已注入，避免把根命令的那一处误判为「已应用」
+    already: (value) => value.includes(`${PLUGIN_ARGUMENT_CALL}.addHelpText(`),
+  })
+  apply({
+    name: '无参数时改为打印帮助',
+    from: '\t\tif (args.length === 0) program.error("error: plugin needs pnpm arguments to forward (e.g. add <package>)");\n',
+    to: '',
+    already: (value) => !value.includes('plugin needs pnpm arguments to forward'),
+  })
 
   if (text.includes(DISPATCH_MARKER)) {
     applied.push('分发入口（已存在，跳过）')
@@ -272,33 +344,24 @@ function main(argv) {
   }
 
   const original = fs.readFileSync(binFile, 'utf8')
-  const alreadyInstalled = original.includes(DISPATCH_MARKER)
   const help = pluginHelpText()
 
-  let patchedText = original
-  let applied = []
-  let helpRefreshed = false
-  if (alreadyInstalled) {
-    // 已是增强版：不再做结构替换（那些锚点已不存在），只同步固化的帮助文本
-    const refreshed = refreshHelpText(original, help)
-    if (!refreshed.ok) {
-      console.error(`bin.js 帮助文本刷新失败，已中止（未写任何文件）：${refreshed.reason}`)
-      return 1
-    }
-    patchedText = refreshed.text
-    helpRefreshed = refreshed.changed
-    applied = refreshed.changed ? ['刷新固化的帮助文本'] : []
-  } else {
-    const result = patchBinJs(original, help)
-    if (!result.ok) {
-      console.error('bin.js 补丁未命中以下位置，已中止（未写任何文件）：')
-      for (const name of result.missing) console.error(`  - ${name}`)
-      console.error('这通常意味着 dsh 版本变化导致 CLI 结构改动，请人工核对 lib/bin.js 后再安装。')
-      return 1
-    }
-    patchedText = result.text
-    applied = result.applied
+  // 幂等：无论 bin.js 是上游原文、增强层 v1 还是当前版本，都收敛到同一目标形态
+  const patched = patchBinJs(original, help)
+  if (!patched.ok) {
+    console.error('bin.js 补丁未命中以下位置，已中止（未写任何文件）：')
+    for (const name of patched.missing) console.error(`  - ${name}`)
+    console.error('这通常意味着 dsh 版本变化导致 CLI 结构改动，请人工核对 lib/bin.js 后再安装。')
+    return 1
   }
+  const refreshed = refreshHelpText(patched.text, help)
+  if (!refreshed.ok) {
+    console.error(`bin.js 帮助文本刷新失败，已中止（未写任何文件）：${refreshed.reason}`)
+    return 1
+  }
+  const patchedText = refreshed.text
+  const binChanged = patchedText !== original
+  const applied = patched.applied.filter((name) => !name.includes('已存在'))
 
   const check = syntaxCheck(libDir, patchedText)
   if (!check.ok) {
@@ -310,7 +373,8 @@ function main(argv) {
   if (dryRun) {
     console.log('将执行的改动：')
     for (const name of applied) console.log(`  ✔ ${name}`)
-    if (applied.length === 0) console.log('  · bin.js 无需改动')
+    if (refreshed.changed) console.log('  ✔ 刷新固化的帮助文本')
+    if (!binChanged) console.log('  · bin.js 已是目标形态，无需改动')
     console.log(`  ✔ 复制模块到 ${commandsDir}`)
     for (const [from, to] of MODULE_MAP) console.log(`      ${from} → commands/${to}`)
     console.log('（--dry-run，未落盘）')
@@ -324,13 +388,14 @@ function main(argv) {
     console.log(`  ✔ 复制 ${from} → lib/commands/${to}`)
   }
 
-  // 2) 再补 bin.js（已有补丁时只刷新帮助文本，不重复做结构替换）
-  if (!alreadyInstalled || helpRefreshed) {
+  // 2) 再补 bin.js（已是目标形态时一个字节都不动）
+  if (binChanged) {
     const backupPath = `${binFile}.bak-dsh-plugin-${STAMP}`
     fs.copyFileSync(binFile, backupPath)
     fs.writeFileSync(binFile, patchedText, 'utf8')
     console.log(`  ✔ 备份 bin.js → ${path.basename(backupPath)}`)
     for (const name of applied) console.log(`  ✔ ${name}`)
+    if (refreshed.changed) console.log('  ✔ 刷新固化的帮助文本')
   } else {
     console.log('  · bin.js 已是最新增强版，无需改动')
   }
