@@ -1,8 +1,8 @@
-﻿{
+{
   "name": "dsh-plugin-tlsearch",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "license": "MIT",
-  "description": "Low-token web search for dsh: compact, sanitized {title, url, snippet} results with pluggable Tavily / Brave / SearXNG backends and a token budget you control",
+  "description": "Low-token web search for dsh: compact, sanitized {title, url, snippet} results with a pluggable, auto-failing-over backend chain (Tavily / Exa / SearXNG / Brave / Google CSE) and a token budget you control",
   "type": "module",
   "packageManager": "pnpm@12.4.2",
   "devEngines": {
@@ -49,8 +49,9 @@
     "search",
     "web-search",
     "tavily",
-    "brave",
+    "exa",
     "searxng",
+    "brave",
     "low-token",
     "context-engineering",
     "agent",
