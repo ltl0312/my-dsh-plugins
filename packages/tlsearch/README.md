@@ -64,42 +64,60 @@
 
 ## 📦 安装
 
-### 方式一：一条命令安装并自动挂载（推荐）
+本包是 **bundle 形态**（`package.json` 的 `dsh.bundle.patch` 指向包内自带的
+`cordis.patch.yml`）。因此只要被列进 profile 的 `dsh.profile.bundles` 就会自动激活，
+**不需要**再往 profile 的 `cordis.patch.yml` 写挂载条目。
+
+### 方式一：一条命令安装并激活（推荐）
 
 ```powershell
 dsh plugin --profile web add dsh-plugin-tlsearch
 ```
 
-`dsh plugin add` 会自动装依赖、放行原生模块并往 `cordis.patch.yml` 追加挂载条目（幂等）。
+`dsh plugin add` 会自动装依赖并把该包归并进 `dsh.profile.bundles`（幂等）。bundle 形态
+无需额外补丁条目，这正是 `dsh plugin` 分类器认可的形态。`dsh plugin --profile web list`
+可核对激活状态，`dsh plugin --profile web remove dsh-plugin-tlsearch` 可一键摘除。
 
-### 方式二：手工安装
+### 方式二：手工安装（等价）
 
 ```powershell
 cd ~/.dsh/profiles/web
 pnpm add dsh-plugin-tlsearch
 ```
 
+然后把它加进 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 数组：
+
+```json
+"dsh": { "profile": { "bundles": ["…", "dsh-plugin-tlsearch"] } }
+```
+
+> 用本地源码调试时，依赖写成
+> `"dsh-plugin-tlsearch": "file:D:/Code/my-dsh-plugins/packages/tlsearch"`，
+> 并且同样必须出现在 `dsh.profile.bundles` 里才会生效 —— 只装依赖不激活是**不会生效**的。
+
 ---
 
 ## ⚙️ 配置
 
-编辑 Profile 目录下的 `~/.dsh/profiles/web/cordis.patch.yml`：
+配置有两条路径：宿主 GUI 的 **Settings > Plugins > Plugin configuration > tlsearch**，
+或在 Profile 目录下的 `~/.dsh/profiles/web/cordis.patch.yml` 里**按 id 覆盖**
+（注意是覆盖，不是再插一条 `- insert:` —— 挂载已由 bundle 完成，重复插入会挂载两次）：
 
 ```yaml
-- insert:
-    - id: tlsearch-runtime
-      name: "dsh-plugin-tlsearch"
-      config:
-        provider: tavily              # tavily | brave | searxng
-        apiKey: "tvly-xxxxxxxxxxxx"   # SearXNG 可留空
-        # baseUrl: "https://searx.example.com"   # SearXNG 必填；也可指向自建代理
-        maxResults: 5                 # 1-10，默认 5
-        maxSnippetChars: 250          # 单条摘要字符上限，默认 250（控制 Token 的主旋钮）
-        timeoutMs: 15000              # 单次请求超时（毫秒），默认 15000
-        outputFormat: markdown        # markdown（最省）| json
-        language: ""                  # 如 zh / en；留空由后端判定
-        includeAnswer: false          # 是否附带后端的一句话答案（默认 false 以省 Token）
+- id: dsh-plugin-tlsearch
+  config:
+    provider: tavily              # tavily | brave | searxng
+    apiKey: "tvly-xxxxxxxxxxxx"   # SearXNG 可留空
+    # baseUrl: "https://searx.example.com"   # SearXNG 必填；也可指向自建代理
+    maxResults: 5                 # 1-10，默认 5
+    maxSnippetChars: 250          # 单条摘要字符上限，默认 250（控制 Token 的主旋钮）
+    timeoutMs: 15000              # 单次请求超时（毫秒），默认 15000
+    outputFormat: markdown        # markdown（最省）| json
+    language: ""                  # 如 zh / en；留空由后端判定
+    includeAnswer: false          # 是否附带后端的一句话答案（默认 false 以省 Token）
 ```
+
+> 也可以完全不在这里写 `apiKey`，改用环境变量（见下节），配置层就不必碰密钥。
 
 ### 配置项
 

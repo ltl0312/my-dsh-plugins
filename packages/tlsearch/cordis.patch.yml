@@ -1,0 +1,20 @@
+# dsh-plugin-tlsearch bundle declaration: mount the low-token search tool into
+# the host composite. 被列进 profile 的 dsh.profile.bundles 即激活本文件，
+# 因此**不需要**在 profile 的 cordis.patch.yml 里再写挂载条目。
+#
+# 配置方式（三选一）：
+#   1. 宿主 GUI：Settings > Plugins > Plugin configuration > tlsearch
+#   2. 在自己的 profile 补丁层里按 id 覆盖（把下面三行取消注释并填值）：
+#        - id: dsh-plugin-tlsearch
+#          config:
+#            provider: tavily
+#            apiKey: "tvly-xxxxxxxx"
+#            maxResults: 5
+#            maxSnippetChars: 250
+#   3. 完全不配 apiKey，改用环境变量 TLSEARCH_API_KEY / TAVILY_API_KEY /
+#      BRAVE_SEARCH_API_KEY；SearXNG 用 TLSEARCH_BASE_URL / SEARXNG_BASE_URL。
+#
+# 缺凭据不会导致装载失败：工具照常注册，调用时返回可据以行动的分类错误。
+- insert:
+    - id: dsh-plugin-tlsearch
+      name: dsh-plugin-tlsearch
