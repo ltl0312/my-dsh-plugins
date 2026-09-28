@@ -58,7 +58,7 @@
 |---|---|---|---|---|
 | `tavily`（默认） | 必需 | `https://api.tavily.com` | 1000 credits/月（1 credit = 1 次搜索） | 结构化 JSON、字段干净；密钥同时走 `Authorization` 头与请求体，兼容自建/中转网关 |
 | `searxng` | **不需要** | 无（必须自配） | **无限**（自建） | 自托管元搜索，聚合 Google/Bing/DDG；`baseUrl` 必填，并需在实例 `settings.yml` 的 `search.formats` 中启用 `json` |
-| `google` | 必需（key **+** `cx`） | `https://www.googleapis.com` | 100 次/**天** ≈ 3000/月 | Google Custom Search JSON API；免费额度约为 Tavily 的 3 倍，返回真实 Google 结果；配额耗尽返回 **403**（本插件已单独识别，不会误报成「密钥无效」） |
+| `google` | 必需（key **+** `cx`） | `https://www.googleapis.com` | ⚠️ **新客户已无法开通** | Google Custom Search JSON API。**自 2026 年起不再向新客户开放**（官方文档：*"This API is not available for new customers"*），并将于 **2027-01-01 停服**；新建的 Programmable Search Engine 只能做**站点搜索**（≤50 域名），**无法搜整个网络**。适配器保留仅供**存量老 CSE** 在停服前使用；新项目请勿投入。实测不具备资格的项目会返回 403 `This project does not have the access to Custom Search JSON API`（本插件归类为 config 错误并如实说明） |
 | `brave` | 必需 | `https://api.search.brave.com` | 以官方定价页为准（条款多次调整） | 请求时关闭 `text_decorations`（源头不产生 `<strong>`）并限定 `result_filter=web` |
 | `exa` | 必需 | `https://api.exa.ai` | $10 credits/月 ≈ 1400 次 | **语义/神经**检索，适合「找概念、找相似」；搜索结果默认不含正文，本插件显式请求 `contents.text` 取摘要（Exa 对 contents 单独计费 $1/1k 页） |
 
@@ -81,28 +81,29 @@
 ```yaml
 - id: dsh-plugin-tlsearch
   config:
-    provider: google          # 1
-    apiKey: "AIza…"
-    cx: "…"
+    provider: tavily          # 1
+    apiKey: "tvly-…"
     chain:
-      - provider: tavily      # 2
-        apiKey: "tvly-…"
-      - provider: exa         # 3
+      - provider: exa         # 2
         apiKey: "…"
-      - provider: searxng     # 4
+      - provider: searxng     # 3
         baseUrl: "http://localhost:8080"
 ```
 
 | 顺位 | 后端 | **什么时候真正被使用** | 额度 | 为什么排在这里 |
 |---|---|---|---|---|
-| 1 | `google` | 每次搜索的首选，直到当天 100 次用尽 | 100/天（≈3000/月） | 额度最大、且对「找官方文档 / 报错原文 / API 参考」这类编码查询最准 |
-| 2 | `tavily` | Google 当天额度用尽 / 报错 / 熔断中 | 1000/月 | 质量与额度都是次优，用来吸收 Google 的日额度溢出 |
-| 3 | `exa` | 前两级都不可用时 | ≈833/月 | 语义检索，**检索方法与前两者不同** —— 前两者同时失效时它仍有独立价值 |
-| 4 | `searxng` | 所有商业额度都耗尽 / 全部失效时的永久地板 | **无限** | 唯一不会用完的，放最后保证「永远还能搜」 |
+| 1 | `tavily` | 每次搜索的首选 | 1000 credits/月 | 按请求计费、字段干净、质量稳定，是这三家里最适合当主力的一档 |
+| 2 | `exa` | Tavily 不可用时 | ≈833/月 | 语义检索，**检索方法与前一级不同** —— 前一级失效时它仍有独立价值 |
+| 3 | `searxng` | 商业额度都耗尽 / 全部失效时的永久地板 | **无限** | 唯一不会用完的，放最后保证「永远还能搜」 |
 
 **为什么把有额度的放前面、无限免费的放最后？** 因为**免费月度额度按月过期，不用就是浪费**；
 而 SearXNG 是自建的、不会枯竭。所以正确策略是「先把会过期的额度烧完，把无限的留在最后兜底」，
-而不是反过来「为了省钱先用免费的」—— 后者会让你每月白扔 4833 次商业额度，还一直用质量最不稳定的那一层。
+而不是反过来「为了省钱先用免费的」—— 后者会让你每月白扔近 2000 次商业额度，还一直用质量最不稳定的那一层。
+
+> **关于 Google CSE**：曾经的「3000/月、真实 Google 结果」是最优选择，但
+> **Custom Search JSON API 已不再向新客户开放**（官方文档明确写着 *"This API is not available
+> for new customers"*），并将于 **2027-01-01 停服**；新引擎只能做站点搜索（≤50 域名），
+> 无法搜整个网络。因此**不建议**把它放进调度链 —— 适配器保留只为存量老 CSE 过渡用。
 
 ### 四条运行期规则
 
