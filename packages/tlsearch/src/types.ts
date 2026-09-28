@@ -46,9 +46,9 @@ export interface SearchOutcome {
 /** 模型可见结果文本的呈现格式 */
 export type OutputFormat = 'markdown' | 'json'
 
-/** 备用后端的配置（全部可选；留空则回退该后端的环境变量与默认端点） */
+/** 后备后端的配置（全部可选；留空则回退该后端的环境变量与默认端点） */
 export interface FallbackConfig {
-  /** 'none'（默认）表示不启用主备切换 */
+  /** 'none'（默认）表示不启用 */
   provider?: ProviderId | 'none'
   apiKey?: string
   baseUrl?: string
@@ -70,8 +70,18 @@ export interface SearchPluginConfig {
   baseUrl?: string
   /** Google CSE 的引擎 ID（cx）；provider=google 时必填 */
   cx?: string
-  /** 备用后端：主后端失败或熔断时自动改用它 */
+  /**
+   * 单个备用后端。等价于 `chain` 的第一个元素，保留是为了兼容旧配置。
+   * 新的多级调度建议直接用 `chain`。
+   */
   fallback?: FallbackConfig
+  /**
+   * 后备后端**链**：主后端失败/熔断时，按数组顺序依次尝试。
+   *
+   * 与 `fallback` 同时存在时两者都会被采纳，顺序为 `fallback` 在前、`chain` 在后；
+   * 重复的 provider 只保留首次出现（同一个后端配两遍没有意义）。
+   */
+  chain?: FallbackConfig[]
   /** 单次搜索返回条数上限，默认 5，最大 10 */
   maxResults?: number
   /** 单条摘要字符上限，默认 250（防 Token 膨胀） */
@@ -94,8 +104,13 @@ export interface SearchPluginConfig {
  * 备用后端单独收在 `fallback` 里。
  */
 export interface ResolvedConfig extends BackendConfig {
-  /** 主后端不可用时的备用后端；null 表示未启用（或与主后端同源） */
-  fallback: BackendConfig | null
+  /**
+   * 按顺序尝试的后端列表，`[0]` 恒为主后端（与顶层那些平铺字段是同一份数据）。
+   *
+   * 之所以用数组而不是「主 + 一个备用」：四个服务各有额度与失败模式，
+   * 调度规则本身就是**顺序**，用数组表达才不会退化成一层层加字段。
+   */
+  backends: BackendConfig[]
   maxResults: number
   maxSnippetChars: number
   timeoutMs: number

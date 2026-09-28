@@ -126,11 +126,21 @@ export const Config: Schema<SearchPluginConfig> = Schema.object({
   fallback: Schema.object({
     provider: Schema.union(['none', ...PROVIDER_IDS])
       .default('none')
-      .description('备用后端；none 表示不启用主备切换。主后端失败或熔断时自动改用它'),
+      .description('备用后端；none 表示不启用。等价于 chain 的第一个元素（兼容旧配置）'),
     apiKey: Schema.string().default('').description('备用后端 API Key；留空回退该后端的环境变量'),
     baseUrl: Schema.string().default('').description('备用后端端点根地址（备用为 SearXNG 时必填）'),
     cx: Schema.string().default('').description('备用后端的 Google CSE 引擎 ID（仅备用为 google 时用）'),
-  }).description('主备切换：主后端不可用时静默改用备用后端'),
+  }).description('单备用后端（简写）。多级调度建议用 chain'),
+  chain: Schema.array(
+    Schema.object({
+      // provider 故意给默认值而不是必填：链里写错一项只会被跳过，
+      // 绝不因为一个笔误让整条 profile 起不来
+      provider: Schema.union(['none', ...PROVIDER_IDS]).default('none').description('该级后端'),
+      apiKey: Schema.string().default('').description('该级 API Key；留空回退该后端的环境变量'),
+      baseUrl: Schema.string().default('').description('该级端点根地址（SearXNG 必填）'),
+      cx: Schema.string().default('').description('该级 Google CSE 引擎 ID（仅 google 用）'),
+    }),
+  ).description('后备后端链：主后端失败/熔断时按数组顺序依次尝试。重复的 provider 只保留首次出现'),
   maxResults: Schema.number()
     .min(LIMITS.minResults)
     .max(LIMITS.maxResults)
@@ -174,14 +184,15 @@ export function apply(ctx: Context, config: Config = {}): () => void {
   const resolved = resolveRuntime(config)
 
   // 生效配置自述：用户排查「到底打到哪个端点」时，这一行日志比翻配置文件快得多。
+  // 整条**调度链**按尝试顺序打印 —— 这行日志就是调度规则的可执行说明。
   // 只打印端点与限额，绝不打印 apiKey。
-  const describe = (provider: ProviderId, baseUrl: string): string =>
-    `${provider}@${baseUrl.length > 0 ? baseUrl : '(未配置端点)'}`
+  const describe = (backend: { provider: ProviderId; baseUrl: string }): string =>
+    `${backend.provider}@${backend.baseUrl.length > 0 ? backend.baseUrl : '(未配置端点)'}`
+  const chainText = resolved.backends
+    .map((backend, index) => `${index === 0 ? '主' : `备${index}`}=${describe(backend)}`)
+    .join(' → ')
   ctx.logger?.info?.(
-    `[tlsearch] 装配: 主后端=${describe(resolved.provider, resolved.baseUrl)}` +
-      (resolved.fallback
-        ? ` 备用后端=${describe(resolved.fallback.provider, resolved.fallback.baseUrl)}`
-        : ' 备用后端=未启用') +
+    `[tlsearch] 装配: ${chainText}` +
       ` maxResults=${resolved.maxResults} maxSnippetChars=${resolved.maxSnippetChars}` +
       ` timeoutMs=${resolved.timeoutMs} format=${resolved.outputFormat}` +
       ` language=${resolved.language.length > 0 ? resolved.language : '(auto)'}` +
@@ -191,30 +202,19 @@ export function apply(ctx: Context, config: Config = {}): () => void {
   // 可用性只在「调用时」判定，但装配期就要告警：
   // 缺凭据时工具**保持注册**（与宿主原生 web 服务一致），调用返回分类错误，
   // 让模型能把「去哪儿补配置」原样转述给用户，而不是让整个 profile 装载失败。
-  // 主后端不可用但配了备用后端时，这甚至不算问题——降为 info 级别的说明。
-  const primaryProblem = usableError(resolved)
-  if (primaryProblem) {
-    if (resolved.fallback) {
-      const fallbackProblem = usableError(resolved.fallback)
-      if (fallbackProblem) {
-        ctx.logger?.warn?.(
-          `[tlsearch] 主备后端都不可用: 主后端 ${primaryProblem.message} / 备用后端 ${fallbackProblem.message}`,
-        )
-      } else {
-        ctx.logger?.info?.(
-          `[tlsearch] 主后端暂不可用，将由备用后端 ${resolved.fallback.provider} 提供服务: ${primaryProblem.message}`,
-        )
-      }
-    } else {
-      ctx.logger?.warn?.(`[tlsearch] 配置暂不可用（工具仍注册，调用时会返回分类错误）: ${primaryProblem.message}`)
-    }
-  } else if (resolved.fallback) {
-    const fallbackProblem = usableError(resolved.fallback)
-    if (fallbackProblem) {
-      ctx.logger?.warn?.(
-        `[tlsearch] 备用后端配置不完整，主备切换将无法生效: ${fallbackProblem.message}`,
-      )
-    }
+  // 逐个后端检查，把不可用的挑出来 —— 链里坏掉一两级仍能正常工作，只是少一层兜底，
+  // 所以「全部不可用」才算故障，部分不可用只是提示。
+  const verdicts = resolved.backends.map((backend) => ({ backend, problem: usableError(backend) }))
+  const unusable = verdicts.flatMap((verdict) =>
+    verdict.problem ? [{ provider: verdict.backend.provider, message: verdict.problem.message }] : [],
+  )
+  const detail = unusable.map((entry) => `${entry.provider} — ${entry.message}`).join(' | ')
+  if (unusable.length === verdicts.length) {
+    ctx.logger?.warn?.(`[tlsearch] 所有后端都不可用（工具仍注册，调用时会返回分类错误）: ${detail}`)
+  } else if (unusable.length > 0) {
+    // 链上坏掉一两级仍能正常搜索（只是少一层兜底），所以这是提示而非告警。
+    // 降为 info 也是为了让「真的全挂了」那条 warn 保持信噪比。
+    ctx.logger?.info?.(`[tlsearch] 链上有 ${unusable.length} 级后端暂不可用，将被自动跳过: ${detail}`)
   }
 
   /** 在途请求控制器集合：卸载时统一中止，避免请求悬挂到超时 */

@@ -499,37 +499,93 @@ describe('Google / Exa 响应解析', () => {
   })
 })
 
-describe('主备（fallback）配置解析', () => {
-  it('未配置 fallback、或 provider 为 none 时为 null', () => {
-    expect(resolveRuntime({}).fallback).toBeNull()
-    expect(resolveRuntime({ fallback: { provider: 'none' } }).fallback).toBeNull()
+describe('后端链（调度顺序）配置解析', () => {
+  it('未配置 fallback/chain 时链上只有主后端', () => {
+    const rt = resolveRuntime({ provider: 'tavily', apiKey: 'k' })
+    expect(rt.backends).toHaveLength(1)
+    expect(rt.backends[0]!.provider).toBe('tavily')
   })
 
-  it('备用后端与主后端相同时忽略（同源备用只会让一次失败变成两次失败）', () => {
-    expect(resolveRuntime({ provider: 'tavily', fallback: { provider: 'tavily' } }).fallback).toBeNull()
+  it('provider 为 none 的项被跳过', () => {
+    expect(resolveRuntime({ fallback: { provider: 'none' } }).backends).toHaveLength(1)
+    expect(resolveRuntime({ chain: [{ provider: 'none' }] }).backends).toHaveLength(1)
   })
 
-  it('备用后端独立解析自己的端点与密钥', () => {
+  it('fallback 是单备用的简写：等价于链上第二个元素', () => {
     const rt = resolveRuntime({
       provider: 'tavily',
       apiKey: 'primary-key',
       fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
     })
-    expect(rt.provider).toBe('tavily')
-    expect(rt.apiKey).toBe('primary-key')
-    expect(rt.fallback).toEqual({ provider: 'searxng', apiKey: '', baseUrl: 'https://searx.example', cx: '' })
+    expect(rt.backends).toEqual([
+      { provider: 'tavily', apiKey: 'primary-key', baseUrl: 'https://api.tavily.com', cx: '' },
+      { provider: 'searxng', apiKey: '', baseUrl: 'https://searx.example', cx: '' },
+    ])
   })
 
-  it('备用后端的密钥与端点也可来自环境变量', () => {
+  it('chain 按数组顺序展开为多级后备', () => {
+    const rt = resolveRuntime({
+      provider: 'google',
+      apiKey: 'g',
+      cx: 'c',
+      chain: [
+        { provider: 'tavily', apiKey: 't' },
+        { provider: 'exa', apiKey: 'e' },
+        { provider: 'searxng', baseUrl: 'http://localhost:8080' },
+      ],
+    })
+    expect(rt.backends.map((backend) => backend.provider)).toEqual([
+      'google',
+      'tavily',
+      'exa',
+      'searxng',
+    ])
+    expect(rt.backends[3]!.baseUrl).toBe('http://localhost:8080')
+  })
+
+  it('与主后端重复、以及链内重复的 provider 都只保留首次出现', () => {
+    const rt = resolveRuntime({
+      provider: 'tavily',
+      apiKey: 'k',
+      chain: [
+        { provider: 'tavily', apiKey: 'dup-primary' },
+        { provider: 'exa', apiKey: 'e1' },
+        { provider: 'exa', apiKey: 'e2' },
+      ],
+    })
+    expect(rt.backends.map((backend) => backend.provider)).toEqual(['tavily', 'exa'])
+    // 保留的是首次出现的那份配置
+    expect(rt.backends[1]!.apiKey).toBe('e1')
+  })
+
+  it('fallback 与 chain 同时存在时，顺序是 fallback 在前、chain 在后', () => {
+    const rt = resolveRuntime({
+      provider: 'tavily',
+      apiKey: 'k',
+      fallback: { provider: 'exa', apiKey: 'e' },
+      chain: [{ provider: 'searxng', baseUrl: 'http://localhost:8080' }],
+    })
+    expect(rt.backends.map((backend) => backend.provider)).toEqual(['tavily', 'exa', 'searxng'])
+  })
+
+  it('链上各级的密钥与端点也可来自环境变量', () => {
     process.env.EXA_API_KEY = 'env-exa'
     const rt = resolveRuntime({ provider: 'tavily', apiKey: 'k', fallback: { provider: 'exa' } })
-    expect(rt.fallback).toEqual({ provider: 'exa', apiKey: 'env-exa', baseUrl: 'https://api.exa.ai', cx: '' })
+    expect(rt.backends[1]).toEqual({
+      provider: 'exa',
+      apiKey: 'env-exa',
+      baseUrl: 'https://api.exa.ai',
+      cx: '',
+    })
     delete process.env.EXA_API_KEY
   })
 
   it('cx 只对 google 生效，其余后端恒为空串（避免日志暗示一个不存在的配置项）', () => {
     expect(resolveRuntime({ provider: 'google', cx: 'engine-1' }).cx).toBe('engine-1')
     expect(resolveRuntime({ provider: 'tavily', cx: 'engine-1' }).cx).toBe('')
+    // 链上的 google 同样保留自己的 cx
+    const rt = resolveRuntime({ provider: 'tavily', apiKey: 'k', chain: [{ provider: 'google', cx: 'chain-cx' }] })
+    expect(rt.backends[1]!.cx).toBe('chain-cx')
   })
 
   it('cx 可来自环境变量', () => {

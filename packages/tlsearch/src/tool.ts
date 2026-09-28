@@ -24,7 +24,7 @@ import {
   providerLabel,
   runBackendSearch,
 } from './providers.js'
-import type { BackendConfig, ProviderId, ResolvedConfig } from './types.js'
+import type { ProviderId, ResolvedConfig } from './types.js'
 
 /**
  * 计入熔断的错误码：只有「后端真的不可用」才该触发熔断。
@@ -110,14 +110,12 @@ export interface SearchToolArgs {
   maxResults?: unknown
 }
 
-/** 本次调用要依次尝试的后端序列：主后端，其后是（可选的）备用后端 */
-function attemptsOf(config: ResolvedConfig): BackendConfig[] {
-  return config.fallback ? [config, config.fallback] : [config]
-}
-
-/** 是否配置了 Tavily 后端（决定额度工具要不要注册） */
+/**
+ * 是否配置了 Tavily 后端（决定额度工具要不要注册）。
+ * 检查整条链：Tavily 可能只作为后面的兜底，此时它的额度同样值得关注。
+ */
 function hasTavilyBackend(config: ResolvedConfig): boolean {
-  return config.provider === 'tavily' || config.fallback?.provider === 'tavily'
+  return config.backends.some((backend) => backend.provider === 'tavily')
 }
 
 /**
@@ -173,8 +171,7 @@ function describeFailures(failures: readonly AttemptFailure[]): string {
  */
 export function createSearchTool(runtime: SearchToolRuntime): Record<string, unknown> {
   const { config } = runtime
-  const attempts = attemptsOf(config)
-  const primaryLabel = providerLabel(config.provider)
+  const attempts = config.backends
 
   return {
     name: SEARCH_TOOL_NAME,
@@ -305,7 +302,8 @@ export function createUsageTool(runtime: SearchToolRuntime): Record<string, unkn
     timeoutMs: config.timeoutMs + HOST_TIMEOUT_GRACE_MS,
     isConcurrencySafe: () => true,
     async execute(_args: unknown, exec?: unknown) {
-      const backend = config.provider === 'tavily' ? config : config.fallback
+      // 额度只对 Tavily 有意义；它在链里哪个位置都行（主后端或兜底）
+      const backend = config.backends.find((entry) => entry.provider === 'tavily')
       if (!backend) {
         throw new SearchError('no Tavily backend is configured, so there is no quota to report.', 'config')
       }

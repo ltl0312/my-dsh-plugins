@@ -21,6 +21,7 @@ import { SearchError, fetchJson, type JsonRequest } from './http.js'
 import { cleanSnippet, cleanText, cleanTitle, normalizeUrl, truncateText } from './sanitize.js'
 import type {
   BackendConfig,
+  FallbackConfig,
   ProviderId,
   ResolvedConfig,
   SearchHit,
@@ -483,32 +484,45 @@ function resolveBackend(input: {
 }
 
 /**
- * 把插件配置解析为运行期配置：主后端 + 可选备用后端，补默认值、读环境变量、钳制边界。
+ * 把插件配置解析为运行期配置：**有序后端链** + 共享的策略参数。
  *
  * 刻意**不抛错**：DSH 的插件装载发生在宿主启动路径上，配置缺一个密钥就抛异常
  * 会让整条 profile 装载失败，而正确行为是「工具照常注册，调用时返回可据以行动的
  * 错误」（与宿主原生 web 服务一致：缺凭据时 schema 仍保持注册）。
  * 可用性判定交给 usableError()，在每次调用前执行。
+ *
+ * 链的构造规则：
+ *   - `[0]` 恒为主后端（provider/apiKey/baseUrl/cx 那些平铺字段）；
+ *   - 其后依次是 `fallback`（单备用简写，兼容旧配置）与 `chain` 的元素；
+ *   - 同一个 provider 只保留首次出现 —— 同一个后端配两遍没有意义，只会让
+ *     一次失败变成两次失败（`provider: none` 与非法值同样被跳过）。
  */
 export function resolveRuntime(config: SearchPluginConfig = {}): ResolvedConfig {
   const primary = resolveBackend(config)
-  const fallbackInput = config.fallback ?? {}
-  const fallbackProvider = fallbackInput.provider
-  // provider 为 'none' / 未填 / 与主后端相同 → 不启用备用（同源备用没有意义，
-  // 只会让一次失败变成两次失败）
-  const fallback =
-    isProviderId(fallbackProvider) && fallbackProvider !== primary.provider
-      ? resolveBackend({
-          provider: fallbackProvider,
-          apiKey: fallbackInput.apiKey,
-          baseUrl: fallbackInput.baseUrl,
-          cx: fallbackInput.cx,
-        })
-      : null
+
+  const seen = new Set<ProviderId>([primary.provider])
+  const extras: BackendConfig[] = []
+  const candidates: FallbackConfig[] = [
+    ...(config.fallback ? [config.fallback] : []),
+    ...(Array.isArray(config.chain) ? config.chain : []),
+  ]
+  for (const candidate of candidates) {
+    const provider = candidate?.provider
+    if (!isProviderId(provider) || seen.has(provider)) continue
+    seen.add(provider)
+    extras.push(
+      resolveBackend({
+        provider,
+        apiKey: candidate.apiKey,
+        baseUrl: candidate.baseUrl,
+        cx: candidate.cx,
+      }),
+    )
+  }
 
   return {
     ...primary,
-    fallback,
+    backends: [primary, ...extras],
     maxResults: clampNumber(config.maxResults, LIMITS.minResults, LIMITS.maxResults, LIMITS.defaultResults),
     maxSnippetChars: clampNumber(
       config.maxSnippetChars,

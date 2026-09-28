@@ -188,16 +188,15 @@ describe('装配与注册', () => {
     dispose()
   })
 
-  it('装配日志自述生效配置（含备用后端），但绝不泄漏 apiKey', () => {
+  it('装配日志把整条调度链按顺序打出来（这行日志就是调度规则的可执行说明）', () => {
     const harness = createHarness()
     apply(harness.ctx, {
       provider: 'brave',
       apiKey: 'super-secret-key',
-      fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
+      chain: [{ provider: 'searxng', baseUrl: 'https://searx.example' }, { provider: 'exa', apiKey: 'e' }],
     })
     const text = harness.logs.map((entry) => entry.message).join('\n')
-    expect(text).toContain('主后端=brave@https://api.search.brave.com')
-    expect(text).toContain('备用后端=searxng@https://searx.example')
+    expect(text).toContain('主=brave@https://api.search.brave.com → 备1=searxng@https://searx.example → 备2=exa@https://api.exa.ai')
     expect(text).not.toContain('super-secret-key')
   })
 
@@ -208,22 +207,22 @@ describe('装配与注册', () => {
     expect(harness.logs.some((entry) => entry.level === 'warn' && entry.message.includes('不可用'))).toBe(true)
   })
 
-  it('主后端缺凭据但备用后端可用时，只提示（不算故障），因为搜索仍能工作', () => {
+  it('链上只有部分后端不可用时是 info 而非告警（搜索仍能工作，只是少一层兜底）', () => {
     const harness = createHarness()
     apply(harness.ctx, {
       provider: 'tavily',
       fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
     })
     const text = harness.logs.map((entry) => entry.message).join('\n')
-    expect(text).toContain('将由备用后端 searxng 提供服务')
+    expect(text).toContain('链上有 1 级后端暂不可用，将被自动跳过')
     expect(harness.logs.some((entry) => entry.level === 'warn')).toBe(false)
   })
 
-  it('主备都不可用时明确告警（否则用户会以为有兜底）', () => {
+  it('链上所有后端都不可用时明确告警（否则用户会以为还有兜底）', () => {
     const harness = createHarness()
     apply(harness.ctx, { provider: 'tavily', fallback: { provider: 'searxng' } })
     const text = harness.logs.filter((entry) => entry.level === 'warn').map((entry) => entry.message).join('\n')
-    expect(text).toContain('主备后端都不可用')
+    expect(text).toContain('所有后端都不可用')
   })
 
   it('ctx.tools 未就绪时降级为无操作而非抛错', () => {
@@ -436,7 +435,7 @@ describe('失败路径', () => {
   })
 })
 
-describe('主备自动切换（fallback）', () => {
+describe('多级后端链与自动切换', () => {
   /** 主后端（Tavily）固定 500，备用后端（SearXNG）固定成功；分别计数 */
   function stubPrimaryBroken(): { tavily: () => number; searxng: () => number } {
     let tavilyCalls = 0
@@ -565,6 +564,44 @@ describe('主备自动切换（fallback）', () => {
     // 缺凭据在发请求之前就被判定，所以主后端一次网络请求都没发出
     expect(counts.tavily()).toBe(0)
     expect(counts.searxng()).toBe(1)
+    dispose()
+  })
+
+  it('三级链：前两级都失败时第三级接管（调度规则本身的可执行验证）', async () => {
+    let google = 0
+    let tavily = 0
+    let searxng = 0
+    globalThis.fetch = vi.fn(async (url: string) => {
+      if (url.includes('googleapis')) {
+        google += 1
+        // 配额耗尽：Google 报 403，本插件按响应特征识别为 http 配额错误
+        return new Response('{"error":{"errors":[{"reason":"dailyLimitExceeded"}]}}', { status: 403 })
+      }
+      if (url.includes('tavily')) {
+        tavily += 1
+        return new Response('tavily is down', { status: 500 })
+      }
+      searxng += 1
+      return new Response(
+        JSON.stringify({ results: [{ title: 'from searxng', url: 'https://s.example/1', content: 'snip' }] }),
+        { status: 200 },
+      )
+    }) as unknown as typeof fetch
+
+    const { tool, dispose } = mount({
+      provider: 'google',
+      apiKey: 'g',
+      cx: 'c',
+      chain: [
+        { provider: 'tavily', apiKey: 't' },
+        { provider: 'searxng', baseUrl: 'http://localhost:8080' },
+      ],
+    })
+
+    const value = await tool.execute({ query: 'q' }, {})
+    expect(value.content[0]!.text).toContain('from searxng')
+    // 严格按链的顺序各试一次，不跳级也不重试
+    expect([google, tavily, searxng]).toEqual([1, 1, 1])
     dispose()
   })
 })
