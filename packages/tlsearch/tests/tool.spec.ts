@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from 'cordis'
-import { SEARCH_TOOL_NAME, apply } from '../src/index.js'
+import { SEARCH_TOOL_NAME, USAGE_TOOL_NAME, apply } from '../src/index.js'
 import { BREAKER_THRESHOLD, LIMITS } from '../src/providers.js'
 
 const originalFetch = globalThis.fetch
@@ -115,9 +115,11 @@ function stubHanging(): void {
 function mount(overrides: Record<string, unknown> = {}) {
   const harness = createHarness()
   const dispose = apply(harness.ctx, { provider: 'tavily', apiKey: 'test-key', ...overrides })
-  const tool = harness.registered[0]
-  if (!tool) throw new Error('工具未注册')
-  return { ...harness, dispose, tool }
+  // 按名字取而不是按下标：配置了 Tavily 时会同时注册搜索与额度两个工具
+  const tool = harness.registered.find((entry) => entry.name === SEARCH_TOOL_NAME)
+  if (!tool) throw new Error('搜索工具未注册')
+  const usageTool = harness.registered.find((entry) => entry.name === USAGE_TOOL_NAME)
+  return { ...harness, dispose, tool, usageTool }
 }
 
 /** 宿主 render 之后会做的形状检查 */
@@ -132,14 +134,33 @@ function expectValidBlocks(blocks: unknown): void {
 }
 
 describe('装配与注册', () => {
-  it('注册名为 tlsearch 的工具，并声明宿主消费的两个策略字段', () => {
+  it('注册 tlsearch 工具，并声明宿主消费的两个策略字段', () => {
     const { tool, registered, dispose } = mount()
-    expect(registered).toHaveLength(1)
     expect(tool.name).toBe(SEARCH_TOOL_NAME)
     // 宿主超时略大于本插件 HTTP 超时：先由本插件给出分类错误，宿主再兜底硬停
     expect(tool.timeoutMs).toBe(LIMITS.defaultTimeoutMs + 5_000)
     // 无共享可变状态（除熔断计数），允许宿主并行调度多路检索
     expect(tool.isConcurrencySafe?.({})).toBe(true)
+    // 配置了 Tavily 时，额度自查工具一并注册
+    expect(registered.map((entry) => entry.name).sort()).toEqual([SEARCH_TOOL_NAME, USAGE_TOOL_NAME].sort())
+    dispose()
+  })
+
+  it('后端不是 Tavily 时不注册额度工具（注册一个永远只会说「去控制台看」的工具纯属每轮浪费 Token）', () => {
+    const { registered, usageTool, dispose } = mount({ provider: 'searxng', apiKey: '', baseUrl: 'https://s.example' })
+    expect(usageTool).toBeUndefined()
+    expect(registered.map((entry) => entry.name)).toEqual([SEARCH_TOOL_NAME])
+    dispose()
+  })
+
+  it('Tavily 只作备用后端时，额度工具仍然注册（它的额度同样值得关注）', () => {
+    const { usageTool, dispose } = mount({
+      provider: 'searxng',
+      apiKey: '',
+      baseUrl: 'https://s.example',
+      fallback: { provider: 'tavily', apiKey: 'tvly-x' },
+    })
+    expect(usageTool?.name).toBe(USAGE_TOOL_NAME)
     dispose()
   })
 
@@ -167,20 +188,42 @@ describe('装配与注册', () => {
     dispose()
   })
 
-  it('装配日志自述生效配置，但绝不泄漏 apiKey', () => {
+  it('装配日志自述生效配置（含备用后端），但绝不泄漏 apiKey', () => {
     const harness = createHarness()
-    apply(harness.ctx, { provider: 'brave', apiKey: 'super-secret-key' })
+    apply(harness.ctx, {
+      provider: 'brave',
+      apiKey: 'super-secret-key',
+      fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
+    })
     const text = harness.logs.map((entry) => entry.message).join('\n')
-    expect(text).toContain('provider=brave')
-    expect(text).toContain('endpoint=https://api.search.brave.com')
+    expect(text).toContain('主后端=brave@https://api.search.brave.com')
+    expect(text).toContain('备用后端=searxng@https://searx.example')
     expect(text).not.toContain('super-secret-key')
   })
 
   it('缺凭据时只告警，工具仍保持注册（调用时才返回分类错误）', () => {
     const harness = createHarness()
     apply(harness.ctx, { provider: 'tavily' })
-    expect(harness.registered).toHaveLength(1)
+    expect(harness.registered.map((entry) => entry.name)).toContain(SEARCH_TOOL_NAME)
     expect(harness.logs.some((entry) => entry.level === 'warn' && entry.message.includes('不可用'))).toBe(true)
+  })
+
+  it('主后端缺凭据但备用后端可用时，只提示（不算故障），因为搜索仍能工作', () => {
+    const harness = createHarness()
+    apply(harness.ctx, {
+      provider: 'tavily',
+      fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
+    })
+    const text = harness.logs.map((entry) => entry.message).join('\n')
+    expect(text).toContain('将由备用后端 searxng 提供服务')
+    expect(harness.logs.some((entry) => entry.level === 'warn')).toBe(false)
+  })
+
+  it('主备都不可用时明确告警（否则用户会以为有兜底）', () => {
+    const harness = createHarness()
+    apply(harness.ctx, { provider: 'tavily', fallback: { provider: 'searxng' } })
+    const text = harness.logs.filter((entry) => entry.level === 'warn').map((entry) => entry.message).join('\n')
+    expect(text).toContain('主备后端都不可用')
   })
 
   it('ctx.tools 未就绪时降级为无操作而非抛错', () => {
@@ -193,9 +236,10 @@ describe('装配与注册', () => {
 })
 
 describe('注销', () => {
-  it('apply 返回的注销器摘除工具且幂等', () => {
+  it('apply 返回的注销器摘除**全部**工具且幂等', () => {
     const { registered, dispose } = mount()
-    expect(registered).toHaveLength(1)
+    // 搜索 + 额度，两个都要摘干净——只摘一个会留下永远调不通的工具
+    expect(registered).toHaveLength(2)
     dispose()
     expect(registered).toHaveLength(0)
     expect(() => dispose()).not.toThrow()
@@ -205,7 +249,7 @@ describe('注销', () => {
   it('ctx.on("dispose") 也能触发注销（Cordis 3 会丢弃 apply 的返回值）', () => {
     const { registered, disposeListeners } = mount()
     expect(disposeListeners).toHaveLength(1)
-    expect(registered).toHaveLength(1)
+    expect(registered).toHaveLength(2)
     for (const listener of disposeListeners) listener()
     expect(registered).toHaveLength(0)
   })
@@ -388,6 +432,176 @@ describe('失败路径', () => {
       await expect(tool.execute({ query: 'q' }, {})).rejects.toMatchObject({ code: 'http' })
     }
     await expect(tool.execute({ query: 'q' }, {})).rejects.toMatchObject({ code: 'circuit-open' })
+    dispose()
+  })
+})
+
+describe('主备自动切换（fallback）', () => {
+  /** 主后端（Tavily）固定 500，备用后端（SearXNG）固定成功；分别计数 */
+  function stubPrimaryBroken(): { tavily: () => number; searxng: () => number } {
+    let tavilyCalls = 0
+    let searxngCalls = 0
+    globalThis.fetch = vi.fn(async (url: string) => {
+      if (url.includes('tavily')) {
+        tavilyCalls += 1
+        return new Response('primary is down', { status: 500 })
+      }
+      searxngCalls += 1
+      return new Response(
+        JSON.stringify({ results: [{ title: 'from searxng', url: 'https://s.example/1', content: 'snip' }] }),
+        { status: 200 },
+      )
+    }) as unknown as typeof fetch
+    return { tavily: () => tavilyCalls, searxng: () => searxngCalls }
+  }
+
+  const withFallback = {
+    provider: 'tavily',
+    apiKey: 'k',
+    fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
+  }
+
+  it('主后端失败时自动改用备用后端，模型只看到备用后端的结果', async () => {
+    const counts = stubPrimaryBroken()
+    const { tool, logs, dispose } = mount(withFallback)
+
+    const value = await tool.execute({ query: 'q' }, {})
+    expect(value.content[0]!.text).toContain('from searxng')
+    expect(counts.tavily()).toBe(1)
+    expect(counts.searxng()).toBe(1)
+    // 切换过程对模型不可见，但必须留在日志里，否则用户永远查不出「为什么结果变了」
+    expect(logs.some((entry) => entry.message.includes('改试备用后端'))).toBe(true)
+    dispose()
+  })
+
+  it('主后端熔断后直接走备用后端，不再空打主后端', async () => {
+    const counts = stubPrimaryBroken()
+    const { tool, dispose } = mount(withFallback)
+
+    for (let attempt = 0; attempt < BREAKER_THRESHOLD; attempt += 1) {
+      await expect(tool.execute({ query: 'q' }, {})).resolves.toBeDefined()
+    }
+    expect(counts.tavily()).toBe(BREAKER_THRESHOLD)
+
+    // 第 4 次：主后端已熔断，应被直接跳过
+    await expect(tool.execute({ query: 'q' }, {})).resolves.toBeDefined()
+    expect(counts.tavily()).toBe(BREAKER_THRESHOLD)
+    expect(counts.searxng()).toBe(BREAKER_THRESHOLD + 1)
+    dispose()
+  })
+
+  it('熔断器按后端隔离：主后端反复失败不会把健康的备用后端一起熔断', async () => {
+    const counts = stubPrimaryBroken()
+    const { tool, dispose } = mount(withFallback)
+
+    // 若两者共用熔断器，主后端的 3 次失败会把共用熔断器打开，
+    // 第 4 次调用将因「所有后端都熔断」而失败——而不是继续由备用后端正常服务。
+    for (let attempt = 0; attempt < BREAKER_THRESHOLD + 2; attempt += 1) {
+      const value = await tool.execute({ query: 'q' }, {})
+      expect(value.content[0]!.text).toContain('from searxng')
+    }
+    expect(counts.searxng()).toBe(BREAKER_THRESHOLD + 2)
+    dispose()
+  })
+
+  it('两个后端都失败时抛合并错误，两次尝试都可见', async () => {
+    globalThis.fetch = vi.fn(async (url: string) =>
+      url.includes('tavily')
+        ? new Response('primary is down', { status: 500 })
+        : new Response('backup is down', { status: 502 }),
+    ) as unknown as typeof fetch
+
+    const { tool, dispose } = mount(withFallback)
+    const error = (await tool.execute({ query: 'q' }, {}).catch((caught: unknown) => caught)) as {
+      code: string
+      message: string
+    }
+
+    expect(error.code).toBe('http')
+    expect(error.message).toContain('all configured search backends failed')
+    // 两次尝试都要出现，否则用户只看得到最后那个后端的报错
+    expect(error.message).toContain('Tavily')
+    expect(error.message).toContain('SearXNG')
+    dispose()
+  })
+
+  it('调用方主动中断时不改试备用后端（用户已经不想要这次搜索了）', async () => {
+    let calls = 0
+    globalThis.fetch = vi.fn((_url: string, init: RequestInit) => {
+      calls += 1
+      const signal = init.signal
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = (): void => reject(new DOMException('aborted', 'AbortError'))
+        if (signal?.aborted) {
+          abort()
+          return
+        }
+        signal?.addEventListener('abort', abort)
+      })
+    }) as unknown as typeof fetch
+
+    const { tool, dispose } = mount(withFallback)
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(tool.execute({ query: 'q' }, { signal: controller.signal })).rejects.toMatchObject({
+      code: 'aborted',
+    })
+    // 只打了主后端一次就放弃，绝不再打备用后端
+    expect(calls).toBe(1)
+    dispose()
+  })
+
+  it('主后端缺凭据时也改试备用后端（这正是主备最该救场的场景）', async () => {
+    const counts = stubPrimaryBroken()
+    const { tool, dispose } = mount({
+      provider: 'tavily',
+      apiKey: '',
+      fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
+    })
+
+    const value = await tool.execute({ query: 'q' }, {})
+    expect(value.content[0]!.text).toContain('from searxng')
+    // 缺凭据在发请求之前就被判定，所以主后端一次网络请求都没发出
+    expect(counts.tavily()).toBe(0)
+    expect(counts.searxng()).toBe(1)
+    dispose()
+  })
+})
+
+describe('tlsearch_usage 工具', () => {
+  it('返回一行额度信息，走 Tavily 的 /usage 端点', async () => {
+    const calls = stubJson({ account: { current_plan: 'Researcher', plan_usage: 40, plan_limit: 1000 } })
+    const { usageTool, dispose } = mount()
+    expect(usageTool).toBeDefined()
+
+    const value = await usageTool!.execute({}, {})
+    expect(value.content[0]!.text).toBe(
+      'Tavily "Researcher": 40/1000 credits used this cycle; 960 remaining (each search costs 1 credit).',
+    )
+    expect(calls[0]!.url).toBe('https://api.tavily.com/usage')
+    dispose()
+  })
+
+  it('主后端不是 Tavily 时，查备用 Tavily 的额度', async () => {
+    const calls = stubJson({ account: { current_plan: 'Researcher', plan_usage: 1, plan_limit: 1000 } })
+    const { usageTool, dispose } = mount({
+      provider: 'searxng',
+      apiKey: '',
+      baseUrl: 'https://s.example',
+      fallback: { provider: 'tavily', apiKey: 'tvly-x' },
+    })
+
+    const value = await usageTool!.execute({}, {})
+    expect(value.content[0]!.text).toContain('999 remaining')
+    expect(calls[0]!.url).toBe('https://api.tavily.com/usage')
+    dispose()
+  })
+
+  it('额度工具无入参（空 properties 的 schema）', () => {
+    const { usageTool, dispose } = mount()
+    const parameters = usageTool!.parameters as { properties: Record<string, unknown> }
+    expect(Object.keys(parameters.properties)).toEqual([])
     dispose()
   })
 })

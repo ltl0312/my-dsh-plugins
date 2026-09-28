@@ -125,10 +125,30 @@ function detailOf(rawBody: string): string {
   return cleaned.length === 0 ? '' : truncateText(cleaned, ERROR_DETAIL_CHARS)
 }
 
+/**
+ * 配额耗尽的响应特征。
+ *
+ * 为什么必须单独识别：Google CSE 把「当天免费额度用完」也报成 **HTTP 403**，
+ * 与「密钥无效」同码。若不区分，用户会看到「密钥无效」而去反复检查一个
+ * 其实完全正确的密钥 —— 错误信息把人引向了错误的排查方向。
+ */
+const QUOTA_EXHAUSTED =
+  /dailyLimitExceeded|rateLimitExceeded|userRateLimitExceeded|quotaExceeded|quota exceeded|usage limit|plan limit/i
+
 /** 按状态码生成「可据以行动」的错误 */
 function httpErrorOf(provider: string, status: number, rawBody: string): SearchError {
   const detail = detailOf(rawBody)
   const suffix = detail.length > 0 ? ` — ${detail}` : ''
+
+  if ((status === 403 || status === 432) && QUOTA_EXHAUSTED.test(rawBody)) {
+    return new SearchError(
+      `${provider} quota exhausted (HTTP ${status}): the plan's allowance or rate limit is used up. ` +
+        'Configure a fallback backend (fallback.provider) so searches degrade instead of failing, or wait for the quota to reset.' +
+        suffix,
+      'http',
+      status,
+    )
+  }
   if (status === 401 || status === 403) {
     return new SearchError(
       `${provider} rejected the request (HTTP ${status}): the API key is missing, invalid, or not authorized for this endpoint.${suffix}`,

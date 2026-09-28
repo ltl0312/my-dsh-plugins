@@ -1,33 +1,50 @@
 // packages/tlsearch/src/providers.ts
 //
-// 搜索引擎后端适配层：Tavily / Brave / SearXNG。
+// 搜索引擎后端适配层：Tavily / Brave / SearXNG / Google CSE / Exa。
 //
 // 每个适配器只做两件事——「把查询翻译成一次 HTTP 请求」与「把响应翻译成 SearchHit[]」。
 // 清洗、去重、截断、限流全部由共享的下游管线负责，新增后端不需要重复实现这些逻辑。
 //
-// 三个后端的响应形状差异极大（Tavily 用 content、Brave 用 description 且带 HTML、
-// SearXNG 用 content 且可能是聚合结果），因此解析必须逐后端显式编写，
-// 绝不做「猜字段名」的通用兜底——猜错的代价是把引擎的报错信息当成摘要喂给模型。
+// 各后端的响应形状差异极大（Tavily 用 content、Brave 用 description 且带 HTML、
+// SearXNG 用 content、Google 用 link+snippet、Exa 用 text/highlights），因此解析必须
+// 逐后端显式编写，绝不做「猜字段名」的通用兜底——猜错的代价是把引擎的报错信息
+// 当成摘要喂给模型。
 //
 // 官方文档：
-//   Tavily  https://docs.tavily.com/documentation/api-reference/endpoint/search
-//   Brave   https://api-dashboard.search.brave.com/app/documentation/web-search/get-started
-//   SearXNG https://docs.searxng.org/dev/search_api.html
+//   Tavily   https://docs.tavily.com/documentation/api-reference/endpoint/search
+//   Brave    https://api-dashboard.search.brave.com/app/documentation/web-search/get-started
+//   SearXNG  https://docs.searxng.org/dev/search_api.html
+//   Google   https://developers.google.com/custom-search/v1/reference/rest/v1/cse/list
+//   Exa      https://docs.exa.ai/reference/search
 
 import { SearchError, fetchJson, type JsonRequest } from './http.js'
 import { cleanSnippet, cleanText, cleanTitle, normalizeUrl, truncateText } from './sanitize.js'
-import type { ProviderId, ResolvedConfig, SearchHit, SearchOutcome, SearchPluginConfig } from './types.js'
+import type {
+  BackendConfig,
+  ProviderId,
+  ResolvedConfig,
+  SearchHit,
+  SearchOutcome,
+  SearchPluginConfig,
+} from './types.js'
 
 /** 默认后端：Tavily（结构化 JSON、字段干净、有免费额度） */
 export const DEFAULT_PROVIDER: ProviderId = 'tavily'
 
-/** 合法的后端标识（供 schema 与运行期防御式校验共用） */
-export const PROVIDER_IDS: readonly ProviderId[] = ['tavily', 'brave', 'searxng']
+/** 合法的后端标识（顺序即设置界面下拉框顺序，按推荐程度排列） */
+export const PROVIDER_IDS: readonly ProviderId[] = ['tavily', 'searxng', 'google', 'brave', 'exa']
 
-/** 后端内置默认端点；SearXNG 没有公共实例，必须由用户显式配置 */
+/**
+ * 后端内置默认端点。
+ *
+ * SearXNG 没有公共实例，必须由用户显式配置，因此不在表内。
+ * 表里只放**根地址**，具体路径由各适配器的 build() 拼接。
+ */
 export const DEFAULT_BASE_URL: Partial<Record<ProviderId, string>> = {
   tavily: 'https://api.tavily.com',
   brave: 'https://api.search.brave.com',
+  google: 'https://www.googleapis.com',
+  exa: 'https://api.exa.ai',
 }
 
 /**
@@ -40,6 +57,8 @@ const API_KEY_ENV: Record<ProviderId, readonly string[]> = {
   tavily: ['TLSEARCH_API_KEY', 'TAVILY_API_KEY'],
   brave: ['TLSEARCH_API_KEY', 'BRAVE_SEARCH_API_KEY', 'BRAVE_API_KEY'],
   searxng: ['TLSEARCH_API_KEY'],
+  google: ['TLSEARCH_API_KEY', 'GOOGLE_CSE_API_KEY', 'GOOGLE_API_KEY'],
+  exa: ['TLSEARCH_API_KEY', 'EXA_API_KEY'],
 }
 
 /** 端点地址的环境变量回退 */
@@ -47,7 +66,12 @@ const BASE_URL_ENV: Record<ProviderId, readonly string[]> = {
   tavily: ['TLSEARCH_BASE_URL', 'TAVILY_BASE_URL'],
   brave: ['TLSEARCH_BASE_URL', 'BRAVE_BASE_URL'],
   searxng: ['TLSEARCH_BASE_URL', 'SEARXNG_BASE_URL'],
+  google: ['TLSEARCH_BASE_URL', 'GOOGLE_CSE_BASE_URL'],
+  exa: ['TLSEARCH_BASE_URL', 'EXA_BASE_URL'],
 }
+
+/** Google CSE 引擎 ID（cx）的环境变量回退 */
+const CX_ENV: readonly string[] = ['TLSEARCH_CX', 'GOOGLE_CSE_ID', 'GOOGLE_CSE_CX']
 
 /** 插件 UA：部分 SearXNG 实例与网关会拒绝无 UA 的请求 */
 const PLUGIN_UA = 'dsh-plugin-tlsearch (+https://github.com/ltl0312/my-dsh-plugins)'
@@ -97,6 +121,11 @@ function envValue(keys: readonly string[]): string {
   return ''
 }
 
+/** 取配置里的非空字符串（去首尾空白） */
+function configString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
 /** 拼接端点路径：容忍 baseUrl 带/不带结尾斜杠，也容忍它自带路径前缀（自建代理常见） */
 function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/+$/, '')}${path}`
@@ -125,8 +154,16 @@ export interface ProviderAdapter {
   readonly requiresKey: boolean
   /** 是否必须提供端点地址（无内置默认值） */
   readonly requiresBaseUrl: boolean
+  /** 是否额外需要一个「引擎 ID」（Google CSE 的 cx） */
+  readonly requiresCx?: boolean
   /** 组装一次请求 */
-  build: (rt: ResolvedConfig, query: string, limit: number, signal?: AbortSignal) => JsonRequest
+  build: (
+    backend: BackendConfig,
+    rt: ResolvedConfig,
+    query: string,
+    limit: number,
+    signal?: AbortSignal,
+  ) => JsonRequest
   /** 解析响应为原始命中（尚未清洗/去重/截断） */
   parse: (payload: unknown, rt: ResolvedConfig) => SearchOutcome
 }
@@ -138,16 +175,18 @@ export interface ProviderAdapter {
  * raw_content 是整页正文（单条可达数万字符），images 是图片数组——两者都会
  * 直接摧毁本插件的上下文预算，且与「返回可引用的来源摘要」这一目标无关。
  *
+ * 计费上还有一个重要事实：Tavily 按**请求**计费（basic 搜索 1 credit/次），
+ * 与 max_results 无关，所以调大条数不花额度、只花 Token。
+ *
  * 密钥同时以 `Authorization: Bearer` 与请求体 `api_key` 两种形式携带：
  * 官方端点接受前者并忽略重复字段；new-api 这类自建/中转网关往往只读请求体。
- * 两条路径都覆盖，用户换端点时不必改插件。
  */
 const tavily: ProviderAdapter = {
   id: 'tavily',
   label: 'Tavily',
   requiresKey: true,
   requiresBaseUrl: false,
-  build(rt, query, limit, signal) {
+  build(backend, rt, query, limit, signal) {
     const body: Record<string, unknown> = {
       query,
       max_results: limit,
@@ -161,12 +200,12 @@ const tavily: ProviderAdapter = {
       accept: 'application/json',
       'user-agent': PLUGIN_UA,
     }
-    if (rt.apiKey.length > 0) {
-      headers.authorization = `Bearer ${rt.apiKey}`
-      body.api_key = rt.apiKey
+    if (backend.apiKey.length > 0) {
+      headers.authorization = `Bearer ${backend.apiKey}`
+      body.api_key = backend.apiKey
     }
     return {
-      url: joinUrl(rt.baseUrl, '/search'),
+      url: joinUrl(backend.baseUrl, '/search'),
       init: { method: 'POST', headers, body: JSON.stringify(body) },
       timeoutMs: rt.timeoutMs,
       provider: 'tavily',
@@ -194,16 +233,14 @@ const tavily: ProviderAdapter = {
  *
  * `text_decorations=false` 让 Brave 不要把命中词包进 `<strong>`/`<em>`：
  * 这是**从源头**省掉一批标签，比事后剥离更省字符串处理，也让摘要更易读。
- * `result_filter=web` 只取网页垂直，避免 infobox / faq / 视频等结构化噪声
- * （它们既占带宽又几乎不会成为有效引用）。
- * `count` 上限 20，这里已由 LIMITS.maxResults=10 约束在更安全的范围内。
+ * `result_filter=web` 只取网页垂直，避免 infobox / faq / 视频等结构化噪声。
  */
 const brave: ProviderAdapter = {
   id: 'brave',
   label: 'Brave Search',
   requiresKey: true,
   requiresBaseUrl: false,
-  build(rt, query, limit, signal) {
+  build(backend, rt, query, limit, signal) {
     const params = new URLSearchParams({
       q: query,
       count: String(limit),
@@ -212,12 +249,12 @@ const brave: ProviderAdapter = {
     })
     if (rt.language.length > 0) params.set('search_lang', rt.language)
     return {
-      url: `${joinUrl(rt.baseUrl, '/res/v1/web/search')}?${params.toString()}`,
+      url: `${joinUrl(backend.baseUrl, '/res/v1/web/search')}?${params.toString()}`,
       init: {
         method: 'GET',
         headers: {
           accept: 'application/json',
-          'x-subscription-token': rt.apiKey,
+          'x-subscription-token': backend.apiKey,
           'user-agent': PLUGIN_UA,
         },
       },
@@ -255,16 +292,16 @@ const searxng: ProviderAdapter = {
   label: 'SearXNG',
   requiresKey: false,
   requiresBaseUrl: true,
-  build(rt, query, limit, signal) {
+  build(backend, rt, query, limit, signal) {
     const params = new URLSearchParams({ q: query, format: 'json', pageno: '1' })
     if (rt.language.length > 0) params.set('language', rt.language)
     const headers: Record<string, string> = {
       accept: 'application/json',
       'user-agent': PLUGIN_UA,
     }
-    if (rt.apiKey.length > 0) headers.authorization = `Bearer ${rt.apiKey}`
+    if (backend.apiKey.length > 0) headers.authorization = `Bearer ${backend.apiKey}`
     return {
-      url: `${joinUrl(rt.baseUrl, '/search')}?${params.toString()}`,
+      url: `${joinUrl(backend.baseUrl, '/search')}?${params.toString()}`,
       init: { method: 'GET', headers },
       timeoutMs: rt.timeoutMs,
       provider: 'searxng',
@@ -289,16 +326,164 @@ const searxng: ProviderAdapter = {
   },
 }
 
+/**
+ * Google Custom Search JSON API。
+ *
+ * 免费额度是各家里最宽的（100 次/天 ≈ 3000 次/月，约 Tavily 的 3 倍），且返回的是
+ * **真实 Google 结果**。代价是接入要多一步：除了 API Key，还需要一个
+ * Programmable Search Engine 的引擎 ID（cx），两者缺一不可。
+ *
+ * `num` 上限为 10，这里与 LIMITS.maxResults 一致，但仍显式钳一次以防配置被改。
+ * 配额耗尽时 Google 返回 **403**（而非 429），分类由 http.ts 的 QUOTA_EXHAUSTED 负责。
+ */
+const google: ProviderAdapter = {
+  id: 'google',
+  label: 'Google CSE',
+  requiresKey: true,
+  requiresBaseUrl: false,
+  requiresCx: true,
+  build(backend, rt, query, limit, signal) {
+    const params = new URLSearchParams({
+      key: backend.apiKey,
+      cx: backend.cx,
+      q: query,
+      num: String(Math.min(10, limit)),
+    })
+    if (rt.language.length > 0) params.set('hl', rt.language)
+    return {
+      url: `${joinUrl(backend.baseUrl, '/customsearch/v1')}?${params.toString()}`,
+      init: {
+        method: 'GET',
+        headers: { accept: 'application/json', 'user-agent': PLUGIN_UA },
+      },
+      timeoutMs: rt.timeoutMs,
+      provider: 'google',
+      signal,
+    }
+  },
+  parse(payload) {
+    const record = asRecord(payload)
+    const hits = asArray(record?.items).map((entry) => {
+      const item = asRecord(entry)
+      return {
+        title: asString(item?.title),
+        url: asString(item?.link),
+        snippet: asString(item?.snippet),
+      }
+    })
+    return { hits }
+  },
+}
+
+/**
+ * Exa（语义/神经搜索）。
+ *
+ * 免费额度约 $10/月（≈1400 次），比 Tavily 多约 40%，且是**语义检索**——
+ * 「找概念、找相似、找某类资料」比关键词匹配更对路。
+ *
+ * 摘要来源：Exa 的搜索结果默认**不含正文**，必须显式请求 `contents`。
+ * 这里要 `text`（带 maxCharacters 上限）而不是 `highlights`，因为 text 稳定存在，
+ * 而 highlights 只在有匹配摘录时才返回；两者都读，text 优先、highlights 兜底。
+ * 注意 Exa 对 contents 单独计费（$1/1k 页），这是相对其他后端多出的一点点成本。
+ */
+const exa: ProviderAdapter = {
+  id: 'exa',
+  label: 'Exa',
+  requiresKey: true,
+  requiresBaseUrl: false,
+  build(backend, rt, query, limit, signal) {
+    const body = {
+      query,
+      numResults: limit,
+      type: 'auto',
+      contents: { text: { maxCharacters: Math.max(200, rt.maxSnippetChars) } },
+    }
+    return {
+      url: joinUrl(backend.baseUrl, '/search'),
+      init: {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json',
+          'x-api-key': backend.apiKey,
+          'user-agent': PLUGIN_UA,
+        },
+        body: JSON.stringify(body),
+      },
+      timeoutMs: rt.timeoutMs,
+      provider: 'exa',
+      signal,
+    }
+  },
+  parse(payload) {
+    const record = asRecord(payload)
+    const hits = asArray(record?.results).map((entry) => {
+      const item = asRecord(entry)
+      const text = asString(item?.text)
+      const highlights = asArray(item?.highlights).filter(
+        (entry): entry is string => typeof entry === 'string' && entry.length > 0,
+      )
+      return {
+        title: asString(item?.title),
+        url: asString(item?.url),
+        snippet: text.length > 0 ? text : highlights.join(' '),
+      }
+    })
+    return { hits }
+  },
+}
+
 /** 后端注册表 */
-export const PROVIDERS: Record<ProviderId, ProviderAdapter> = { tavily, brave, searxng }
+export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
+  tavily,
+  brave,
+  searxng,
+  google,
+  exa,
+}
 
 /** 判定任意值是否为受支持的后端标识 */
 export function isProviderId(value: unknown): value is ProviderId {
   return typeof value === 'string' && (PROVIDER_IDS as readonly string[]).includes(value)
 }
 
+/** 后端显示名（未注册的 id 原样返回，便于错误信息里如实呈现） */
+export function providerLabel(provider: ProviderId): string {
+  return PROVIDERS[provider]?.label ?? String(provider)
+}
+
 /**
- * 把插件配置解析为运行期配置：补默认值、读环境变量、按 LIMITS 钳制。
+ * 解析单个后端的连接配置：补默认端点、读环境变量。
+ *
+ * provider 非法时回退默认后端而非抛错 —— 非法值只可能来自手改配置，
+ * 而装载期抛错会让整条 profile 起不来。
+ */
+function resolveBackend(input: {
+  provider?: unknown
+  apiKey?: unknown
+  baseUrl?: unknown
+  cx?: unknown
+}): BackendConfig {
+  const provider: ProviderId = isProviderId(input.provider) ? input.provider : DEFAULT_PROVIDER
+  const explicitBaseUrl = configString(input.baseUrl)
+  const baseUrl =
+    explicitBaseUrl.length > 0
+      ? explicitBaseUrl
+      : envValue(BASE_URL_ENV[provider]) || DEFAULT_BASE_URL[provider] || ''
+  const explicitKey = configString(input.apiKey)
+  const apiKey = explicitKey.length > 0 ? explicitKey : envValue(API_KEY_ENV[provider])
+  // cx 只对 Google 有意义：其他后端带上它没有任何用途，留着反而会让日志与
+  // 错误信息暗示一个不存在的配置项
+  const cx =
+    provider === 'google'
+      ? configString(input.cx) || envValue(CX_ENV)
+      : ''
+
+  return { provider, apiKey, baseUrl, cx }
+}
+
+/**
+ * 把插件配置解析为运行期配置：主后端 + 可选备用后端，补默认值、读环境变量、钳制边界。
  *
  * 刻意**不抛错**：DSH 的插件装载发生在宿主启动路径上，配置缺一个密钥就抛异常
  * 会让整条 profile 装载失败，而正确行为是「工具照常注册，调用时返回可据以行动的
@@ -306,19 +491,24 @@ export function isProviderId(value: unknown): value is ProviderId {
  * 可用性判定交给 usableError()，在每次调用前执行。
  */
 export function resolveRuntime(config: SearchPluginConfig = {}): ResolvedConfig {
-  const provider: ProviderId = isProviderId(config.provider) ? config.provider : DEFAULT_PROVIDER
-  const explicitBaseUrl = typeof config.baseUrl === 'string' ? config.baseUrl.trim() : ''
-  const baseUrl = explicitBaseUrl.length > 0
-    ? explicitBaseUrl
-    : envValue(BASE_URL_ENV[provider]) || DEFAULT_BASE_URL[provider] || ''
-  const explicitKey = typeof config.apiKey === 'string' ? config.apiKey.trim() : ''
-  const apiKey = explicitKey.length > 0 ? explicitKey : envValue(API_KEY_ENV[provider])
-  const language = typeof config.language === 'string' ? config.language.trim() : ''
+  const primary = resolveBackend(config)
+  const fallbackInput = config.fallback ?? {}
+  const fallbackProvider = fallbackInput.provider
+  // provider 为 'none' / 未填 / 与主后端相同 → 不启用备用（同源备用没有意义，
+  // 只会让一次失败变成两次失败）
+  const fallback =
+    isProviderId(fallbackProvider) && fallbackProvider !== primary.provider
+      ? resolveBackend({
+          provider: fallbackProvider,
+          apiKey: fallbackInput.apiKey,
+          baseUrl: fallbackInput.baseUrl,
+          cx: fallbackInput.cx,
+        })
+      : null
 
   return {
-    provider,
-    apiKey,
-    baseUrl,
+    ...primary,
+    fallback,
     maxResults: clampNumber(config.maxResults, LIMITS.minResults, LIMITS.maxResults, LIMITS.defaultResults),
     maxSnippetChars: clampNumber(
       config.maxSnippetChars,
@@ -327,39 +517,48 @@ export function resolveRuntime(config: SearchPluginConfig = {}): ResolvedConfig 
       LIMITS.defaultSnippetChars,
     ),
     timeoutMs: clampNumber(config.timeoutMs, LIMITS.minTimeoutMs, LIMITS.maxTimeoutMs, LIMITS.defaultTimeoutMs),
-    language,
+    language: configString(config.language),
     includeAnswer: config.includeAnswer === true,
     outputFormat: config.outputFormat === 'json' ? 'json' : 'markdown',
   }
 }
 
 /**
- * 可用性前置判定：配置不完整时返回分类错误，否则返回 null。
+ * 可用性前置判定：单个后端的配置不完整时返回分类错误，否则返回 null。
  *
  * 错误文案必须点到「去哪儿改」——模型读到它时，唯一能做的就是转述给用户并给出
  * 具体路径；只说 "missing apiKey" 会让用户在自己的配置文件里盲找。
  */
-export function usableError(rt: ResolvedConfig): SearchError | null {
-  const adapter = PROVIDERS[rt.provider]
+export function usableError(backend: BackendConfig): SearchError | null {
+  const adapter = PROVIDERS[backend.provider]
   if (!adapter) {
     return new SearchError(
-      `unknown search provider "${rt.provider}" (supported: ${PROVIDER_IDS.join(', ')}).`,
+      `unknown search provider "${backend.provider}" (supported: ${PROVIDER_IDS.join(', ')}).`,
       'config',
     )
   }
-  if (adapter.requiresBaseUrl && rt.baseUrl.length === 0) {
+  if (adapter.requiresBaseUrl && backend.baseUrl.length === 0) {
     return new SearchError(
       `provider "${adapter.id}" requires a baseUrl: SearXNG is self-hosted and has no default endpoint. ` +
         'Set it under Settings > Plugins > Plugin configuration > tlsearch, or via the TLSEARCH_BASE_URL environment variable.',
       'config',
     )
   }
-  if (adapter.requiresKey && rt.apiKey.length === 0) {
+  if (adapter.requiresKey && backend.apiKey.length === 0) {
     return new SearchError(
       `provider "${adapter.id}" requires an API key. ` +
         'Set it under Settings > Plugins > Plugin configuration > tlsearch (apiKey), ' +
         `or via the TLSEARCH_API_KEY / ${API_KEY_ENV[adapter.id][1] ?? 'provider-specific'} environment variable.`,
       'credential',
+    )
+  }
+  if (adapter.requiresCx && backend.cx.length === 0) {
+    return new SearchError(
+      `provider "${adapter.id}" requires a Programmable Search Engine id (cx) in addition to the API key. ` +
+        'Create one at programmablesearchengine.google.com, then set it under ' +
+        'Settings > Plugins > Plugin configuration > tlsearch (cx), ' +
+        'or via the TLSEARCH_CX / GOOGLE_CSE_ID environment variable.',
+      'config',
     )
   }
   return null
@@ -394,22 +593,91 @@ export function normalizeHits(raw: readonly SearchHit[], rt: ResolvedConfig, lim
 }
 
 /**
- * 执行一次搜索：可用性判定 → 组装请求 → 网络 → 解析 → 归一化。
+ * 用**指定的**后端执行一次搜索：可用性判定 → 组装请求 → 网络 → 解析 → 归一化。
  *
- * 这里是唯一需要感知「后端差异」之上的公共逻辑的位置，因此熔断计数（由调用方
- * 基于本函数的结果决定）之外的一切都收敛在此，tool.ts 只负责策略与呈现。
+ * 与 runProviderSearch 的区别：这里显式接收 backend，因此主备切换可以对同一个
+ * 策略配置（settings）跑两个不同的后端连接。
  */
-export async function runProviderSearch(
+export async function runBackendSearch(
+  backend: BackendConfig,
+  settings: ResolvedConfig,
+  query: string,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SearchOutcome> {
+  const unavailable = usableError(backend)
+  if (unavailable) throw unavailable
+
+  const adapter = PROVIDERS[backend.provider]
+  const payload = await fetchJson(adapter.build(backend, settings, query, limit, signal))
+  const outcome = adapter.parse(payload, settings)
+  return { ...outcome, hits: normalizeHits(outcome.hits, settings, limit) }
+}
+
+/** 用主后端执行一次搜索（单后端场景的便捷入口，也是历史 API 的兼容壳） */
+export function runProviderSearch(
   rt: ResolvedConfig,
   query: string,
   limit: number,
   signal?: AbortSignal,
 ): Promise<SearchOutcome> {
-  const unavailable = usableError(rt)
+  return runBackendSearch(rt, rt, query, limit, signal)
+}
+
+// ---------------------------------------------------------------------------
+// 额度自查
+// ---------------------------------------------------------------------------
+
+/** 安全取出可能缺失的数值 */
+function numOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * 查询并渲染**一行**额度信息。
+ *
+ * 只有 Tavily 提供机器可读的 `/usage` 端点。其余后端（Brave / SearXNG / Google / Exa）
+ * 没有等价接口，因此如实返回「请去控制台看」，绝不编一个看起来合理的数字 ——
+ * 一个假的剩余额度比没有额度信息更糟，它会让 agent 基于错误前提做决策。
+ * 该工具只在配置里存在 tavily 后端时注册，所以这条分支主要是防御性的。
+ *
+ * 输出刻意只有一行：额度信息每轮都可能被查询，格式里的每个字都是 Token。
+ */
+export async function fetchQuotaLine(
+  backend: BackendConfig,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (backend.provider !== 'tavily') {
+    return `${providerLabel(backend.provider)} exposes no machine-readable quota endpoint — check its own dashboard for usage.`
+  }
+  const unavailable = usableError(backend)
   if (unavailable) throw unavailable
 
-  const adapter = PROVIDERS[rt.provider]
-  const payload = await fetchJson(adapter.build(rt, query, limit, signal))
-  const outcome = adapter.parse(payload, rt)
-  return { ...outcome, hits: normalizeHits(outcome.hits, rt, limit) }
+  const payload = await fetchJson({
+    url: joinUrl(backend.baseUrl, '/usage'),
+    init: {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${backend.apiKey}`,
+        'user-agent': PLUGIN_UA,
+      },
+    },
+    timeoutMs,
+    provider: 'tavily',
+    signal,
+  })
+
+  const account = asRecord(asRecord(payload)?.account)
+  const plan = asString(account?.current_plan) || 'unknown plan'
+  const used = numOrNull(account?.plan_usage)
+  const limit = numOrNull(account?.plan_limit)
+
+  if (limit === null) {
+    return `Tavily "${plan}": ${used ?? 0} credits used this cycle (no monthly cap reported).`
+  }
+  const consumed = used ?? 0
+  const remaining = Math.max(0, limit - consumed)
+  return `Tavily "${plan}": ${consumed}/${limit} credits used this cycle; ${remaining} remaining (each search costs 1 credit).`
 }

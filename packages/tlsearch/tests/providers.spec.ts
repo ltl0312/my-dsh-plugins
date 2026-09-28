@@ -11,6 +11,7 @@ import {
   LIMITS,
   PROVIDERS,
   clampNumber,
+  fetchQuotaLine,
   normalizeHits,
   resolveRuntime,
   runProviderSearch,
@@ -185,8 +186,20 @@ describe('usableError', () => {
 })
 
 describe('请求组装', () => {
+  /**
+   * build 的签名是 (backend, settings, query, limit, signal)：
+   * 主备双后端共用一个 settings（限额/语言/输出格式），但各自持有连接参数。
+   * 单后端用例里两者同源，用这个助手避免每处都写两遍 rt。
+   */
+  const build = (
+    adapter: (typeof PROVIDERS)[keyof typeof PROVIDERS],
+    rt: ResolvedConfig,
+    query: string,
+    limit: number,
+  ) => adapter.build(rt, rt, query, limit)
+
   it('Tavily：POST /search，禁用 raw_content 与 images，密钥同时走头与请求体', () => {
-    const request = PROVIDERS.tavily.build(runtime({ maxResults: 5 }), 'hello world', 5)
+    const request = build(PROVIDERS.tavily, runtime({ maxResults: 5 }), 'hello world', 5)
     expect(request.url).toBe('https://api.tavily.com/search')
     expect(request.init.method).toBe('POST')
     expect(request.provider).toBe('tavily')
@@ -202,16 +215,18 @@ describe('请求组装', () => {
     expect(body.include_images).toBe(false)
     expect(body.include_answer).toBe(false)
     expect(body.api_key).toBe('test-key')
+    // 计费按请求而非按条数：search_depth 恒为 basic（1 credit），绝不用 advanced（2 credits）
+    expect(body.search_depth).toBe('basic')
   })
 
   it('Tavily：自定义 baseUrl 带结尾斜杠与路径前缀都能正确拼接', () => {
-    expect(PROVIDERS.tavily.build(runtime({ baseUrl: 'https://proxy.example/tavily/' }), 'q', 3).url).toBe(
-      'https://proxy.example/tavily/search',
-    )
+    expect(
+      build(PROVIDERS.tavily, runtime({ baseUrl: 'https://proxy.example/tavily/' }), 'q', 3).url,
+    ).toBe('https://proxy.example/tavily/search')
   })
 
   it('Brave：GET /res/v1/web/search，关闭文本装饰并限定 web 垂直', () => {
-    const request = PROVIDERS.brave.build(runtime({ provider: 'brave', language: 'en' }), 'hello world', 5)
+    const request = build(PROVIDERS.brave, runtime({ provider: 'brave', language: 'en' }), 'hello world', 5)
     const url = new URL(request.url)
     expect(url.origin).toBe('https://api.search.brave.com')
     expect(url.pathname).toBe('/res/v1/web/search')
@@ -226,12 +241,13 @@ describe('请求组装', () => {
   })
 
   it('Brave：language 为空时不发送 search_lang', () => {
-    const request = PROVIDERS.brave.build(runtime({ provider: 'brave' }), 'q', 5)
+    const request = build(PROVIDERS.brave, runtime({ provider: 'brave' }), 'q', 5)
     expect(new URL(request.url).searchParams.has('search_lang')).toBe(false)
   })
 
   it('SearXNG：GET /search 且 format=json', () => {
-    const request = PROVIDERS.searxng.build(
+    const request = build(
+      PROVIDERS.searxng,
       runtime({ provider: 'searxng', apiKey: '', baseUrl: 'https://searx.example' }),
       'hello',
       4,
@@ -243,6 +259,45 @@ describe('请求组装', () => {
     expect(url.searchParams.get('q')).toBe('hello')
     // 未配置密钥时不得发送空的 Authorization 头
     expect((request.init.headers as Record<string, string>).authorization).toBeUndefined()
+  })
+
+  it('Google CSE：GET /customsearch/v1，key 与 cx 同时作为查询参数', () => {
+    const request = build(
+      PROVIDERS.google,
+      runtime({ provider: 'google', cx: 'engine-123', language: 'zh' }),
+      'hello world',
+      7,
+    )
+    const url = new URL(request.url)
+    expect(url.origin).toBe('https://www.googleapis.com')
+    expect(url.pathname).toBe('/customsearch/v1')
+    expect(url.searchParams.get('key')).toBe('test-key')
+    expect(url.searchParams.get('cx')).toBe('engine-123')
+    expect(url.searchParams.get('q')).toBe('hello world')
+    expect(url.searchParams.get('num')).toBe('7')
+    expect(url.searchParams.get('hl')).toBe('zh')
+    // Google 用查询参数传密钥，绝不能同时把它塞进请求头（会泄漏进日志）
+    expect((request.init.headers as Record<string, string>).authorization).toBeUndefined()
+  })
+
+  it('Google CSE：num 被钳在 10 以内（API 硬上限）', () => {
+    const request = build(PROVIDERS.google, runtime({ provider: 'google', cx: 'c' }), 'q', 50)
+    expect(new URL(request.url).searchParams.get('num')).toBe('10')
+  })
+
+  it('Exa：POST /search，密钥走 x-api-key，并显式请求 contents.text', () => {
+    const request = build(PROVIDERS.exa, runtime({ provider: 'exa', maxSnippetChars: 300 }), 'hello', 4)
+    expect(request.url).toBe('https://api.exa.ai/search')
+    expect(request.init.method).toBe('POST')
+
+    const headers = request.init.headers as Record<string, string>
+    expect(headers['x-api-key']).toBe('test-key')
+
+    const body = JSON.parse(String(request.init.body)) as Record<string, unknown>
+    expect(body.query).toBe('hello')
+    expect(body.numResults).toBe(4)
+    // Exa 默认不返回正文；不请求 contents 就会得到一堆空摘要
+    expect((body.contents as { text: { maxCharacters: number } }).text.maxCharacters).toBe(300)
   })
 })
 
@@ -309,6 +364,8 @@ describe('normalizeHits 归一化管线', () => {
     provider: 'tavily',
     apiKey: '',
     baseUrl: 'https://api.tavily.com',
+    cx: '',
+    fallback: null,
     maxResults: 5,
     maxSnippetChars: 20,
     timeoutMs: 5_000,
@@ -406,5 +463,161 @@ describe('runProviderSearch 端到端（假 fetch）', () => {
     await runProviderSearch(runtime(), 'q', 3)
     const body = JSON.parse(String(calls[0]!.init.body)) as Record<string, unknown>
     expect(body.max_results).toBe(3)
+  })
+})
+
+describe('Google / Exa 响应解析', () => {
+  it('Google：取 items[].title / link / snippet', () => {
+    const payload = {
+      items: [
+        { title: 'G <b>hit</b>', link: 'https://g.example/a', snippet: 'gsnip &amp; more', displayLink: 'g.example' },
+      ],
+    }
+    expect(PROVIDERS.google.parse(payload, runtime({ provider: 'google', cx: 'c' })).hits).toEqual([
+      { title: 'G <b>hit</b>', url: 'https://g.example/a', snippet: 'gsnip &amp; more' },
+    ])
+  })
+
+  it('Google：畸形载荷退化为空结果', () => {
+    expect(PROVIDERS.google.parse(null, runtime({ provider: 'google', cx: 'c' })).hits).toEqual([])
+    expect(PROVIDERS.google.parse({ items: 'nope' }, runtime({ provider: 'google', cx: 'c' })).hits).toEqual([])
+  })
+
+  it('Exa：text 优先，缺失时用 highlights 兜底', () => {
+    const payload = {
+      results: [
+        { title: 'E1', url: 'https://e1.example', text: 'full text here', highlights: ['ignored'] },
+        { title: 'E2', url: 'https://e2.example', highlights: ['hl one', 'hl two'] },
+        { title: 'E3', url: 'https://e3.example' },
+      ],
+    }
+    expect(PROVIDERS.exa.parse(payload, runtime({ provider: 'exa' })).hits).toEqual([
+      { title: 'E1', url: 'https://e1.example', snippet: 'full text here' },
+      { title: 'E2', url: 'https://e2.example', snippet: 'hl one hl two' },
+      { title: 'E3', url: 'https://e3.example', snippet: '' },
+    ])
+  })
+})
+
+describe('主备（fallback）配置解析', () => {
+  it('未配置 fallback、或 provider 为 none 时为 null', () => {
+    expect(resolveRuntime({}).fallback).toBeNull()
+    expect(resolveRuntime({ fallback: { provider: 'none' } }).fallback).toBeNull()
+  })
+
+  it('备用后端与主后端相同时忽略（同源备用只会让一次失败变成两次失败）', () => {
+    expect(resolveRuntime({ provider: 'tavily', fallback: { provider: 'tavily' } }).fallback).toBeNull()
+  })
+
+  it('备用后端独立解析自己的端点与密钥', () => {
+    const rt = resolveRuntime({
+      provider: 'tavily',
+      apiKey: 'primary-key',
+      fallback: { provider: 'searxng', baseUrl: 'https://searx.example' },
+    })
+    expect(rt.provider).toBe('tavily')
+    expect(rt.apiKey).toBe('primary-key')
+    expect(rt.fallback).toEqual({ provider: 'searxng', apiKey: '', baseUrl: 'https://searx.example', cx: '' })
+  })
+
+  it('备用后端的密钥与端点也可来自环境变量', () => {
+    process.env.EXA_API_KEY = 'env-exa'
+    const rt = resolveRuntime({ provider: 'tavily', apiKey: 'k', fallback: { provider: 'exa' } })
+    expect(rt.fallback).toEqual({ provider: 'exa', apiKey: 'env-exa', baseUrl: 'https://api.exa.ai', cx: '' })
+    delete process.env.EXA_API_KEY
+  })
+
+  it('cx 只对 google 生效，其余后端恒为空串（避免日志暗示一个不存在的配置项）', () => {
+    expect(resolveRuntime({ provider: 'google', cx: 'engine-1' }).cx).toBe('engine-1')
+    expect(resolveRuntime({ provider: 'tavily', cx: 'engine-1' }).cx).toBe('')
+  })
+
+  it('cx 可来自环境变量', () => {
+    process.env.GOOGLE_CSE_ID = 'env-cx'
+    expect(resolveRuntime({ provider: 'google' }).cx).toBe('env-cx')
+    delete process.env.GOOGLE_CSE_ID
+  })
+})
+
+describe('Google CSE 的 cx 是必需项', () => {
+  it('缺 cx 时给出 config 错误并指明去哪儿建', () => {
+    const error = usableError(resolveRuntime({ provider: 'google', apiKey: 'k' }))
+    expect(error?.code).toBe('config')
+    expect(error?.message).toContain('cx')
+    expect(error?.message).toContain('programmablesearchengine.google.com')
+  })
+
+  it('key 与 cx 齐全时可用', () => {
+    expect(usableError(resolveRuntime({ provider: 'google', apiKey: 'k', cx: 'c' }))).toBeNull()
+  })
+
+  it('缺 key 优先报 credential（先补最基础的凭据）', () => {
+    expect(usableError(resolveRuntime({ provider: 'google', cx: 'c' }))?.code).toBe('credential')
+  })
+})
+
+describe('Google 配额耗尽不再被误判为密钥无效', () => {
+  it('403 + dailyLimitExceeded 归类为 http 配额错误，并提示可配 fallback', async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 403,
+              message: "Quota exceeded for quota metric 'Queries'",
+              errors: [{ reason: 'dailyLimitExceeded' }],
+            },
+          }),
+          { status: 403 },
+        ),
+    ) as unknown as typeof fetch
+
+    const error = (await runProviderSearch(runtime({ provider: 'google', cx: 'c' }), 'q', 5).catch(
+      (caught: unknown) => caught,
+    )) as { code: string; message: string }
+
+    expect(error.code).toBe('http')
+    expect(error.message).toContain('quota exhausted')
+    expect(error.message).toContain('fallback')
+    // 关键：不能把用户引向「密钥无效」这个错误方向
+    expect(error.message).not.toContain('API key is missing')
+  })
+
+  it('403 但没有配额特征时仍是 credential（密钥真的无效）', async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: { code: 403, message: 'API key not valid' } }), { status: 403 }),
+    ) as unknown as typeof fetch
+    await expect(runProviderSearch(runtime({ provider: 'google', cx: 'c' }), 'q', 5)).rejects.toMatchObject({
+      code: 'credential',
+    })
+  })
+})
+
+describe('fetchQuotaLine', () => {
+  it('Tavily：渲染一行「已用/总额 + 剩余」', async () => {
+    stubJson({ account: { current_plan: 'Researcher', plan_usage: 137, plan_limit: 1000 } })
+    const line = await fetchQuotaLine(runtime(), 5_000)
+    expect(line).toBe(
+      'Tavily "Researcher": 137/1000 credits used this cycle; 863 remaining (each search costs 1 credit).',
+    )
+  })
+
+  it('Tavily：无月度上限时如实说明，不编数字', async () => {
+    stubJson({ account: { current_plan: 'PAYG', plan_usage: 12, plan_limit: null } })
+    expect(await fetchQuotaLine(runtime(), 5_000)).toBe(
+      'Tavily "PAYG": 12 credits used this cycle (no monthly cap reported).',
+    )
+  })
+
+  it('非 Tavily 后端如实说明没有机器可读的额度接口', async () => {
+    const line = await fetchQuotaLine(resolveRuntime({ provider: 'searxng', baseUrl: 'https://s.example' }), 5_000)
+    expect(line).toContain('no machine-readable quota endpoint')
+  })
+
+  it('缺凭据时先抛分类错误，不发起请求', async () => {
+    const calls = stubJson({})
+    await expect(fetchQuotaLine(runtime({ apiKey: '' }), 5_000)).rejects.toMatchObject({ code: 'credential' })
+    expect(calls).toHaveLength(0)
   })
 })

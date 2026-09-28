@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlsearch",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "license": "MIT",
   "description": "Low-token web search for dsh: compact, sanitized {title, url, snippet} results with pluggable Tavily / Brave / SearXNG backends and a token budget you control",
   "type": "module",

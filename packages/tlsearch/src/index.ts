@@ -3,7 +3,8 @@
 // 插件入口与装配中心。
 //
 // 目标：替代/补充 DSH 原生 web_search，把「一次搜索」的上下文成本压到最低，
-// 同时让后端可插拔（Tavily / Brave / SearXNG）、端点可自建（SearXNG、new-api 等中转）。
+// 同时让后端可插拔（Tavily / SearXNG / Google CSE / Brave / Exa）、端点可自建，
+// 并支持**主备自动切换**：主后端失败或熔断时静默改用备用后端。
 //
 // 装配期只做四件事，且全部可能失败的环节都不抛错：
 //   1. 解析运行期配置（补默认值 / 读环境变量 / 钳制边界）；
@@ -31,8 +32,8 @@ import {
   resolveRuntime,
   usableError,
 } from './providers.js'
-import { registerSearchTool, SEARCH_TOOL_NAME, type SearchToolRuntime } from './tool.js'
-import type { SearchPluginConfig } from './types.js'
+import { SEARCH_TOOL_NAME, registerSearchTools, type SearchToolRuntime } from './tool.js'
+import type { ProviderId, SearchPluginConfig } from './types.js'
 
 // ---------------------------------------------------------------------------
 // 对外再导出（构建产物完整性 + 便于嵌入式复用与回归断言）
@@ -48,9 +49,12 @@ export {
   PROVIDERS,
   PROVIDER_IDS,
   clampNumber,
+  fetchQuotaLine,
   isProviderId,
   normalizeHits,
+  providerLabel,
   resolveRuntime,
+  runBackendSearch,
   runProviderSearch,
   usableError,
 } from './providers.js'
@@ -68,8 +72,11 @@ export type { ToolResultEnvelope, ToolTextBlock } from './format.js'
 export {
   SEARCH_TOOL_DESCRIPTION,
   SEARCH_TOOL_NAME,
+  USAGE_TOOL_DESCRIPTION,
+  USAGE_TOOL_NAME,
   createSearchTool,
-  registerSearchTool,
+  createUsageTool,
+  registerSearchTools,
 } from './tool.js'
 export type { SearchToolArgs, SearchToolRuntime } from './tool.js'
 export {
@@ -83,6 +90,8 @@ export {
   truncateText,
 } from './sanitize.js'
 export type {
+  BackendConfig,
+  FallbackConfig,
   OutputFormat,
   ProviderId,
   ResolvedConfig,
@@ -104,13 +113,24 @@ export type Config = SearchPluginConfig
 export const Config: Schema<SearchPluginConfig> = Schema.object({
   provider: Schema.union([...PROVIDER_IDS])
     .default('tavily')
-    .description('搜索引擎后端：tavily（默认，结构化 JSON）/ brave / searxng（自建，无需密钥）'),
+    .description('主后端：tavily / searxng（自建，无需密钥）/ google（CSE，免费额度最大）/ brave / exa'),
   apiKey: Schema.string()
     .default('')
-    .description('后端 API Key；SearXNG 可留空。留空时回退环境变量 TLSEARCH_API_KEY / TAVILY_API_KEY / BRAVE_API_KEY'),
+    .description('主后端 API Key；SearXNG 可留空。留空时回退环境变量 TLSEARCH_API_KEY 或各后端专用变量'),
   baseUrl: Schema.string()
     .default('')
-    .description('自定义端点根地址（SearXNG 必填）。可指向自建实例或 OpenAI 兼容中转网关；留空使用后端默认端点'),
+    .description('主后端端点根地址（SearXNG 必填）。可指向自建实例或中转网关；留空用后端默认端点'),
+  cx: Schema.string()
+    .default('')
+    .description('Google CSE 的引擎 ID（provider=google 时必填）。回退环境变量 TLSEARCH_CX / GOOGLE_CSE_ID'),
+  fallback: Schema.object({
+    provider: Schema.union(['none', ...PROVIDER_IDS])
+      .default('none')
+      .description('备用后端；none 表示不启用主备切换。主后端失败或熔断时自动改用它'),
+    apiKey: Schema.string().default('').description('备用后端 API Key；留空回退该后端的环境变量'),
+    baseUrl: Schema.string().default('').description('备用后端端点根地址（备用为 SearXNG 时必填）'),
+    cx: Schema.string().default('').description('备用后端的 Google CSE 引擎 ID（仅备用为 google 时用）'),
+  }).description('主备切换：主后端不可用时静默改用备用后端'),
   maxResults: Schema.number()
     .min(LIMITS.minResults)
     .max(LIMITS.maxResults)
@@ -155,9 +175,13 @@ export function apply(ctx: Context, config: Config = {}): () => void {
 
   // 生效配置自述：用户排查「到底打到哪个端点」时，这一行日志比翻配置文件快得多。
   // 只打印端点与限额，绝不打印 apiKey。
+  const describe = (provider: ProviderId, baseUrl: string): string =>
+    `${provider}@${baseUrl.length > 0 ? baseUrl : '(未配置端点)'}`
   ctx.logger?.info?.(
-    `[tlsearch] 装配: provider=${resolved.provider}` +
-      ` endpoint=${resolved.baseUrl.length > 0 ? resolved.baseUrl : '(未配置)'}` +
+    `[tlsearch] 装配: 主后端=${describe(resolved.provider, resolved.baseUrl)}` +
+      (resolved.fallback
+        ? ` 备用后端=${describe(resolved.fallback.provider, resolved.fallback.baseUrl)}`
+        : ' 备用后端=未启用') +
       ` maxResults=${resolved.maxResults} maxSnippetChars=${resolved.maxSnippetChars}` +
       ` timeoutMs=${resolved.timeoutMs} format=${resolved.outputFormat}` +
       ` language=${resolved.language.length > 0 ? resolved.language : '(auto)'}` +
@@ -167,17 +191,54 @@ export function apply(ctx: Context, config: Config = {}): () => void {
   // 可用性只在「调用时」判定，但装配期就要告警：
   // 缺凭据时工具**保持注册**（与宿主原生 web 服务一致），调用返回分类错误，
   // 让模型能把「去哪儿补配置」原样转述给用户，而不是让整个 profile 装载失败。
-  const unavailable = usableError(resolved)
-  if (unavailable) {
-    ctx.logger?.warn?.(`[tlsearch] 配置暂不可用（工具仍注册，调用时会返回分类错误）: ${unavailable.message}`)
+  // 主后端不可用但配了备用后端时，这甚至不算问题——降为 info 级别的说明。
+  const primaryProblem = usableError(resolved)
+  if (primaryProblem) {
+    if (resolved.fallback) {
+      const fallbackProblem = usableError(resolved.fallback)
+      if (fallbackProblem) {
+        ctx.logger?.warn?.(
+          `[tlsearch] 主备后端都不可用: 主后端 ${primaryProblem.message} / 备用后端 ${fallbackProblem.message}`,
+        )
+      } else {
+        ctx.logger?.info?.(
+          `[tlsearch] 主后端暂不可用，将由备用后端 ${resolved.fallback.provider} 提供服务: ${primaryProblem.message}`,
+        )
+      }
+    } else {
+      ctx.logger?.warn?.(`[tlsearch] 配置暂不可用（工具仍注册，调用时会返回分类错误）: ${primaryProblem.message}`)
+    }
+  } else if (resolved.fallback) {
+    const fallbackProblem = usableError(resolved.fallback)
+    if (fallbackProblem) {
+      ctx.logger?.warn?.(
+        `[tlsearch] 备用后端配置不完整，主备切换将无法生效: ${fallbackProblem.message}`,
+      )
+    }
   }
 
   /** 在途请求控制器集合：卸载时统一中止，避免请求悬挂到超时 */
   const inFlight = new Set<AbortController>()
+
+  /**
+   * 每个后端一个熔断器。
+   *
+   * 绝不能共用：SearXNG 连续失败会把 Tavily 一起熔断，而 Tavily 明明健康——
+   * 那正好摧毁了「主备互补」的全部价值。
+   */
+  const breakers = new Map<ProviderId, CircuitBreaker>()
+  const breakerFor = (provider: ProviderId): CircuitBreaker => {
+    const existing = breakers.get(provider)
+    if (existing) return existing
+    const created = new CircuitBreaker(BREAKER_THRESHOLD, BREAKER_COOLDOWN_MS)
+    breakers.set(provider, created)
+    return created
+  }
+
   const runtime: SearchToolRuntime = {
     ctx,
     config: resolved,
-    breaker: new CircuitBreaker(BREAKER_THRESHOLD, BREAKER_COOLDOWN_MS),
+    breakerFor,
     track(controller) {
       inFlight.add(controller)
       return () => {
@@ -186,7 +247,7 @@ export function apply(ctx: Context, config: Config = {}): () => void {
     },
   }
 
-  const disposers: Array<() => void> = [registerSearchTool(runtime)]
+  const disposers: Array<() => void> = [registerSearchTools(runtime)]
   let disposed = false
 
   /** 幂等注销：中止在途请求 → 复位熔断 → 摘除工具（逐个隔离异常，一个失败不影响其余） */
@@ -195,7 +256,8 @@ export function apply(ctx: Context, config: Config = {}): () => void {
     disposed = true
     for (const controller of inFlight) controller.abort()
     inFlight.clear()
-    runtime.breaker.reset()
+    for (const breaker of breakers.values()) breaker.reset()
+    breakers.clear()
     for (const disposer of disposers.splice(0)) {
       try {
         disposer()

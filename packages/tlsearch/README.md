@@ -54,11 +54,67 @@
 
 ## 🔌 支持的后端
 
-| 后端 | 密钥 | 默认端点 | 说明 |
-|---|---|---|---|
-| `tavily`（默认） | 必需 | `https://api.tavily.com` | 结构化 JSON、字段干净、有免费额度；密钥同时走 `Authorization` 头与请求体，兼容自建/中转网关 |
-| `brave` | 必需 | `https://api.search.brave.com` | 请求时关闭 `text_decorations`（源头不产生 `<strong>`）并限定 `result_filter=web` |
-| `searxng` | **不需要** | 无（必须自配） | 自托管元搜索；`baseUrl` 必填，并需在实例 `settings.yml` 的 `search.formats` 中启用 `json` |
+| 后端 | 密钥 | 默认端点 | 免费额度 | 说明 |
+|---|---|---|---|---|
+| `tavily`（默认） | 必需 | `https://api.tavily.com` | 1000 credits/月（1 credit = 1 次搜索） | 结构化 JSON、字段干净；密钥同时走 `Authorization` 头与请求体，兼容自建/中转网关 |
+| `searxng` | **不需要** | 无（必须自配） | **无限**（自建） | 自托管元搜索，聚合 Google/Bing/DDG；`baseUrl` 必填，并需在实例 `settings.yml` 的 `search.formats` 中启用 `json` |
+| `google` | 必需（key **+** `cx`） | `https://www.googleapis.com` | 100 次/**天** ≈ 3000/月 | Google Custom Search JSON API；免费额度约为 Tavily 的 3 倍，返回真实 Google 结果；配额耗尽返回 **403**（本插件已单独识别，不会误报成「密钥无效」） |
+| `brave` | 必需 | `https://api.search.brave.com` | 以官方定价页为准（条款多次调整） | 请求时关闭 `text_decorations`（源头不产生 `<strong>`）并限定 `result_filter=web` |
+| `exa` | 必需 | `https://api.exa.ai` | $10 credits/月 ≈ 1400 次 | **语义/神经**检索，适合「找概念、找相似」；搜索结果默认不含正文，本插件显式请求 `contents.text` 取摘要（Exa 对 contents 单独计费 $1/1k 页） |
+
+> 计费口径差异很大，务必分清：Tavily 与 Google 按**请求**计费（与 `maxResults` 无关，
+> 调大条数不花额度只花 Token）；Exa 的搜索与 contents 分开计费。
+
+---
+
+## 🔁 主备自动切换（fallback）
+
+配一个备用后端后，主后端**失败或熔断时静默改用备用后端**，模型只会看到正常结果：
+
+```yaml
+- id: dsh-plugin-tlsearch
+  config:
+    provider: tavily
+    apiKey: "tvly-…"
+    fallback:
+      provider: searxng
+      baseUrl: "http://localhost:8080"
+```
+
+行为约定：
+
+- **每个后端一个独立熔断器**。共用是错的——SearXNG 挂掉会把健康的 Tavily 一起熔断，
+  正好摧毁主备互补的全部价值；
+- 除「调用方主动中断」外，**任何失败都会改试备用后端**，包括主后端缺凭据、配额耗尽、
+  正在熔断中——这些恰恰是最需要备用后端的场景；
+- **熔断中的后端不再空打**：主后端已熔断时直接走备用后端，不浪费一次注定失败的超时；
+- 只配了一个后端时，错误**原样上抛**（保留精确的错误码与文案）；配了两个时抛
+  **合并错误**，把两次尝试都摆出来，否则用户只看得到最后那个后端的报错；
+- 备用后端与主后端**相同时自动忽略**（同源备用只会让一次失败变成两次失败）；
+- 切换过程对模型不可见，但会写进宿主日志（`改试备用后端`），否则你永远查不出
+  「为什么这次结果风格变了」。
+
+最实用的组合：**`searxng`（无限免费）为主 + `tavily` 为备**，日常零成本，
+SearXNG 质量差或被限流时自动落到 Tavily。
+
+---
+
+## 📊 额度自查工具 `tlsearch_usage`
+
+配置里存在 Tavily 后端时，会**额外注册**一个无入参的 `tlsearch_usage` 工具，
+返回一行额度信息：
+
+```
+Tavily "Researcher": 137/1000 credits used this cycle; 863 remaining (each search costs 1 credit).
+```
+
+用途：让 agent 在搜索开始出现配额/限流错误时（或准备发起大批搜索前）自己查一下余量，
+据此收敛搜索频率，而不是把额度打空后才发现。
+
+设计取舍：**只在配置了 Tavily 时注册**。其余后端（Brave / SearXNG / Google / Exa）
+没有机器可读的额度接口，注册一个永远只会说「请去控制台看」的工具纯粹是每轮 Token 浪费。
+被调用时若后端确实不支持，会**如实说明**而不是编一个看起来合理的数字——
+一个假的剩余额度比没有额度信息更糟。
 
 ---
 
@@ -106,9 +162,13 @@ pnpm add dsh-plugin-tlsearch
 ```yaml
 - id: dsh-plugin-tlsearch
   config:
-    provider: tavily              # tavily | brave | searxng
-    apiKey: "tvly-xxxxxxxxxxxx"   # SearXNG 可留空
-    # baseUrl: "https://searx.example.com"   # SearXNG 必填；也可指向自建代理
+    provider: searxng             # tavily | searxng | google | brave | exa
+    baseUrl: "http://localhost:8080"   # SearXNG 必填；也可指向自建代理
+    # apiKey: "…"                 # SearXNG 不需要；其余后端必填
+    # cx: "…"                     # 仅 provider=google 需要（CSE 引擎 ID）
+    fallback:                     # 可选：主后端失败/熔断时自动改用备用后端
+      provider: tavily
+      apiKey: "tvly-xxxxxxxxxxxx"
     maxResults: 5                 # 1-10，默认 5
     maxSnippetChars: 250          # 单条摘要字符上限，默认 250（控制 Token 的主旋钮）
     timeoutMs: 15000              # 单次请求超时（毫秒），默认 15000
@@ -123,9 +183,14 @@ pnpm add dsh-plugin-tlsearch
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `provider` | `tavily` | 搜索引擎后端 |
-| `apiKey` | `''` | 后端密钥；留空时回退环境变量 |
-| `baseUrl` | 后端默认端点 | 自定义端点根地址；SearXNG 必填 |
+| `provider` | `tavily` | 主后端：`tavily` / `searxng` / `google` / `brave` / `exa` |
+| `apiKey` | `''` | 主后端密钥；留空时回退环境变量（SearXNG 可留空） |
+| `baseUrl` | 后端默认端点 | 主后端端点根地址；SearXNG 必填 |
+| `cx` | `''` | Google CSE 引擎 ID；`provider=google` 时必填（与 `apiKey` 缺一不可） |
+| `fallback.provider` | `none` | 备用后端；`none` 表示不启用主备切换 |
+| `fallback.apiKey` | `''` | 备用后端密钥；留空回退该后端的环境变量 |
+| `fallback.baseUrl` | 备用后端默认端点 | 备用后端端点；备用为 SearXNG 时必填 |
+| `fallback.cx` | `''` | 备用后端的 Google CSE 引擎 ID（仅备用为 `google` 时用） |
 | `maxResults` | `5` | 返回条数上限（钳制在 1-10） |
 | `maxSnippetChars` | `250` | 单条摘要字符上限（钳制在 40-2000） |
 | `timeoutMs` | `15000` | 单次请求超时（钳制在 1000-60000） |
@@ -145,9 +210,12 @@ pnpm add dsh-plugin-tlsearch
 |---|---|
 | 通用密钥 | `TLSEARCH_API_KEY` |
 | 通用端点 | `TLSEARCH_BASE_URL` |
+| 通用 Google 引擎 ID | `TLSEARCH_CX` |
 | Tavily | `TAVILY_API_KEY`、`TAVILY_BASE_URL` |
 | Brave | `BRAVE_SEARCH_API_KEY`、`BRAVE_API_KEY`、`BRAVE_BASE_URL` |
 | SearXNG | `SEARXNG_BASE_URL` |
+| Google | `GOOGLE_CSE_API_KEY`、`GOOGLE_API_KEY`、`GOOGLE_CSE_ID`、`GOOGLE_CSE_CX` |
+| Exa | `EXA_API_KEY`、`EXA_BASE_URL` |
 
 ### 与原生 `web_search` 的关系
 
