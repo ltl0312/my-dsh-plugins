@@ -1,0 +1,73 @@
+{
+  "name": "dsh-plugin-tlsearch",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Low-token web search for dsh: compact, sanitized {title, url, snippet} results with pluggable Tavily / Brave / SearXNG backends and a token budget you control",
+  "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "onFail": "error"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "search",
+    "web-search",
+    "tavily",
+    "brave",
+    "searxng",
+    "low-token",
+    "context-engineering",
+    "agent",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ltl0312/my-dsh-plugins.git",
+    "directory": "packages/tlsearch"
+  },
+  "bugs": {
+    "url": "https://github.com/ltl0312/my-dsh-plugins/issues"
+  },
+  "homepage": "https://github.com/ltl0312/my-dsh-plugins/tree/main/packages/tlsearch#readme",
+  "peerDependencies": {
+    "cordis": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "cordis": "^3.0.0",
+    "schemastery": "^3.18.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.2.7"
+  }
+}

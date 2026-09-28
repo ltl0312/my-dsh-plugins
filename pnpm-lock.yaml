@@ -86,6 +86,27 @@ importers:
         specifier: ^5.4.0
         version: 5.4.0(@types/node@20.19.43)
 
+  packages/tlsearch:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.43
+      cordis:
+        specifier: ^3.0.0
+        version: 3.0.0
+      schemastery:
+        specifier: ^3.18.0
+        version: 3.18.0
+      tsup:
+        specifier: ^8.0.0
+        version: 8.5.1(jiti@1.21.7)(postcss@8.5.28)(typescript@5.0.2)
+      typescript:
+        specifier: ^5.0.0
+        version: 5.0.2
+      vitest:
+        specifier: ^3.2.7
+        version: 3.2.7(@types/node@20.19.43)(jiti@1.21.7)(jsdom@30.0.1)
+
 packages:
 
   '@alloc/quick-lru@5.3.0':

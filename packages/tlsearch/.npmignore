@@ -1,0 +1,33 @@
+# 发包白名单由 package.json 的 `files: ["dist"]` 定义（README/LICENSE 由 npm 强制携带）。
+# 本文件是第二道闸：即使将来有人放开 `files`，源码、测试与构建配置也不会误入 tarball。
+
+# 源码与测试
+src/
+tests/
+*.test.ts
+*.spec.ts
+
+# 构建与类型配置
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+
+# 依赖与产物缓存
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# 编辑器与系统垃圾
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地调试与日志
+*.log
+npm-debug.log*
+.env
+.env.*
+!.env.example
