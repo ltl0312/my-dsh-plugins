@@ -225,7 +225,12 @@ describe('dsh-plugin-tlmemory 服务端安全回归（P0-1 / P0-2）', () => {
       ws.on('error', (err: Error) => resolve(`error:${err.message}`))
     })
     expect(outcome).toBe('open')
-  })
+    // 显式放宽超时：本用例断言的是「握手能成功」，超时不是断言的一部分。
+    // 全套 23 个 spec 并行时会同时拉起 SQLite 与多个 HTTP/WS 服务，本文件耗时
+    // 实测在 0.9s（单跑）～6.0s（并行高负载）之间波动约 7 倍，默认 5s 会在高负载
+    // 下偶发地把一次正常握手判为超时（同一批次的其他 12 个用例均通过）。
+    // 其余用例保持默认 5s，真正的挂起仍然会快速失败。
+  }, 15_000)
 
   it('P0-1: 未知 /api/* 路径返回 404 而非 SPA index.html', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/nonexistent`)
