@@ -556,7 +556,7 @@ describe('Google CSE 的 cx 是必需项', () => {
   })
 })
 
-describe('Google 配额耗尽不再被误判为密钥无效', () => {
+describe('Google 的 403 不再被笼统说成「密钥无效」', () => {
   it('403 + dailyLimitExceeded 归类为 http 配额错误，并提示可配 fallback', async () => {
     globalThis.fetch = vi.fn(
       async () =>
@@ -591,6 +591,55 @@ describe('Google 配额耗尽不再被误判为密钥无效', () => {
     await expect(runProviderSearch(runtime({ provider: 'google', cx: 'c' }), 'q', 5)).rejects.toMatchObject({
       code: 'credential',
     })
+  })
+
+  /** 构造一个 Google 风格的 403 响应体 */
+  function stubGoogle403(reason: string, message: string): void {
+    globalThis.fetch = vi.fn(
+      async () => new Response(JSON.stringify({ error: { code: 403, message, errors: [{ reason }] } }), { status: 403 }),
+    ) as unknown as typeof fetch
+  }
+
+  async function searchError(): Promise<{ code: string; message: string }> {
+    return (await runProviderSearch(runtime({ provider: 'google', cx: 'c' }), 'q', 5).catch(
+      (caught: unknown) => caught,
+    )) as { code: string; message: string }
+  }
+
+  it('accessNotConfigured（忘了启用 API）→ 归类为 config，并指明去 Library 启用', async () => {
+    stubGoogle403(
+      'accessNotConfigured',
+      'Custom Search API has not been used in project 123 before or it is disabled.',
+    )
+    const error = await searchError()
+    expect(error.code).toBe('config')
+    expect(error.message).toContain('not enabled for this project')
+    expect(error.message).toContain('Library')
+    // 绝不能把「没启用 API」说成「密钥无效」——那会让人去反复检查一个正确的密钥
+    expect(error.message).not.toContain('API key is missing')
+  })
+
+  it('ipRefererBlocked（应用限制拦下本机）→ 归类为 config，并说明改限制或改 IP', async () => {
+    stubGoogle403('ipRefererBlocked', 'Requests from referer <empty> are blocked.')
+    const error = await searchError()
+    expect(error.code).toBe('config')
+    expect(error.message).toContain('application restrictions')
+    expect(error.message).toContain('egress IP')
+  })
+
+  it('三种 403 的处置动作互不混淆（配额 / 未启用 / 来源被拦）', async () => {
+    stubGoogle403('dailyLimitExceeded', 'Quota exceeded')
+    const quota = await searchError()
+    stubGoogle403('accessNotConfigured', 'has not been used in project')
+    const disabled = await searchError()
+    stubGoogle403('ipRefererBlocked', 'blocked')
+    const blocked = await searchError()
+
+    const messages = [quota.message, disabled.message, blocked.message]
+    expect(new Set(messages).size).toBe(3)
+    expect(quota.message).toContain('quota exhausted')
+    expect(disabled.message).toContain('not enabled')
+    expect(blocked.message).toContain('application restrictions')
   })
 })
 

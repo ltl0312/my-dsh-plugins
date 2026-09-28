@@ -126,14 +126,28 @@ function detailOf(rawBody: string): string {
 }
 
 /**
- * 配额耗尽的响应特征。
- *
- * 为什么必须单独识别：Google CSE 把「当天免费额度用完」也报成 **HTTP 403**，
- * 与「密钥无效」同码。若不区分，用户会看到「密钥无效」而去反复检查一个
- * 其实完全正确的密钥 —— 错误信息把人引向了错误的排查方向。
+ * Google 把「当天免费额度用完」报成 **HTTP 403**，与「密钥无效」同码。
+ * 若不区分，用户会看到「密钥无效」而去反复检查一个其实完全正确的密钥 ——
+ * 错误信息把人引向了错误的排查方向。
  */
 const QUOTA_EXHAUSTED =
   /dailyLimitExceeded|rateLimitExceeded|userRateLimitExceeded|quotaExceeded|quota exceeded|usage limit|plan limit/i
+
+/**
+ * Google 还把另外两种**配置错误**也报成 403，同样是「密钥本身没问题」的情况：
+ *
+ *   - `accessNotConfigured` / `SERVICE_DISABLED`：该 API 没在项目里启用。
+ *     这是搭建 Google CSE 时最常见的失误（先建密钥、忘了启用 API），
+ *     而 Google 的原始文案只说「has not been used in project … or is disabled」，
+ *     不熟悉的人很难把它和「启用 API」这个动作联系起来；
+ *   - `ipRefererBlocked`：密钥的**应用限制**（IP / 来源）拒绝了本次调用。
+ *     动态公网 IP 变动后必然触发，表现为「昨天还好好的，今天突然不行了」。
+ *
+ * 两者的处置动作完全不同（去启用 API vs 去改密钥限制），因此必须分开报。
+ */
+const API_DISABLED = /accessNotConfigured|SERVICE_DISABLED|has not been used in project|is disabled/i
+const SOURCE_BLOCKED =
+  /ipRefererBlocked|refererBlocked|API_KEY_IP_ADDRESS_BLOCKED|API_KEY_HTTP_REFERRER_BLOCKED/i
 
 /** 按状态码生成「可据以行动」的错误 */
 function httpErrorOf(provider: string, status: number, rawBody: string): SearchError {
@@ -146,6 +160,24 @@ function httpErrorOf(provider: string, status: number, rawBody: string): SearchE
         'Configure a fallback backend (fallback.provider) so searches degrade instead of failing, or wait for the quota to reset.' +
         suffix,
       'http',
+      status,
+    )
+  }
+  if (status === 403 && API_DISABLED.test(rawBody)) {
+    return new SearchError(
+      `${provider} rejected the request because the API is not enabled for this project (HTTP 403). ` +
+        'Enable it under Google Cloud console > APIs & Services > Library, wait a minute for it to propagate, then retry.' +
+        suffix,
+      'config',
+      status,
+    )
+  }
+  if (status === 403 && SOURCE_BLOCKED.test(rawBody)) {
+    return new SearchError(
+      `${provider} rejected the request because the API key's application restrictions do not allow this caller (HTTP 403). ` +
+        "Either add this machine's egress IP under the key's Application restrictions, or set them to \"None\"." +
+        suffix,
+      'config',
       status,
     )
   }
