@@ -1,0 +1,84 @@
+{
+  "name": "dsh-plugin-tlnotify",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "One IM channel for every DSH session: aggregate中断/结束/报错/等待操作 into QQ / Feishu notifications with actionable buttons and targeted reply-back routing",
+  "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "onFail": "error"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "notification",
+    "notify",
+    "im",
+    "qq",
+    "qqbot",
+    "feishu",
+    "lark",
+    "webhook",
+    "agent",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ltl0312/my-dsh-plugins.git",
+    "directory": "packages/tlnotify"
+  },
+  "bugs": {
+    "url": "https://github.com/ltl0312/my-dsh-plugins/issues"
+  },
+  "homepage": "https://github.com/ltl0312/my-dsh-plugins/tree/main/packages/tlnotify#readme",
+  "dependencies": {
+    "@tencent-connect/qqbot-nodejs": "^1.0.4"
+  },
+  "peerDependencies": {
+    "cordis": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "cordis": "^3.0.0",
+    "schemastery": "^3.18.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.2.7"
+  }
+}

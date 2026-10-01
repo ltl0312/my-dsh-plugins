@@ -1,0 +1,28 @@
+# dsh-plugin-tlnotify bundle declaration: mount the IM notification hub into
+# the host composite. 被列进 profile 的 dsh.profile.bundles 即激活本文件，
+# 因此**不需要**在 profile 的 cordis.patch.yml 里再写 insert 条目。
+#
+# ⚠️ 本行由 bundle 自动插入。想改配置请在自己的 profile 补丁层里写**裸 row**
+#    按 id 覆盖（不要再写 - insert:，否则会挂载两次）：
+#
+#        - id: dsh-plugin-tlnotify
+#          config:
+#            mode: global
+#            defaultChannelId: qq-main
+#            channels:
+#              - id: qq-main
+#                type: qq
+#                enabled: true
+#                appId: "102xxxxx"
+#                appSecret: "xxxxxxxx"
+#                targetChatId: "1A2B3C4D5E6F..."   # 你自己的 user_openid
+#
+# 配置方式（三选一）：
+#   1. 宿主 GUI：Settings > Plugins > Plugin configuration > dsh-plugin-tlnotify
+#   2. 上面那种 profile 补丁裸 row 覆盖
+#   3. 直接编辑 $DSH_HOME/tlnotify/config.json（运行时权威配置，/mode 等命令也写这里）
+#
+# 缺凭据不会导致装载失败：插件照常装载，通道启动失败只记一条可据以行动的错误日志。
+- insert:
+    - id: dsh-plugin-tlnotify
+      name: dsh-plugin-tlnotify
