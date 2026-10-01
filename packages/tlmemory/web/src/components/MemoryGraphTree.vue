@@ -1,12 +1,14 @@
 <!-- packages/tlmemory/web/src/components/MemoryGraphTree.vue
-     自顶向下树状图谱（Top-down Hierarchy Graph）。
+     树状图谱（Hierarchy Graph），支持横向 / 竖向两种排布。
 
      结构：Level 0 合成根（当前工程名 / 全局偏好）→ 目录分支 → 记忆叶子（标题 + ×断言数）。
+     排布方向由 store.graphDirection 决定（横向 / 竖向，localStorage 持久化）：
+     竖向是「一层层往下堆」，横向把深度摊到横轴上、兄弟沿纵向排开。
      渲染分两层叠在一起，共享同一个 transform：
        * <svg> 负责贝塞尔连线（在节点层之下）；
        * 绝对定位的卡片负责节点本体（用 HTML 卡片而不是 SVG <text>，正文省略号、
          悬停反馈、键盘焦点环都能直接复用看板既有的样式令牌）。
-     交互：空白处拖拽平移、滚轮以指针为锚点缩放、右上角 −/+/居中。
+     交互：空白处拖拽平移、滚轮以指针为锚点缩放、右上角 −/+/方向切换/居中。
      高亮：检索激活时，命中节点发光、未命中节点淡化，命中叶子到根的整条路径连线加粗。
      配色：全部走 style.css 的 --tlm-* 令牌层，组件内不写死任何颜色（跨源 iframe 主题自适应）。 -->
 <script setup lang="ts">
@@ -30,13 +32,21 @@ const offsetX = ref(0)
 const offsetY = ref(0)
 const panning = ref(false)
 
-/** 图谱布局（纯函数计算，命中高亮随检索关键词实时重算） */
+/** 图谱布局（纯函数计算，命中高亮随检索关键词实时重算；排布方向由 store 的偏好决定） */
 const layout = computed(() =>
-  buildGraphLayout(store.scopedNodes, store.scopeLabel, {
-    hitIds: store.searchHitIds,
-    searching: store.isSearching,
-  }),
+  buildGraphLayout(
+    store.scopedNodes,
+    store.scopeLabel,
+    {
+      hitIds: store.searchHitIds,
+      searching: store.isSearching,
+    },
+    { direction: store.graphDirection },
+  ),
 )
+
+/** 当前排布方向的中文名（工具条按钮上直接显示，点一下即反向） */
+const directionLabel = computed(() => (store.graphDirection === 'horizontal' ? '横向' : '竖向'))
 
 const canvasWidth = computed(() => layout.value.width + CANVAS_PAD * 2)
 const canvasHeight = computed(() => layout.value.height + CANVAS_PAD * 2)
@@ -196,6 +206,15 @@ watch(scopeKey, () => {
   void nextTick(fitIfNeeded)
 })
 
+// 切换排布方向 → 画布宽高整体互换，必须立刻重新适配，
+// 否则用户会看到半棵树飘在视口外（这还是他自己刚点的按钮，不该再要求手动居中）
+watch(
+  () => store.graphDirection,
+  () => {
+    void nextTick(fit)
+  },
+)
+
 // 从列表模式切回图谱 → 若此前因容器隐藏没能适配，这里补上
 watch(
   () => props.active,
@@ -281,6 +300,20 @@ watch(
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
           <path d="M8 4v8M4 8h8" />
         </svg>
+      </button>
+      <button
+        type="button"
+        class="tlm-gtool tlm-gtool-wide"
+        :title="`切换排布方向（当前：${directionLabel}）`"
+        :aria-label="`切换图谱排布方向，当前${directionLabel}`"
+        @click="store.toggleGraphDirection()"
+      >
+        <!-- 图标跟着方向走：横向是一根向右的箭头，竖向是一根向下的箭头 -->
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path v-if="store.graphDirection === 'horizontal'" d="M2.5 8h11M9.5 4l4 4-4 4" />
+          <path v-else d="M8 2.5v11M4 9.5l4 4 4-4" />
+        </svg>
+        {{ directionLabel }}
       </button>
       <button type="button" class="tlm-gtool tlm-gtool-wide" title="一键居中（Reset View）" @click="fit()">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

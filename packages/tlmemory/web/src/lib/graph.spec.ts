@@ -3,7 +3,9 @@
 import { describe, it, expect } from 'vitest'
 import type { MemoryNodeDto } from '../stores/memory'
 import {
+  GRAPH_H_GAP,
   GRAPH_ROOT_ID,
+  GRAPH_V_GAP,
   buildGraphLayout,
   buildGraphTree,
   type GraphLayoutNode,
@@ -57,6 +59,24 @@ function assertNoOverlap(nodes: readonly GraphLayoutNode[]): void {
       const previous = sorted[index - 1] as GraphLayoutNode
       const current = sorted[index] as GraphLayoutNode
       expect(previous.x + previous.width / 2).toBeLessThanOrEqual(current.x - current.width / 2)
+    }
+  }
+}
+
+/** 同层卡片不得重叠：按中心 y 排序后，前一张的下边界不得超过后一张的上边界 */
+function assertNoOverlapY(nodes: readonly GraphLayoutNode[]): void {
+  const byDepth = new Map<number, GraphLayoutNode[]>()
+  for (const node of nodes) {
+    const bucket = byDepth.get(node.depth)
+    if (bucket === undefined) byDepth.set(node.depth, [node])
+    else bucket.push(node)
+  }
+  for (const group of byDepth.values()) {
+    const sorted = [...group].sort((a, b) => a.y - b.y)
+    for (let index = 1; index < sorted.length; index += 1) {
+      const previous = sorted[index - 1] as GraphLayoutNode
+      const current = sorted[index] as GraphLayoutNode
+      expect(previous.y + previous.height / 2).toBeLessThanOrEqual(current.y - current.height / 2)
     }
   }
 }
@@ -210,5 +230,105 @@ describe('buildGraphLayout 检索高亮', () => {
     expect(layout.nodes.every((node) => node.hit === false)).toBe(true)
     expect(layout.nodes.every((node) => node.onHitPath === false)).toBe(true)
     expect(layout.nodes.every((node) => node.dim === true)).toBe(true)
+  })
+})
+
+describe('buildGraphLayout 横向布局', () => {
+  const horizontal = (highlight: Parameters<typeof buildGraphLayout>[2] = {}) =>
+    buildGraphLayout(sampleNodes(), 'my-dsh-plugins', highlight, { direction: 'horizontal' })
+
+  it('方向默认竖向，显式传入横向时方向随之改变', () => {
+    expect(buildGraphLayout(sampleNodes(), 'root').direction).toBe('vertical')
+    expect(horizontal().direction).toBe('horizontal')
+  })
+
+  it('层级自左向右递增，同层兄弟沿 y 轴排开且不重叠', () => {
+    const layout = horizontal()
+    assertNoOverlapY(layout.nodes)
+
+    const root = findNode(layout.nodes, GRAPH_ROOT_ID)
+    expect(root.x).toBeLessThan(findNode(layout.nodes, '10').x)
+    expect(findNode(layout.nodes, '10').x).toBeLessThan(findNode(layout.nodes, '11').x)
+    expect(layout.links).toHaveLength(layout.nodes.length - 1)
+  })
+
+  it('父节点居于子节点纵向跨度正中（主轴与次轴对调后仍然成立）', () => {
+    const layout = horizontal()
+    const root = findNode(layout.nodes, GRAPH_ROOT_ID)
+    const engineering = findNode(layout.nodes, '10')
+    const security = findNode(layout.nodes, '20')
+    expect(root.y).toBeCloseTo((engineering.y + security.y) / 2, 5)
+
+    const pnpm = findNode(layout.nodes, '11')
+    const cache = findNode(layout.nodes, '12')
+    expect(engineering.y).toBeCloseTo((pnpm.y + cache.y) / 2, 5)
+  })
+
+  it('连线自父卡片右边中点出发、落在子卡片左边中点（横向三次贝塞尔）', () => {
+    const layout = horizontal()
+    const engineering = findNode(layout.nodes, '10')
+    const pnpm = findNode(layout.nodes, '11')
+    const link = layout.links.find((item) => item.to === '11')!
+
+    // d = M x1 y1 C ... , x2 y2 —— 起点 x 为父卡片右边界、终点 x 为子卡片左边界，y 取各自中心
+    const match = /^M ([\d.-]+) ([\d.-]+) C .+, ([\d.-]+) ([\d.-]+)$/.exec(link.d)!
+    expect(Number(match[1])).toBeCloseTo(engineering.x + engineering.width / 2, 5)
+    expect(Number(match[2])).toBeCloseTo(engineering.y, 5)
+    expect(Number(match[3])).toBeCloseTo(pnpm.x - pnpm.width / 2, 5)
+    expect(Number(match[4])).toBeCloseTo(pnpm.y, 5)
+  })
+
+  it('层带基准线两个方向完全一致，兄弟轴改用卡片高度铺开', () => {
+    const vertical = buildGraphLayout(sampleNodes(), 'my-dsh-plugins')
+    const layout = horizontal()
+
+    // 深度方向（层带）展开宽度：逐层取该层最高卡片 + 层间留白 GRAPH_V_GAP。
+    // 竖向它是画布高度、横向它是画布宽度，两者必须完全一致 —— 切换方向只改主轴走向，
+    // 不该顺手把行距也换一套口径。
+    const levelBandSpan = 54 + GRAPH_V_GAP + 42 + GRAPH_V_GAP + 52
+    expect(layout.width).toBeCloseTo(levelBandSpan, 5)
+    expect(vertical.height).toBeCloseTo(levelBandSpan, 5)
+    expect(layout.width).toBeCloseTo(260, 5)
+
+    // 兄弟轴：横向沿 y 用「卡片高度」铺开 —— 3 张叶子 × 52 + 2 段 GRAPH_V_GAP
+    expect(layout.height).toBeCloseTo(3 * 52 + 2 * GRAPH_V_GAP, 5)
+    expect(layout.height).toBeCloseTo(268, 5)
+
+    // 对照竖向的兄弟轴：沿 x 用「卡片宽度」铺开，兄弟间距用 GRAPH_H_GAP
+    // 工程化子树 (208 + 22 + 208) + 兄弟间距 + 安全子树 208
+    expect(vertical.width).toBeCloseTo(208 + GRAPH_H_GAP + 208 + GRAPH_H_GAP + 208, 5)
+    expect(vertical.width).toBeCloseTo(668, 5)
+  })
+
+  it('深树横竖互换：竖向是细高条，横向翻成扁宽条', () => {
+    // 五层链式目录（每层只有一个子节点）：深度跨度远大于兄弟跨度
+    const deep: MemoryNodeDto[] = [
+      makeNode({ id: 'a', name: 'A', path: '/A/' }),
+      makeNode({ id: 'b', name: 'B', parent_id: 'a', path: '/A/B/' }),
+      makeNode({ id: 'c', name: 'C', parent_id: 'b', path: '/A/B/C/' }),
+      makeNode({ id: 'd', name: 'D', parent_id: 'c', path: '/A/B/C/D/' }),
+      makeNode({ id: 'e', name: 'E', parent_id: 'd', path: '/A/B/C/D/', is_leaf: 1 }),
+    ]
+    const vertical = buildGraphLayout(deep, 'root')
+    const layout = buildGraphLayout(deep, 'root', {}, { direction: 'horizontal' })
+
+    // 竖向：宽度只有单张卡片，高度是 5 层累加 —— 又高又细，这就是用户看不清的竖条
+    expect(vertical.height).toBeGreaterThan(vertical.width)
+    // 横向：同一棵树翻过来 —— 又宽又扁，深度摊到横轴上
+    expect(layout.width).toBeGreaterThan(layout.height)
+    // 深度方向的展开跨度两个方向严格相等（竖向的高度 == 横向的宽度）
+    expect(layout.width).toBeCloseTo(vertical.height, 5)
+    // 兄弟轴两方向单位不同（竖向按卡片宽度铺、横向按卡片高度铺），
+    // 所以横向高度只等于「沿高度口径重算的兄弟跨度」：根卡片高 54 > 子树高 52
+    expect(layout.height).toBeCloseTo(54, 5)
+  })
+
+  it('横向布局同样传播检索高亮', () => {
+    const layout = horizontal({ hitIds: new Set(['11']), searching: true })
+    expect(findNode(layout.nodes, '11').hit).toBe(true)
+    expect(findNode(layout.nodes, '10').onHitPath).toBe(true)
+    expect(findNode(layout.nodes, GRAPH_ROOT_ID).onHitPath).toBe(true)
+    expect(findNode(layout.nodes, '21').dim).toBe(true)
+    expect(layout.links.filter((link) => link.hit).map((link) => link.to).sort()).toEqual(['10', '11'])
   })
 })

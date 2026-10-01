@@ -21,8 +21,9 @@ function toggleCollapse(path: string) {
   }
 }
 
-/** 当前记忆树范围内的节点（作用域由 store 统一收敛：工程记忆 / 全局偏好） */
-const filteredNodes = computed(() => store.scopedNodes)
+/** 列表只列「记忆条目」：store.memoryNodes 已剔掉目录骨架（is_leaf === 0），
+    否则历史遗留的空目录会渲染成一堆「（该记忆暂无正文）」的假条目 */
+const filteredNodes = computed(() => store.memoryNodes)
 
 /**
  * 预览条目：提前算好简介，避免模板里逐项重复解析 Markdown。

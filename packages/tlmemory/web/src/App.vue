@@ -77,7 +77,8 @@ onBeforeUnmount(() => {
     <header class="tlm-header">
       <span class="tlm-brand">
         TL·MEMORY
-        <span class="tlm-brand-count">{{ store.scopedNodes.length }} 条</span>
+        <!-- 只统计真正的记忆条目（叶子）；目录骨架不是记忆，不该混进「N 条」 -->
+        <span class="tlm-brand-count">{{ store.memoryNodes.length }} 条</span>
       </span>
       <span class="tlm-spacer" />
 
@@ -225,7 +226,7 @@ onBeforeUnmount(() => {
     </main>
 
     <footer class="tlm-footer">
-      <span>已载入节点 {{ store.scopedNodes.length }}</span>
+      <span>已载入节点 {{ store.scopedNodes.length }}（其中记忆 {{ store.memoryNodes.length }} 条）</span>
       <span class="tlm-conn" :class="{ 'is-online': store.wsConnected }">
         <span class="tlm-conn-dot" aria-hidden="true" />
         {{ store.wsConnected ? '实时链路正常' : '实时链路断开' }}

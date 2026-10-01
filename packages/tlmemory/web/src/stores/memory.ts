@@ -9,6 +9,7 @@
 // 「列表里列出的命中」永远来自同一棵树。
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import type { GraphDirection } from '../lib/graph'
 
 export interface MemoryNodeDto {
   id: string
@@ -51,6 +52,25 @@ export type TreeTab = 'project' | 'global'
 /** 视图模式：折叠目录列表 / 自顶向下树状图谱 */
 export type ViewMode = 'list' | 'graph'
 
+/** 图谱方向持久化键（看板源自己的 localStorage） */
+const GRAPH_DIRECTION_STORAGE_KEY = 'tlmemory:graph-direction'
+
+/**
+ * 从 localStorage 恢复图谱排布方向；损坏 / 缺失一律回横向。
+ *
+ * 默认横向而不是竖向：竖向是「一层层往下堆」的深条，层数一多就被压成一条看不清的
+ * 细带；横向把深度摊到横轴上，更贴合看板这个宽扁面板。用户手动切过之后以他的选择为准。
+ */
+function loadGraphDirection(): GraphDirection {
+  try {
+    const stored = window.localStorage?.getItem(GRAPH_DIRECTION_STORAGE_KEY)
+    if (stored === 'horizontal' || stored === 'vertical') return stored
+  } catch {
+    // 隐私模式 / 存储被禁：保持默认。
+  }
+  return 'horizontal'
+}
+
 export const useMemoryStore = defineStore('memory', () => {
   const currentTree = ref<TreeTab>('project')
   /** 当前选中的工程 scope（tree_type 原文）；空串表示尚未确定，后端会回退为全部工程 */
@@ -61,6 +81,8 @@ export const useMemoryStore = defineStore('memory', () => {
   /** /api/projects 是否已结算（成功或失败）：决定顶栏显示「加载中」还是真实空态 */
   const projectsLoading = ref(true)
   const viewMode = ref<ViewMode>('list')
+  /** 图谱排布方向：横向（默认）/ 竖向；localStorage 持久化，跨会话记住用户的选择 */
+  const graphDirection = ref<GraphDirection>(loadGraphDirection())
   const nodes = ref<MemoryNodeDto[]>([])
   const activeHitIds = ref<Set<string>>(new Set())
   const searchQuery = ref('')
@@ -134,6 +156,18 @@ export const useMemoryStore = defineStore('memory', () => {
     currentTree.value === 'global'
       ? nodes.value.filter((node) => node.tree_type === 'global')
       : nodes.value.filter((node) => node.tree_type !== 'global'),
+  )
+
+  /**
+   * 当前作用域内**真正的记忆条目**：只保留叶子节点（is_leaf === 1）。
+   *
+   * 目录节点（is_leaf === 0）只是分组骨架，数据库里它们的 content 恒为 NULL ——
+   * 这不是「记忆丢了正文」，而是它们本来就不是一条记忆。列表视图若照单全收，
+   * 就会渲染出一堆「（该记忆暂无正文）」的假条目（历史遗留的空目录骨架尤其明显）。
+   * 图谱视图需要目录来承载层级，所以继续用 scopedNodes。
+   */
+  const memoryNodes = computed<MemoryNodeDto[]>(() =>
+    scopedNodes.value.filter((node) => Number(node.is_leaf) === 1),
   )
 
   /** 全文检索是否处于激活状态（决定图谱是否进入「命中高亮 / 未命中淡化」模式） */
@@ -275,6 +309,21 @@ export const useMemoryStore = defineStore('memory', () => {
 
   function setViewMode(mode: ViewMode) {
     viewMode.value = mode
+  }
+
+  /** 切换图谱排布方向（横向 ⇄ 竖向）；写穿 localStorage，下次打开看板沿用 */
+  function setGraphDirection(direction: GraphDirection) {
+    graphDirection.value = direction
+    try {
+      window.localStorage?.setItem(GRAPH_DIRECTION_STORAGE_KEY, direction)
+    } catch {
+      // 存储不可用（隐私模式 / 配额）：仅本次会话生效，不影响功能
+    }
+  }
+
+  /** 工具条一键反向：横向 ⇄ 竖向 */
+  function toggleGraphDirection() {
+    setGraphDirection(graphDirection.value === 'horizontal' ? 'vertical' : 'horizontal')
   }
 
   /** 切换工程后按当前关键词重跑检索，保证高亮与列表不指向上一棵树 */
@@ -591,6 +640,7 @@ export const useMemoryStore = defineStore('memory', () => {
     projectsLoading,
     projectOptions,
     viewMode,
+    graphDirection,
     nodes,
     activeHitIds,
     searchQuery,
@@ -602,6 +652,7 @@ export const useMemoryStore = defineStore('memory', () => {
     scopeQuery,
     scopeLabel,
     scopedNodes,
+    memoryNodes,
     isSearching,
     searchHitIds,
     actionError,
@@ -613,6 +664,8 @@ export const useMemoryStore = defineStore('memory', () => {
     activateGlobal,
     toggleGlobal,
     setViewMode,
+    setGraphDirection,
+    toggleGraphDirection,
     refreshSearch,
     performSearch,
     deleteNode,
