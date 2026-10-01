@@ -281,6 +281,14 @@ export interface ChannelConfig {
   // ---- 通用 ----
   /** 投递模式：active=主动推送，passive=只借被动回复窗口（更省配额）。 */
   mode?: 'active' | 'passive'
+  /**
+   * 扫码绑定用的链接（用户从 IM 平台后台复制的机器人分享链接）。
+   *
+   * 飞书在没填这项时能用 AppID 推导出 applink；QQ 推导不出来，只能填这里，
+   * 或者走「给机器人发一条消息」的无扫码绑定路径。见 `rpc.ts` 的
+   * `deriveBindLink()`。
+   */
+  bindUrl?: string
 }
 
 export interface EventsConfig {

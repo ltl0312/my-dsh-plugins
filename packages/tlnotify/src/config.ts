@@ -278,6 +278,9 @@ const ChannelSchema = Schema.object({
     .description('飞书 receive_id_type'),
   mode: Schema.union(['active', 'passive'] as const).default('active').description('投递模式'),
   sessionFilter: Schema.array(Schema.string()).default([]).description('只推这些会话；留空 = 全部'),
+  bindUrl: Schema.string()
+    .default('')
+    .description('扫码绑定用的机器人分享链接（QQ 必填；飞书可留空，由 App ID 推导）'),
 })
 
 export const Config: Schema<TlnotifyConfig> = Schema.object({

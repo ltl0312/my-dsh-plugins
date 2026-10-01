@@ -82,6 +82,10 @@ export class ChannelManager {
    * AppSecret 填错、飞书 SDK 没装，都不该让你连 Web GUI 都用不了。
    */
   async start(configs: readonly ChannelConfig[], defaultChannelId?: string): Promise<void> {
+    // stop() 之后必须能被重新 start()：设置页改完通道配置就走这条路径
+    // （stop → start）。少了这一行，重启后的管理器会一直停在「已停止」状态，
+    // send() 直接返回 undefined，表现为「配置保存成功了但通知再也不发」。
+    this.#stopped = false
     this.#defaultChannelId = defaultChannelId
     for (const config of configs) {
       this.#configs.set(config.id, config)
@@ -145,6 +149,10 @@ export class ChannelManager {
       }
     }
     for (const status of this.#status.values()) status.connected = false
+    // 清掉旧配置与旧状态：重启一次就该只反映新配置。留着旧状态会让设置页
+    // 在删掉一个通道之后仍然显示它「未连接」。
+    this.#configs.clear()
+    this.#status.clear()
   }
 
   /**

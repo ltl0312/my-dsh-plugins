@@ -79,8 +79,9 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 3. **拿到你自己的 openid**：机器人上线后，用你自己的 QQ 给机器人发一条消息，
    插件日志里会出现一条 `收到入站消息 … sender=<你的 openid>`。
    把它填进配置的 `targetChatId`。
-4. **配置通道**：GUI 的 **设置 → 插件 → tlnotify**，或直接改
-   `$DSH_HOME/tlnotify/config.json`：
+4. **配置通道**：**当前只能编辑配置文件** —— Web 设置页（方案 B）尚未实现，
+   计划见 [`doc/tlnotify-设置页方案.md`](../../doc/tlnotify-设置页方案.md)。
+   现在请直接改 `$DSH_HOME/tlnotify/config.json`：
 
    ```json
    {
@@ -153,9 +154,14 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 
 ## ⚙️ 配置
 
-配置有两条路径：宿主 GUI 的 **设置 → 插件 → tlnotify**，或 profile 的
-`~/.dsh/profiles/web/cordis.patch.yml` 里**按 id 覆盖**
-（注意是覆盖，不是再插一条 `- insert:`——挂载已由 bundle 完成，重复插入会挂载两次）：
+配置有三条路径，权威性从高到低：
+
+1. **Web 设置页**（推荐，见下面「设置页（GUI）」一节）——侧边栏 →「设置」→
+   「通知助手」，改完即时热生效，不需要重启，也不需要手改文件。
+2. **`$DSH_HOME/tlnotify/config.json`**（字段见下）——设置页写的就是这份文件，
+   两者永远一致；习惯手改的可以直接编辑它。
+3. profile 的 `~/.dsh/profiles/web/cordis.patch.yml` 里**按 id 覆盖**
+   （注意是覆盖，不是再插一条 `- insert:`——挂载已由 bundle 完成，重复插入会挂载两次）：
 
 ```yaml
 - id: dsh-plugin-tlnotify
@@ -167,7 +173,7 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 
 **权威性规则**：显式配置 > `$DSH_HOME/tlnotify/config.json` > 内置默认值。
 唯一的例外是 `mode` 与 `session.targetSessionId`——这两个字段是**运行时权威**，
-`/mode` 命令写入的值会盖过 GUI / 补丁，否则用户改完模式一重启就丢。
+`/mode` 命令写入的值会盖过配置文件 / 补丁，否则用户改完模式一重启就丢。
 
 ### 顶层
 
@@ -232,6 +238,52 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 
 ---
 
+## 🖥️ 设置页（GUI）
+
+插件的客户端半边注册在宿主的**设置**里：打开侧边栏 →「设置」→ 左侧列表里的
+**「通知助手」**。它是这个插件唯一需要的界面，覆盖全部配置项，改完**即时生效**
+（走 `rpc` 通道热应用，只有极少情况才提示需要重启）。
+
+| 区域 | 能做什么 |
+|---|---|
+| 状态栏 | 运行中 / 已停用、已推送条数、通道连通数（如 `1/2`）、已运行时长 |
+| 状态 | 总开关、默认通道 |
+| 运行模式 | 全局 / 单会话切换，当前绑定的会话、已升级为单会话的会话名单 |
+| 通道 | 增删改每个通道：类型、启用、AppID、密钥、目标 id、发送方式、会话过滤、默认通道；**测试连接**、**扫码绑定** |
+| 推哪些事件 | 5 类事件开关 + 子 Agent 开关 |
+| 正文内容 | 元信息 / 提问回显 / 正文上限，以及单会话模式的正文细节（助手全文、工具列表、耗时、前 N 轮） |
+| 回复路由 | 前缀开关、回显目标开关、兜底策略、路由表 TTL |
+| 高级 | 日志级别，以及配置 / 状态 / 日志的实际落盘路径（方便排查） |
+
+### 密钥的处理方式
+
+**密钥永远不会被回显**。宿主回给浏览器的配置里，`appSecret` / `feishuAppSecret`
+只有两个字段：`configured`（是否已设置）和 `hint`（形如 `••••a1b2` 的末四位）。
+因此设置页在「你没动过密钥」时**根本不会把密钥字段放进保存请求**——协议里
+「字段缺席 = 保持原值」，只有你点「改」并确认时才会发出那一个字段。这保证了
+「看一眼设置页就把密钥抹掉」不可能发生。
+
+### 扫码绑定
+
+「目标 id」（QQ 的 `targetChatId` / 飞书的 `feishuReceiveId`）不用手抄，可以扫码：
+
+1. 点通道卡片上的**扫码绑定**，页面出现二维码（飞书按 AppID 推导出机器人 applink；
+   QQ 需要你在开放平台复制机器人的分享链接、填进该通道的**绑定链接**）。
+2. 手机扫码 → 打开与机器人的对话 → **随便发一条消息**（内容不限）。
+3. 页面每 2 秒轮询一次，收到消息后自动把发信人 id 填进目标 id 并保存。
+
+二维码有 10 分钟有效期。若推不出可用链接（比如 QQ 通道没填绑定链接），设置页会
+**明确说明缺什么**，而不是画一个扫不出来的二维码。也可以跳过扫码：直接用手机给
+机器人发一条消息、把 `targetChatId` 手填进去。
+
+### 测试连接
+
+每个通道都有**测试连接**按钮：它用与真实通知**完全相同**的发送路径发一条消息。
+收到就说明凭据与目标 id 都对。失败时页面显示的是**可执行的建议**而不是平台原始
+报错（例如「请在 QQ 客户端打开该机器人的『允许主动发送』——这个开关在用户侧」）。
+
+---
+
 ## 💬 IM 命令
 
 在通道里直接给机器人发这些话：
@@ -273,7 +325,7 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 
 | 文件 | 内容 |
 |---|---|
-| `config.json` | 有效配置。GUI / 补丁里没写的字段会从这里读；`/mode` 也写这里 |
+| `config.json` | 有效配置。补丁里没写的字段会从这里读；`/mode` 也写这里 |
 | `state.json` | 路由表（`byMessage` / `byThread` / `byRefIdx` / `byContent` / `latest` / `lastIntervention`）、详细模式名单、入站去重表 |
 | `plugin.log` | 插件日志，1 MiB 轮转保留一份 `.1` |
 
@@ -288,7 +340,9 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 |---|---|
 | `src/index.ts` | 插件入口：`Config`、`apply`、把下面所有模块接线起来 |
 | `src/types.ts` | 全部领域类型；**不 import 任何 `@deepseek-ai/*` 运行时模块** |
-| `src/config.ts` | 配置解析 / 合并 / 落盘，以及 GUI 用的 schemastery `Config` |
+| `src/config.ts` | 配置解析 / 合并 / 落盘，以及 schemastery `Config` |
+| `src/protocol.ts` | **宿主与浏览器共用的线上契约**：RPC 方法名、请求 / 响应类型、常量。两边都只从这里取类型 |
+| `src/rpc.ts` | 宿主侧的纯函数：patch 校验与合并、密钥脱敏、平台报错翻译、绑定链接推导。**不做任何 IO** |
 | `src/events.ts` | 会话事件归一化：9 类事件、项目名、短 id、子 Agent 判定 |
 | `src/aggregate.ts` | `TurnAccumulator`：累积助手正文与工具调用，产出 `TurnSnapshot` |
 | `src/gate.ts` | `CompletionGate`：等 agent 真正空闲再发，防抖 + 重试上限 |
@@ -301,6 +355,29 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 | `src/channels/index.ts` | `ChannelManager`：启动 / 停止 / 发送 / 故障转移 / 分片 |
 | `src/channels/qq.ts` | QQ 单聊机器人通道 |
 | `src/channels/feishu.ts` | 飞书自建应用通道 |
+
+### 客户端半边（设置页）
+
+| 文件 | 职责 |
+|---|---|
+| `src/client/entry.ts` | 构建入口，转出 `apply` / `inject` |
+| `src/client/index.tsx` | `apply`：注册 `settings.section` 插槽、注入样式；语言变化时重注册 label |
+| `src/client/host.ts` | 宿主客户端 API 的**结构化类型声明**（不 import 宿主包） |
+| `src/client/rpc.ts` | `rpc.call` 的薄封装，把失败统一成 `RpcResult` |
+| `src/client/i18n.ts` | 中英词表与按语言取文案；无框架依赖 |
+| `src/client/draft.ts` | 通道草稿模型：宿主视图 ⇄ 可编辑草稿 ⇄ `ChannelPatch` |
+| `src/client/qr.ts` | 二维码点阵生成（`qrcode` 的模块矩阵 → 0/1 位图） |
+| `src/client/styles.ts` | 客户端样式（按 id 幂等注入 / 移除） |
+| `src/client/components/ui.tsx` | 裸件层：按钮、输入框、开关、分段控件、提示条 |
+| `src/client/components/SecretField.tsx` | 密钥三态输入（未设置 / 已设置 / 编辑中） |
+| `src/client/components/QrCode.tsx` | 点阵渲染成 SVG `<path>` |
+| `src/client/panels/ChannelPanel.tsx` | 通道区（含测试连接、扫码绑定） |
+| `src/client/panels/SettingsPage.tsx` | 设置页本体；所有状态与「一次改动发哪条 patch」集中在这里 |
+
+构建产物 `web/client.js` 是一个自包含 IIFE，外面包一层宿主约定的
+`window.__ModuleLoader__.load({ id, factory })`，`id` 必须等于包名。
+`react` 是唯一的 `external`——它由宿主 Web 应用提供，插件不能自带（否则 hooks 报
+invalid hook call）。
 
 ### 三个值得记录的宿主事实
 
@@ -322,14 +399,21 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 本仓库统一使用 **pnpm**（见根目录 `AGENTS.md`）：
 
 ```powershell
-# 类型检查（tsc --noEmit，零错误）
+# 类型检查（宿主 + 客户端两套 tsconfig，零错误）
 pnpm --filter dsh-plugin-tlnotify run typecheck
 
-# 构建产物：dist/index.js (ESM) + dist/index.cjs (CJS) + dist/index.d.ts
+# 构建产物：dist/index.js (ESM) + dist/index.cjs (CJS) + dist/index.d.ts + web/client.js
 pnpm --filter dsh-plugin-tlnotify run build
+
+# 只重建设置页产物
+pnpm --filter dsh-plugin-tlnotify run build:client
 
 # 单元测试（零网络：全部使用假宿主对象）
 pnpm --filter dsh-plugin-tlnotify run test
+
+# 设置页冒烟测试：在 jsdom 里把 web/client.js 当宿主加载一次，
+# 真渲染一遍并点几下按钮，断言发出的 RPC 调用是对的
+pnpm --filter dsh-plugin-tlnotify run smoke:client
 
 # 全工作区递归构建
 pnpm run build

@@ -1,9 +1,9 @@
 # 第三方声明（THIRD_PARTY_NOTICES）
 
-本文件记录 `dsh-plugin-tlnotify` 的运行时依赖、可选依赖，以及在设计与实现过程中
-参考过的同类开源项目。**本插件没有复制任何第三方源码**——所有 `src/` 下的代码均为
-本仓库原创；下面第二节列出的是「读过其协议实现、据此确认平台行为」的项目，按
-许可证要求在此致谢并声明来源。
+本文件记录 `dsh-plugin-tlnotify` 的运行时依赖、构建期依赖（其代码会被打进客户端产物）、
+以及在设计与实现过程中参考过的同类开源项目。**`src/` 下的代码均为本仓库原创**；第一节
+「构建期内联」小节列出的依赖属于例外——它们的编译产物随 `web/client.js` 一起分发。
+第二节列出的是「读过其协议实现、据此确认平台行为」的项目，按许可证要求在此致谢并声明来源。
 
 ---
 
@@ -32,6 +32,36 @@
   `FeishuChannel.start()` 里用动态 `import()` 懒加载，未安装时只让**该通道**
   启动失败并给出明确的安装指引，**不影响插件装载，也不影响 QQ 通道**。
 - 上游：<https://github.com/larksuite/node-sdk>
+
+### 构建期内联进客户端产物的依赖
+
+设置页（`src/client/**`，构建产物 `web/client.js`）由 esbuild 打成一个自包含的
+IIFE，下面两个包的**编译产物会被复制进该文件并一起分发**，因此在这里单独声明。
+它们只在构建时从 `devDependencies` 取用，运行时不 `require` 它们。
+
+#### `qrcode`
+
+- 版本：`^1.5.4`（实际装入 `1.5.4`）
+- 许可证：MIT
+- 用途：扫码绑定界面里把绑定链接编码成二维码点阵。之所以不自己实现：QR 的版本选择、
+  纠错分块与掩码选择出错时表现为「看起来是个正常二维码，但扫不出来」，用成熟实现更稳。
+- 本插件只调用它的 `QRCode.create()` 取出模块矩阵，再自行渲染成 SVG `<path>`
+  （不注入它生成的 SVG 字符串，避免多一条富文本注入通道）。渲染代码在
+  `src/client/qr.ts` 与 `src/client/components/QrCode.tsx`。
+- 上游：<https://github.com/soldair/node-qrcode>
+
+#### `dijkstrajs`
+
+- 版本：`1.0.3`
+- 许可证：MIT
+- 用途：`qrcode` 的依赖（掩码评估用的最短路算法）。它没有独立的 `dependencies`，
+  被 esbuild 一并打进产物；`qrcode` 的另外两个依赖（`pngjs`、`yargs`）只在 Node
+  端的服务端渲染路径上用到，没有进入产物（已核对 `web/client.js` 中无相关代码）。
+- 上游：<https://github.com/tcort/dijkstrajs>
+
+> `react` 与 `react-dom` 虽然也出现在客户端源码里，但它们被 esbuild 声明为
+> `external`，**不进入产物**：产物里只保留一个裸 `require("react")`，由宿主 Web 应用
+> 提供那一份实例。这是必须的——插件自带 React 会让 hooks 报「invalid hook call」。
 
 ---
 

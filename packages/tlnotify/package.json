@@ -23,23 +23,31 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./client": "./web/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "web/client.js",
     "cordis.patch.yml",
     "THIRD_PARTY_NOTICES.md"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
     }
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/build-client.mjs",
+    "build:client": "node scripts/build-client.mjs",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json",
     "test": "vitest run",
+    "smoke:client": "node scripts/smoke-client.mjs",
     "prepublishOnly": "pnpm run build"
   },
   "keywords": [
@@ -75,7 +83,15 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
     "cordis": "^3.0.0",
+    "esbuild": "^0.27.7",
+    "jsdom": "^30.0.1",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "schemastery": "^3.18.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
