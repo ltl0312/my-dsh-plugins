@@ -222,9 +222,13 @@ interface RawResponse {
 
 const asResponse = (value: unknown): RawResponse => value as RawResponse
 
-const postBody = (rpcId: string, payload: unknown = {}): FakeRequest => ({
+const postBody = (
+  rpcId: string,
+  payload: unknown = {},
+  method = 'tlnotify/state',
+): FakeRequest => ({
   method: 'POST',
-  json: async () => ({ type: 'client-request', rpcId, method: 'tlnotify/state', payload }),
+  json: async () => ({ type: 'client-request', rpcId, method, payload }),
 })
 
 const EXPECTED_PATHS = RPC_METHODS.map((method) => rpcRoutePath(method))
@@ -298,6 +302,42 @@ describe('设置页 RPC 的挂载方式', () => {
     // 非 POST → 405。
     const wrongMethod = asResponse(await route?.fetch({ method: 'GET', json: async () => ({}) }))
     expect(wrongMethod.status).toBe(405)
+
+    await dispose()
+  })
+
+  it('端到端：patch 按协议解包 `payload.patch`，真的能写进配置', async () => {
+    const dataDir = tempDir()
+    const service = makeService()
+    const host = makeHost({ service })
+
+    const dispose = apply(host.ctx, { dataDir })
+    const route = service.calls.routes.get(rpcRoutePath('patch'))
+    expect(route).toBeDefined()
+
+    // `protocol.ts` 的 RpcContract 写的是 `patch: { request: { patch: TlnotifyPatch } }`。
+    // 宿主曾经把整个 payload 交给 `applyPatch`，于是这个 `patch` 键成了未知顶层键、被
+    // 白名单拒掉 —— 设置页每一次写入都失败，包括「扫码接入机器人」的第一步（先整表
+    // 保存新通道、再申请二维码）。这条用例钉住的就是「解包这一层」。
+    const response = asResponse(
+      await route?.fetch(postBody('r-2', { patch: { enabled: false } }, 'tlnotify/patch')),
+    )
+    expect(response.status).toBe(200)
+    const body = asRecord(await response.json())
+    expect(body.rpcId).toBe('r-2')
+    const result = asRecord(body.result)
+    expect(result.ok).toBe(true)
+    expect(asRecord(result.value).changed).toEqual(['enabled'])
+    expect(asRecord(asRecord(result.value).config).enabled).toBe(false)
+    // 真的落盘了（dataDir 是临时目录）。
+    expect(readFileSync(join(dataDir, 'config.json'), 'utf8')).toContain('"enabled": false')
+
+    // 少了 patch 字段要明确报错，不能退化成「当成空补丁、悄悄成功」。
+    const missing = asRecord(
+      await asResponse(await route?.fetch(postBody('r-3', {}, 'tlnotify/patch'))).json(),
+    )
+    expect(asRecord(missing.result).ok).toBe(false)
+    expect(asRecord(asRecord(asRecord(missing.result).error)).code).toBe('invalid-patch')
 
     await dispose()
   })

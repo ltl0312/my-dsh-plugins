@@ -680,7 +680,26 @@ class Tlnotify {
   }
 
   async #rpcPatch(payload: unknown): Promise<RpcResult<PatchPayload>> {
-    const outcome = applyPatch(this.#config, payload)
+    // 补丁按 `protocol.ts` 的契约包在 `patch` 字段里：`patch: { request: { patch: TlnotifyPatch } }`。
+    //
+    // ⚠️ 这里曾经把整个 `payload` 直接交给 `applyPatch`，于是客户端发来的
+    // `{ patch: { … } }` 里的 `patch` 变成了未知顶层键、被白名单拒掉。后果是设置页
+    // **每一次写入都失败**（页面上弹「patch 期望 以下之一：enabled, mode, …」），
+    // 而这些写入里包含「扫码接入机器人」的第一步——它要先整表保存新通道、再向宿主
+    // 申请二维码，保存失败就直接 return。于是扫码那一步在界面上表现为「点了没反应、
+    // 也没有二维码」。读接口（`state`）不受影响，所以页面看起来是好的。
+    const patch =
+      payload !== null && typeof payload === 'object'
+        ? (payload as Record<string, unknown>).patch
+        : undefined
+    if (patch === undefined || patch === null) {
+      return fail('invalid-patch', '请求里没有 patch 字段。', {
+        path: 'patch',
+        expected: 'TlnotifyPatch',
+      })
+    }
+
+    const outcome = applyPatch(this.#config, patch)
     if (!outcome.ok) return outcome
 
     const { next, changed, channelsChanged } = outcome.value
