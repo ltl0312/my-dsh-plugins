@@ -140,7 +140,8 @@ describe('全局精简正文', () => {
 
   it('计划事件提示等待确认', () => {
     const notification = renderNotification(event({ kind: 'plan' }), undefined, options())
-    expect(notification.body).toBe('等待你确认这份计划')
+    expect(notification.body).toContain('等待你确认这份计划')
+    expect(notification.body).toContain('回复「批准」或「不批准」即可。')
   })
 
   it('includeMetadata 关掉后不显示耗时', () => {
@@ -180,15 +181,18 @@ describe('提问与审批正文', () => {
     )
     expect(notification.body).toContain('要选哪个方案？')
     expect(notification.body).toContain('可选：方案甲 / 方案乙')
+    // 按钮在 QQ 桌面端 / 老版本上不渲染，正文里这句提示才是可用的作答入口。
+    expect(notification.body).toContain('回复序号或选项文字即可作答。')
   })
 
-  it('多选时加标注', () => {
+  it('多选时加标注，并说明多个答案怎么隔开', () => {
     const notification = renderNotification(
       event({ kind: 'question', detail: { project: 'DSH', text: '选几个', multiSelect: true } }),
       undefined,
       options(),
     )
     expect(notification.body).toContain('（可多选）')
+    expect(notification.body).toContain('多个用空格隔开')
   })
 
   it('详细模式下选项带编号与描述', () => {
@@ -217,6 +221,7 @@ describe('提问与审批正文', () => {
     )
     expect(notification.body).toContain('工具 `Bash`')
     expect(notification.body).toContain('原因：要执行 rm')
+    expect(notification.body).toContain('回复「允许」或「拒绝」即可。')
   })
 
   it('没有工具名时退到「一个工具」', () => {
@@ -235,6 +240,7 @@ describe('提问与审批正文', () => {
       options({ mode: 'session', content: { ...content, maxBodyChars: 500 } }),
     )
     expect(notification.body).toContain('等待你确认这份计划：')
+    expect(notification.body).toContain('回复「批准」或「不批准」即可。')
     expect(notification.body.length).toBeLessThanOrEqual(500)
   })
 })

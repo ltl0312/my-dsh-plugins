@@ -61,7 +61,7 @@ import { Dedupe } from './dedupe.js'
 import { renderNotification, type RenderOptions } from './render.js'
 import { RouteTable, matchesShortId, type RouteResolution } from './route.js'
 import { describeChannelScope, helpText, ModeState, parseCommand, type ModeCommand } from './mode.js'
-import { InteractionBridge, isInteractionAction, SessionInjector, type AgentLike } from './inject.js'
+import { InteractionBridge, isInteractionAction, matchAnswer, SessionInjector, type AgentLike, type AnswerTarget, type PendingSettlement } from './inject.js'
 import { ChannelManager } from './channels/index.js'
 import { channelCaresAboutSession, channelSessionScope } from './config.js'
 import { ProvisionManager, type ProvisionCredentials } from './provision.js'
@@ -119,6 +119,34 @@ const STATE_SAVE_DEBOUNCE_MS = 1500
 const CLAIMED_REQUEST_LIMIT = 500
 /** 入站消息 id 去重表的上限（平台重投防护）。 */
 const SEEN_INBOUND_LIMIT = 800
+/** 攥住的作答最多认多久（超时后按普通发言注入，免得消息石沉大海）。 */
+const WAITING_ANSWER_TTL_MS = 3 * 60 * 1000
+/** 攥住的作答等不到 pending 时，多久之后退回「注入成普通发言」。 */
+const WAITING_ANSWER_FALLBACK_MS = 60 * 1000
+
+/**
+ * 最近一条等待类通知，以及它攥住的答案。
+ *
+ * 现场（用户 m04327 复验）：`tool/call` 那条路先把「等待我回答」发了出去，用户立刻在
+ * QQ 里回「1」——那一刻 `InteractionBridge.#pending` 里什么都没有，于是这句话被当普通
+ * 发言注入（用户看到的就是「回复的文本在对话框上面，像是一个补充语句」），**50 秒后**
+ * waterfall 才跑、pending 才出现，用户只好再回一次。
+ *
+ * 所以「像作答」的文本先攥在这里，`#onPending` 一进来就替他答（见 `#consumeHeldAnswer`）。
+ * 拿不准的一律不攥（照常注入）——宁可少答一次，也不要把用户跟模型说的话吞掉。
+ */
+interface WaitingIntervention {
+  at: number
+  /** 只有等待类事件（`INTERVENTION_KINDS`）才记，所以这里是窄化的三种。 */
+  kind: AnswerTarget['kind']
+  labels: string[]
+  multiSelect?: boolean
+  /** 攥住的文本作答。 */
+  text?: string
+  /** 用户是从哪台机器人答的（结算后回显到那台）。 */
+  channelId?: string
+  timer?: ReturnType<typeof setTimeout>
+}
 
 /**
  * 宿主「客户端连接」服务的 cordis 服务名。
@@ -359,6 +387,17 @@ class Tlnotify {
   readonly #provision: ProvisionManager
   readonly #sessions = new Map<string, SessionLike>()
   readonly #claimedRequests = new Set<string>()
+  /**
+   * 已经**投递过通知**的等待请求 id。
+   *
+   * 同一条等待会从两条路进来：`session/event` 的 `tool/call`（`#maybePending`，用真实
+   * `seq` 去重）和 InteractionBridge 的 waterfall（`#onPending`，用 requestId 合成的负数
+   * `seq` 去重）。两者的去重键不同，于是同一条「等待我回答」被投了两遍（现场日志里
+   * 05:51:18 与 05:51:19 就是这样一对）。这里按 requestId 兜一层，谁先到谁发。
+   */
+  readonly #deliveredRequests = new Set<string>()
+  /** 每个会话最近一条等待类通知，以及「提问还没准备好」时攥住的作答（见 `WaitingIntervention`）。 */
+  readonly #waiting = new Map<string, WaitingIntervention>()
   readonly #seenInbound = new Set<string>()
   #config: TlnotifyConfig
   #disposers: (() => void)[] = []
@@ -502,6 +541,7 @@ class Tlnotify {
       clearTimeout(this.#saveTimer)
       this.#saveTimer = undefined
     }
+    for (const sessionId of [...this.#waiting.keys()]) this.#clearWaiting(sessionId)
     this.#clearRpcTimer()
     this.#saveState()
     await this.#channels.stop()
@@ -1260,17 +1300,37 @@ class Tlnotify {
     if (!raw) return
     const requestId = raw.detail.requestId
     if (requestId && this.#claimedRequests.has(requestId)) return
+    if (requestId && this.#deliveredRequests.has(requestId)) {
+      this.#log.info(`这条等待通知已经发过了（req ${requestId}），跳过重复投递`)
+      return
+    }
     if (!this.#canPush()) return
-    if (!this.#dedupe.accept(raw.sessionId, raw.seq)) return
+    if (!this.#dedupe.accept(raw.sessionId, raw.seq)) {
+      this.#noteSkippedIntervention(raw, `被判成重复事件（seq ${raw.seq}）`)
+      return
+    }
+    if (requestId) this.#markDelivered(requestId)
     void this.#deliver(raw)
   }
 
   /** InteractionBridge 识别出一条「有人在等」的事件。 */
-  #onPending(event: RawEvent): void | Promise<void> {
+  async #onPending(event: RawEvent): Promise<void> {
     const requestId = event.detail.requestId
     if (requestId) this.#claim(requestId)
+    if (requestId && this.#deliveredRequests.has(requestId)) {
+      // 留 info：这条是「重复投递被拦住」的直接证据，调 logLevel 之前就靠它。
+      this.#log.info(`这条等待通知已经发过了（req ${requestId}），跳过重复投递`)
+      return
+    }
     if (!this.#canPush()) return
-    if (!this.#dedupe.accept(event.sessionId, event.seq)) return
+    if (!this.#dedupe.accept(event.sessionId, event.seq)) {
+      this.#noteSkippedIntervention(event, `被判成重复事件（seq ${event.seq}）`)
+      return
+    }
+    if (requestId) this.#markDelivered(requestId)
+    // 用户可能抢在 waterfall 之前就答了（见 WaitingIntervention）。命中就替他答，
+    // 不再发第二条通知——那条通知正是他「回两次才生效」的原因。
+    if (await this.#consumeHeldAnswer(event)) return
     return this.#deliver(event)
   }
 
@@ -1280,6 +1340,130 @@ class Tlnotify {
       const oldest = this.#claimedRequests.values().next().value
       if (oldest !== undefined) this.#claimedRequests.delete(oldest)
     }
+  }
+
+  #markDelivered(requestId: string): void {
+    this.#deliveredRequests.add(requestId)
+    if (this.#deliveredRequests.size > CLAIMED_REQUEST_LIMIT) {
+      const oldest = this.#deliveredRequests.values().next().value
+      if (oldest !== undefined) this.#deliveredRequests.delete(oldest)
+    }
+  }
+
+  // ── 攥住「比提问先到」的作答 ──────────────────────────────────────────────
+  //
+  // 现场（用户 m04327 第二次复验）：`tool/call` 那条路 19:21:06 就把「等待我回答」
+  // 发了出去，用户立刻回「1」，可 `InteractionBridge.#pending` 里那一刻**什么都
+  // 没有**——于是这句话被当普通发言注进会话（用户看到的就是「回复的文本在对话框
+  // 上面，像是一个补充语句」），50 秒后 waterfall 才注册 pending，用户只好再回
+  // 一次。所以「像作答」的话先攥在这里，pending 一出现就替他答。
+
+  /** 记下「这个会话在等作答」，并把通知里给出的选项留住（只对等待类事件）。 */
+  #rememberWaiting(event: RawEvent): void {
+    // 窄化到三种等待类事件：`INTERVENTION_KINDS` 里只有它们是「有选项可答」的。
+    const kind: AnswerTarget['kind'] | undefined =
+      event.kind === 'question' || event.kind === 'approval' || event.kind === 'plan'
+        ? event.kind
+        : undefined
+    if (!kind) return
+    const previous = this.#waiting.get(event.sessionId)
+    this.#waiting.set(event.sessionId, {
+      at: Date.now(),
+      kind,
+      labels: (event.detail.options ?? []).map((option) => option.label),
+      ...(event.detail.multiSelect === true ? { multiSelect: true } : {}),
+      // 已经攥住的答案不能被新通知冲掉——它等的就是这个 pending。
+      ...(previous?.text !== undefined ? { text: previous.text } : {}),
+      ...(previous?.channelId !== undefined ? { channelId: previous.channelId } : {}),
+      ...(previous?.timer ? { timer: previous.timer } : {}),
+    })
+  }
+
+  /** 取这个会话「刚发过、还没过期」的等待记录；过期的顺手清掉。 */
+  #freshWaiting(sessionId: string): WaitingIntervention | undefined {
+    const held = this.#waiting.get(sessionId)
+    if (!held) return undefined
+    if (Date.now() - held.at > WAITING_ANSWER_TTL_MS) {
+      this.#clearWaiting(sessionId)
+      return undefined
+    }
+    return held
+  }
+
+  /** 这个会话是不是刚发过等待类通知（按钮点空时用它给出更准的提示）。 */
+  #hasFreshWaiting(sessionId: string): boolean {
+    return this.#freshWaiting(sessionId) !== undefined
+  }
+
+  /**
+   * 文本对不上任何 pending 时，判它像不像「对还没就绪的提问的作答」。
+   *
+   * 像就攥住并返回 true（调用方**不要**再注入）；不像返回 false，照常注入。
+   * 判据是通知里**真实给出的选项**，而且刻意与 `settleText` 用同一套判读
+   * （`matchAnswer` 就是 `settleText` 内部那条规则）——所以「攥住」永远不会比
+   * 「pending 已经在」时的行为更激进：pending 若在，这句话本来也会被结算掉。
+   * 等不到 pending 就按普通发言退回（`WAITING_ANSWER_FALLBACK_MS`）。
+   */
+  async #holdTextAnswer(channelId: string, sessionId: string, text: string): Promise<boolean> {
+    const held = this.#freshWaiting(sessionId)
+    if (!held) return false
+    const target: AnswerTarget = {
+      kind: held.kind,
+      labels: held.labels,
+      ...(held.multiSelect ? { multiSelect: true } : {}),
+    }
+    if (!matchAnswer(target, text)) return false
+    if (held.timer) clearTimeout(held.timer)
+    const timer = setTimeout(() => {
+      const current = this.#waiting.get(sessionId)
+      // 期间被结算掉、或被另一句顶掉了，就别再补投。
+      if (!current || current.text !== text) return
+      this.#clearWaiting(sessionId)
+      const result = this.#injector.deliver(sessionId, text)
+      this.#log.info(
+        `攥住的作答一直没等到提问就绪，按普通发言投递（${this.#label(sessionId)}）：` +
+          (result.ok ? '已投递' : (result.reason ?? '失败')),
+      )
+      void this.#echo(
+        channelId,
+        result.ok
+          ? `已发给 ${this.#label(sessionId)}（提问一直没就绪，按普通发言投递）`
+          : `没能投递：${result.reason ?? '未知原因'}`,
+      )
+    }, WAITING_ANSWER_FALLBACK_MS)
+    timer.unref?.()
+    this.#waiting.set(sessionId, { ...held, text, channelId, timer })
+    this.#log.info(
+      `这条作答比提问先到（${this.#label(sessionId)}），先攥住，等 pending 一出现就替它答：${text}`,
+    )
+    // 立刻回一句，别让用户觉得消息石沉大海——他要的就是「我的回复不是补充语句」。
+    await this.#echo(channelId, `已收到「${text}」，等提问就绪就替你答。`)
+    return true
+  }
+
+  /**
+   * pending 刚就绪：用户要是已经先答了，就用攥住的答案替他结算掉。
+   *
+   * 返回 true 表示已经处理（不再发第二条通知）——那条迟到的通知正是他「回两次才
+   * 生效」的原因。
+   */
+  async #consumeHeldAnswer(event: RawEvent): Promise<boolean> {
+    const held = this.#freshWaiting(event.sessionId)
+    if (!held || held.text === undefined) return false
+    const settlement = this.#bridge.settleText(event.sessionId, held.text)
+    if (!settlement?.ok) return false
+    this.#clearWaiting(event.sessionId)
+    this.#log.info(
+      `抢在提问就绪前回过来的作答已经生效（${this.#label(event.sessionId)}）：${settlement.echo ?? ''}`,
+    )
+    if (held.channelId) await this.#echo(held.channelId, settlement.echo ?? '已处理')
+    return true
+  }
+
+  #clearWaiting(sessionId: string): void {
+    const held = this.#waiting.get(sessionId)
+    if (held?.timer) clearTimeout(held.timer)
+    this.#waiting.delete(sessionId)
   }
 
   /**
@@ -1314,6 +1498,42 @@ class Tlnotify {
 
   // ── 投递 ────────────────────────────────────────────────────────────────
 
+  /**
+   * 一条事件被静默丢掉时留一行日志。
+   *
+   * 等待类（提问 / 审批 / 计划）用 info：用户看不到通知的时候，日志必须说清为什么
+   * ——「有时候不提醒」（m04327）就是被这类静默跳过坑的。其余仍是 debug，免得日志
+   * 被没勾选的事件刷屏。
+   */
+  #noteSkippedIntervention(event: RawEvent, why: string): void {
+    const line = `没投递这条事件（${event.kind}，会话 ${shortSessionId(event.sessionId)}）：${why}`
+    if (INTERVENTION_KINDS.has(event.kind)) this.#log.info(line)
+    else this.#log.debug(line)
+  }
+
+  /** 逐台列出「这条事件为什么没发给它」，只在等待类事件没人接时打一次。 */
+  #explainSkips(event: RawEvent): string {
+    const candidates = this.#channels.candidates()
+    if (candidates.length === 0) return '没有已启用的机器人'
+    return candidates
+      .map((config) => {
+        const scope = channelSessionScope(config)
+        if (!channelCaresAboutSession(config, event.sessionId)) {
+          if (scope === 'single') return `${config.id}（只关心 ${config.sessionId ? shortSessionId(config.sessionId) : '还没选会话'}）`
+          if (scope === 'filter') return `${config.id}（名单 ${config.sessionFilter?.length ?? 0} 个，不含这个会话）`
+          return `${config.id}（范围 all 却不匹配，配置可能刚被改过）`
+        }
+        const { events } = resolveChannelSettings(this.#config, config)
+        const switches = switchesOf({ events, global: this.#config.global })
+        if (!isKindEnabled(event.kind, switches)) return `${config.id}（没勾这一类事件）`
+        if (isSubagent(this.#sessions.get(event.sessionId)) && !switches.includeSubagent) {
+          return `${config.id}（子 Agent 会话且没开 includeSubagent）`
+        }
+        return `${config.id}（原因未知）`
+      })
+      .join('；')
+  }
+
   async #deliver(event: RawEvent): Promise<void> {
     if (this.#disposed) return
     const targets = new Set(
@@ -1324,7 +1544,9 @@ class Tlnotify {
     )
     if (targets.size === 0) {
       // 所有机器人都没勾这一类事件，或都不关心这个会话：安静跳过。
-      this.#log.debug(`没有机器人关心这条事件（${event.kind}），跳过`)
+      // 「等待我回答 / 审批 / 计划」例外——静默跳过就是用户看到的「有时候不提醒」
+      // （m04327：等待的时候并没有发信息提醒），所以这一类留一行 info 说明原因。
+      this.#noteSkippedIntervention(event, this.#explainSkips(event))
       return
     }
     // 正文是**逐通道**渲染的：事件开关、正文细节、历史轮数都是每台机器人各自的
@@ -1350,10 +1572,16 @@ class Tlnotify {
       })
       this.#pushed += 1
     }
+    if (INTERVENTION_KINDS.has(event.kind)) this.#rememberWaiting(event)
     const first = rendered.get(results[0]!.channelId)
+    // 等待类事件把 requestId 一起打出来：同一条等待会从 `tool/call`（`data.callId`）与
+    // waterfall（`req.wait.callId`）两条路进来，两条路算出的 id 若不同，
+    // `#deliveredRequests` 就拦不住重复投递。日志里并排看两个 id 才能定性。
+    const requestId = event.detail.requestId
     this.#log.info(
       `已通知：${first ? first.title : event.kind}` +
-        `（${results.length} 台：${results.map((result) => result.channelId).join('、')}）`,
+        `（${results.length} 台：${results.map((result) => result.channelId).join('、')}）` +
+        (requestId ? ` [req ${requestId}]` : ''),
     )
     this.#scheduleSave()
   }
@@ -1442,6 +1670,11 @@ class Tlnotify {
         return this.#runCommand(channelId, command)
       }
 
+      // 文本作答：QQ 单聊的按钮在老客户端 / 桌面端会被吞掉，用户只能回复文字。
+      // 先试结算等待中的提问/审批（宿主正在等的那件事），结算成功就不再当普通发言
+      // 注入——否则 DSH 会一直等，而用户那句话会变成一条「补充语句」（用户 m04327）。
+      if (await this.#settleByText(channelId, reply, text)) return
+
       const target = this.#resolveTarget(reply)
       if (!target.sessionId) return this.#echo(channelId, this.#noTargetText(target))
 
@@ -1460,6 +1693,44 @@ class Tlnotify {
     } catch (error) {
       this.#log.error('处理入站消息失败', error)
     }
+  }
+
+  /**
+   * 把一条入站文本先当「对等待中请求的作答」试一次。
+   *
+   * 返回 true 表示已经结算并回过执，调用方不要再当普通发言注入。候选会话按可靠度
+   * 排：① 这台机器人绑定的会话（`sessionScope: 'single'`——用户就是在它的窗口里回
+   * 话的）；② 路由解析出来的会话（引用 / 前缀 / 最新通知）。都没有等待中的请求时
+   * 返回 false，走原来的注入路径。
+   */
+  async #settleByText(channelId: string, reply: InboundReply, text: string): Promise<boolean> {
+    const config = this.#config.channels.find((channel) => channel.id === channelId)
+    const candidates: string[] = []
+    if (config && channelSessionScope(config) === 'single' && config.sessionId) {
+      candidates.push(config.sessionId)
+    }
+    const resolved = this.#resolveTarget(reply)
+    if (resolved.sessionId) candidates.push(resolved.sessionId)
+
+    for (const sessionId of candidates) {
+      const settlement = this.#bridge.settleText(sessionId, text)
+      if (!settlement) continue
+      if (!settlement.ok) {
+        await this.#echo(channelId, settlement.reason ?? '这条回复没能对上等待中的请求')
+        return true
+      }
+      this.#log.info(`文本作答结算了等待中的请求（${this.#label(sessionId)}）：${settlement.echo ?? ''}`)
+      this.#clearWaiting(sessionId)
+      await this.#echo(channelId, settlement.echo ?? '已处理')
+      return true
+    }
+    // 一个 pending 都没对上，但这台机器人刚发过「等待我回答」、而这句话又确实像
+    // 通知里给出的某个选项：说明 waterfall 还没跑（现场是 50 秒后才跑）。先攥住，
+    // 别让用户的话变成「补充语句」（用户 m04327 报的就是这个）。
+    for (const sessionId of candidates) {
+      if (await this.#holdTextAnswer(channelId, sessionId, text)) return true
+    }
+    return false
   }
 
   async #runCommand(channelId: string, command: ModeCommand): Promise<void> {
@@ -1564,9 +1835,15 @@ class Tlnotify {
       // 审批 / 提问 / 计划确认：交给交互桥结算。
       if (isInteractionAction(value)) {
         const settlement = this.#bridge.settle(value)
+        // 按钮是「点一次就发出去了」的东西，攥不住（攥住再丢会更糟），所以这里
+        // 只把原因说清楚：刚发过等待类通知 ⇒ 多半是 waterfall 还没跑。
+        const pendingHint = this.#hasFreshWaiting(value.sessionId)
+          ? '（提问还在准备中，稍等几秒再点一次）'
+          : ''
         const text = settlement.ok
           ? (settlement.echo ?? '已处理')
-          : `没有生效：${settlement.reason ?? '未知原因'}`
+          : `没有生效：${settlement.reason ?? '未知原因'}${pendingHint}`
+        if (settlement.ok) this.#clearWaiting(value.sessionId)
         await this.#echo(channelId, text)
         if (settlement.ok && action.messageId) {
           // 摘掉按钮并把正文改成结算态，避免用户重复点。

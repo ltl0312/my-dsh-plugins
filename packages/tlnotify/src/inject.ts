@@ -177,6 +177,8 @@ interface PendingQuestion extends PendingBase {
   approveLabel?: string
   /** 所有候选 label，用于校验按钮回传的 choice。 */
   labels: string[]
+  /** 宿主说这题可以多选。文本作答时用来把「1 3」拆成两个选项。 */
+  multiSelect?: boolean
   resolve: (answer: AskUserQuestionAnswerLike) => void
 }
 
@@ -259,6 +261,44 @@ export class InteractionBridge {
     this.#finish(requestId, pending)
     pending.resolve({ answers: [{ id: pending.questionId, selected: [chosen.label] }] })
     return { ok: true, echo: `已选择「${chosen.label}」` }
+  }
+
+  /**
+   * 文本作答：按会话找**最新一条**等待中的请求，把「1」「允许」「选项文字」翻成答案。
+   *
+   * 为什么必须有这条路径：QQ 单聊的按钮只在手机端新版本才渲染（桌面端 / 老版本会显示
+   * 我们写的 `unsupport_tips`），而宿主那边只要没人结算就会一直等。用户 m04327 报的
+   * 正是这个——「QQ 没有弹出选项，我回复文本，DSH 却还在等我选择，那段文本被当成了
+   * 补充语句」。文本作答不依赖任何客户端能力，所以它才是兜底的那条路。
+   *
+   * 返回 `undefined` 表示「这条消息不是答案」（没有等待中的请求，或者文本明显是别的
+   * 意思），调用方照常把它当普通发言注入会话。
+   */
+  settleText(sessionId: string, text: string): PendingSettlement | undefined {
+    const trimmed = text.trim()
+    if (trimmed.length === 0) return undefined
+
+    let newest: Pending | undefined
+    for (const pending of this.#pending.values()) {
+      if (pending.sessionId !== sessionId) continue
+      if (!newest || pending.createdAt > newest.createdAt) newest = pending
+    }
+    if (!newest) return undefined
+
+    const requestId = newest.requestId
+    if (newest.kind === 'approval') {
+      const allow = readApprovalAnswer(trimmed)
+      if (allow === undefined) return undefined
+      this.#finish(requestId, newest)
+      newest.resolve(allow ? 'allowed-once' : 'rejected')
+      return { ok: true, echo: allow ? '已允许' : '已拒绝' }
+    }
+
+    const chosen = readOptionAnswer(newest, trimmed)
+    if (!chosen || chosen.length === 0) return undefined
+    this.#finish(requestId, newest)
+    newest.resolve({ answers: [{ id: newest.questionId, selected: chosen }] })
+    return { ok: true, echo: `已选择「${chosen.join('、')}」` }
   }
 
   #pickOption(pending: PendingQuestion, value: ActionValue): { ok: true; label: string } | { ok: false; reason: string } {
@@ -368,6 +408,7 @@ export class InteractionBridge {
         resolve,
       }
       if (first.intent?.approve) pending.approveLabel = first.intent.approve
+      if (first.multiSelect === true) pending.multiSelect = true
       this.#pending.set(requestId, pending)
     })
 
@@ -441,6 +482,80 @@ export function toActionValue(raw: unknown): ActionValue | undefined {
     return undefined
   }
   return record as unknown as ActionValue
+}
+
+/**
+ * 「允许 / 拒绝」的口语说法。
+ *
+ * 命中不了就**不结算**，让这条消息照常进会话——宁可少答一次，也不要把用户正在
+ * 跟模型说的话吞成一句审批结果。
+ */
+const ALLOW_WORDS = ['允许', '同意', '通过', '批准', '可以', '好的', '好', 'allow', 'yes', 'y', 'ok', '1']
+const REJECT_WORDS = ['拒绝', '不同意', '不通过', '不批准', '驳回', '不行', 'deny', 'no', 'n', '2']
+
+function readApprovalAnswer(text: string): boolean | undefined {
+  const normalized = text.trim().toLowerCase()
+  if (ALLOW_WORDS.includes(normalized)) return true
+  if (REJECT_WORDS.includes(normalized)) return false
+  return undefined
+}
+
+/**
+ * 判读一段文本需要的最小信息。
+ *
+ * `PendingQuestion` 结构上就满足它——单独抽出来是为了让**还没有 pending** 的场合
+ * （通知先发出去、waterfall 还没跑，见 index.ts 的 `#waiting`）也能判「这句话像不像
+ * 一个作答」，从而不把它当普通发言注入会话。
+ */
+export interface AnswerTarget {
+  kind: 'question' | 'plan' | 'approval'
+  labels: readonly string[]
+  multiSelect?: boolean
+}
+
+/**
+ * 这段文本像不像对这条等待的作答？
+ *
+ * 用于「提问还没准备好接收作答」的窗口：命中就先把答案攥住，等 pending 一出现再替他答；
+ * 不命中就照常当普通发言注入（宁可少答一次，也不要把用户跟模型说的话吞掉）。
+ */
+export function matchAnswer(target: AnswerTarget, text: string): boolean {
+  if (target.kind === 'approval') return readApprovalAnswer(text) !== undefined
+  return readOptionAnswer(target, text) !== undefined
+}
+
+/**
+ * 把一段文本翻成选项。
+ *
+ * 顺序：先认序号（客户端把按钮吞掉时，正文里的「1. xxx」还在），再认 label 原文，
+ * 最后——**只对提问**——按自由文本作答。计划（plan-review）只认前两种，免得用户
+ * 随手一句话就把计划批了。
+ */
+function readOptionAnswer(target: AnswerTarget, text: string): string[] | undefined {
+  const tokens =
+    target.multiSelect === true ? text.split(/[,，、\s]+/).filter((token) => token.length > 0) : [text]
+  const picked: string[] = []
+  for (const token of tokens) {
+    const label = readOneOption(target, token)
+    if (label === undefined) return undefined
+    picked.push(label)
+  }
+  return picked.length > 0 ? picked : undefined
+}
+
+function readOneOption(target: AnswerTarget, text: string): string | undefined {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return undefined
+  const index = /^(\d{1,2})\s*[.、)）]?$/.exec(trimmed)
+  if (index) {
+    const at = Number(index[1]) - 1
+    return at >= 0 && at < target.labels.length ? target.labels[at] : undefined
+  }
+  const lower = trimmed.toLowerCase()
+  const hit = target.labels.find((label) => label.trim().toLowerCase() === lower)
+  if (hit) return hit
+  if (target.kind === 'plan') return undefined
+  return trimmed
 }
 
 export type { InboundAction, Notification }

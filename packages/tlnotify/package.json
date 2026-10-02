@@ -1,8 +1,8 @@
 {
   "name": "dsh-plugin-tlnotify",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "license": "MIT",
-  "description": "One IM channel for every DSH session: aggregate 中断/结束/报错/等待操作 into QQ / Feishu notifications with actionable buttons and targeted reply-back routing",
+  "description": "把 DSH 会话事件（中断 / 结束 / 报错 / 等待操作）聚合到一个 IM 通道，推到 QQ / 飞书，带可点按钮与定向回复",
   "type": "module",
   "packageManager": "pnpm@12.4.2",
   "devEngines": {

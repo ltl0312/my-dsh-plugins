@@ -112,7 +112,7 @@ function briefBody(event: RawEvent, snapshot: TurnSnapshot | undefined, options:
     case 'approval':
       return approvalBody(event)
     case 'plan':
-      return '等待你确认这份计划'
+      return '等待你确认这份计划\n回复「批准」或「不批准」即可。'
     default:
       return primary
   }
@@ -132,13 +132,18 @@ function questionBody(event: RawEvent, withOptions: boolean): string {
     lines.push(`可选：${options.map((option) => option.label).join(' / ')}`)
   }
   if (event.detail.multiSelect) lines.push('（可多选）')
+  // QQ 单聊的按钮在桌面端 / 老版本上根本不渲染，正文里的这句话才是真正可用的作答
+  // 入口（文本作答由 InteractionBridge.settleText 结算）。别删。
+  lines.push(
+    event.detail.multiSelect ? '回复序号或选项文字即可作答，多个用空格隔开。' : '回复序号或选项文字即可作答。',
+  )
   return lines.join('\n')
 }
 
 function approvalBody(event: RawEvent): string {
   const tool = event.detail.toolName ? `工具 \`${event.detail.toolName}\`` : '一个工具'
   const reason = event.detail.text ? `\n原因：${event.detail.text}` : ''
-  return `${tool} 正在申请权限。${reason}`
+  return `${tool} 正在申请权限。${reason}\n回复「允许」或「拒绝」即可。`
 }
 
 /** 详细正文：单会话模式 / detail 升级后的全局模式。 */
@@ -152,6 +157,7 @@ function detailedBody(event: RawEvent, snapshot: TurnSnapshot | undefined, optio
   } else if (event.kind === 'plan') {
     lines.push('等待你确认这份计划：')
     if (event.detail.plan) lines.push('', truncate(event.detail.plan, Math.max(200, Math.floor(options.content.maxBodyChars * 0.6))))
+    lines.push('', '回复「批准」或「不批准」即可。')
   } else {
     const primary = primaryText(event, snapshot)
     if (primary) lines.push(truncate(primary, options.content.maxBodyChars))

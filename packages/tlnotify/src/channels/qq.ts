@@ -201,7 +201,7 @@ export class QqChannel implements Channel {
     if (!bot) throw new Error(`QQ 通道「${this.id}」尚未连接`)
 
     const text = `${notification.title}\n${notification.body}`.trim()
-    const keyboard = this.#buildKeyboard(notification.actions)
+    const keyboard = buildKeyboard(notification.actions)
     const target = this.#outboundTarget()
 
     const response = await bot.send({
@@ -254,32 +254,6 @@ export class QqChannel implements Channel {
     return next
   }
 
-  #buildKeyboard(actions: readonly NotificationAction[]): InlineKeyboardLike | undefined {
-    if (actions.length === 0) return undefined
-    const buttons: KeyboardButtonLike[] = actions.map((action, index) => ({
-      id: `${action.value.kind}-${index}`,
-      render_data: {
-        label: action.label,
-        visited_label: action.label,
-        style: action.tone === 'primary' ? 1 : 0,
-      },
-      action: {
-        // type 2 = 回调（走 INTERACTION_CREATE），不是跳转链接。
-        type: 2,
-        permission: { type: 2 }, // 所有人可点；真实访问控制在路由层（只认配置里的目标）
-        // action.data 在协议里是**字符串**，所以结构化 value 必须 JSON.stringify。
-        data: JSON.stringify(action.value),
-        unsupport_tips: '你的 QQ 版本不支持按钮，请直接回复文字',
-      },
-    }))
-
-    const rows: { buttons: KeyboardButtonLike[] }[] = []
-    for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
-      rows.push({ buttons: buttons.slice(i, i + BUTTONS_PER_ROW) })
-    }
-    return { content: { rows } }
-  }
-
   // ── 入站 ────────────────────────────────────────────────────────────────
 
   async #onMessage(msg: InboundMessageLike, context: ChannelStartContext): Promise<void> {
@@ -303,8 +277,9 @@ export class QqChannel implements Channel {
       if (quoted.id) reply.quotedMessageId = quoted.id
       if (quoted.text) reply.quotedText = quoted.text
 
-      // 用户可能直接把按钮的 data 贴回来（老客户端点了按钮会以文本形式送达）。
-      const asAction = toActionValue(safeJson(reply.text))
+      // 用户可能直接把按钮的 data 贴回来（老客户端点了按钮会以文本形式送达），
+      // 群里还会带上「@机器人 」前缀，所以剥一次再认。
+      const asAction = toActionValue(safeJson(reply.text)) ?? toActionValue(safeJson(stripMention(reply.text)))
       if (asAction) {
         await context.onAction({ value: asAction, senderId: msg.senderId, messageId: msg.messageId })
         return
@@ -406,6 +381,52 @@ function safeJson(text: string): unknown {
   } catch {
     return undefined
   }
+}
+
+/**
+ * 把通知里的按钮翻成 QQ 的内联键盘。
+ *
+ * 单独抽成模块级函数是为了能直接单测——`action.type` 写错一次就会让所有按钮变成
+ * 「点了没反应」（见下面 type 的注释），而这种错误在宿主里完全静默。
+ */
+export function buildKeyboard(actions: readonly NotificationAction[]): InlineKeyboardLike | undefined {
+  if (actions.length === 0) return undefined
+  const buttons: KeyboardButtonLike[] = actions.map((action, index) => ({
+    id: `${action.value.kind}-${index}`,
+    render_data: {
+      label: action.label,
+      visited_label: action.label,
+      style: action.tone === 'primary' ? 1 : 0,
+    },
+    action: {
+      // type 1 = 回调按钮：点击后 QQ 回调后台接口，data 经 INTERACTION_CREATE 送回来。
+      // type 2 是**指令按钮**，它只会把 data 插进输入框当普通文本发出去，永远不会
+      // 触发 INTERACTION_CREATE——原来写的是 2，所以按钮点了没反应、`#onInteraction`
+      // 那条路一次都没被走过（用户 m04327 报的「QQ 没有弹出选项」）。
+      type: 1,
+      permission: { type: 2 }, // 所有人可点；真实访问控制在路由层（只认配置里的目标）
+      // action.data 在协议里是**字符串**，所以结构化 value 必须 JSON.stringify。
+      data: JSON.stringify(action.value),
+      unsupport_tips: '你的 QQ 版本不支持按钮，请直接回复序号或文字作答',
+    },
+  }))
+
+  const rows: { buttons: KeyboardButtonLike[] }[] = []
+  for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
+    rows.push({ buttons: buttons.slice(i, i + BUTTONS_PER_ROW) })
+  }
+  return { content: { rows } }
+}
+
+/**
+ * 剥掉群消息正文前面的「@机器人 」。
+ *
+ * 群里 @ 机器人时，平台会把被 @ 的名字当正文前缀带过来；老客户端把按钮 data 贴回来
+ * 时也会带上它，于是 `JSON.parse` 失败、载荷认不出来。单聊没有这个前缀，剥不到就
+ * 原样返回。
+ */
+function stripMention(text: string): string {
+  return text.replace(/^@\S+\s+/, '').trim()
 }
 
 function stringify(value: unknown): string {
