@@ -83,14 +83,18 @@ export function redactChannel(
 ): RedactedChannel {
   const effective = resolveChannelSettings(global, config)
   const filter = Array.isArray(config.sessionFilter) ? [...config.sessionFilter] : []
+  const single = typeof config.sessionId === 'string' ? config.sessionId.trim() : ''
   return {
     id: config.id,
     type: config.type,
     enabled: config.enabled,
     label: config.label ?? '',
-    // 缺省时按 sessionFilter 反推，和 `channelCaresAboutSession()` 保持同一套规则。
-    sessionScope: config.sessionScope ?? (filter.length > 0 ? 'filter' : 'all'),
+    // 缺省时按 sessionId / sessionFilter 反推，和 `channelCaresAboutSession()` 保持同一套规则。
+    sessionScope: config.sessionScope ?? (single ? 'single' : filter.length > 0 ? 'filter' : 'all'),
+    sessionId: single,
     sessionFilter: filter,
+    // 不填就回 undefined：设置页靠这个区分「跟随全局」和「显式 0 轮」。
+    ...(typeof config.historyTurns === 'number' ? { historyTurns: config.historyTurns } : {}),
     overrideEvents: config.overrideEvents === true,
     events: { ...effective.events },
     overrideContent: config.overrideContent === true,
@@ -367,11 +371,13 @@ const CHANNEL_PATCH_KEYS: readonly string[] = Object.freeze([
   'enabled',
   'label',
   'sessionScope',
+  'sessionId',
   'sessionFilter',
   'overrideEvents',
   'events',
   'overrideContent',
   'content',
+  'historyTurns',
   'appId',
   'appSecret',
   'targetChatId',
@@ -384,7 +390,7 @@ const CHANNEL_PATCH_KEYS: readonly string[] = Object.freeze([
   'bindUrl',
 ] as const)
 
-const SESSION_SCOPES = ['all', 'filter'] as const
+const SESSION_SCOPES = ['all', 'single', 'filter'] as const
 
 const EVENT_KEYS: readonly string[] = Object.freeze([
   'onTurnEnd',
@@ -482,6 +488,8 @@ function applyChannelPatch(base: ChannelConfig | undefined, raw: unknown, index:
     'feishuAppSecret',
     'feishuReceiveId',
     'bindUrl',
+    // 单会话模式绑定的会话 id；空串 = 清空（清空后单会话模式谁都不推）。
+    'sessionId',
   ] as const
   for (const field of textFields) {
     const value = patch[field]
@@ -523,6 +531,15 @@ function applyChannelPatch(base: ChannelConfig | undefined, raw: unknown, index:
     } else {
       next.content = readContentPatch(patch.content, `${prefix}content`, next.content)
       next.overrideContent = true
+    }
+  }
+  // 历史轮数是**独立**的一项（不挂在 `overrideContent` 下）：关掉正文自定义
+  // 不该顺手把历史也关掉。`null` = 回到「跟随全局」。
+  if (patch.historyTurns !== undefined) {
+    if (patch.historyTurns === null) {
+      delete next.historyTurns
+    } else {
+      next.historyTurns = requireInt(patch.historyTurns, `${prefix}historyTurns`, 0, 20)
     }
   }
 

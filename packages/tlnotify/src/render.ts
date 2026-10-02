@@ -176,8 +176,11 @@ function detailedBody(event: RawEvent, snapshot: TurnSnapshot | undefined, optio
     lines.push('', `你刚才问：${truncate(oneLine(snapshot.userPrompt), 300)}`)
   }
 
+  // 只看数组本身：轮数已经由调用方按**这台机器人**的配置算好了（`historyTurns`
+  // 可以另给一个轮数、也可以给 0）。这里再去看全局的 `context.previousTurns`，
+  // 就会让「全局 0 轮、某台机器人单独要 3 轮」这种组合失效。
   const previousTurns = options.previousTurns ?? []
-  if (context && context.previousTurns > 0 && previousTurns.length > 0) {
+  if (previousTurns.length > 0) {
     lines.push('', `最近 ${previousTurns.length} 轮：`)
     for (const turn of previousTurns) {
       const prompt = turn.userPrompt ? truncate(oneLine(turn.userPrompt), 120) : '(无提问)'

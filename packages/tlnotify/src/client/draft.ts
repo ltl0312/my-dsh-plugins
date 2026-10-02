@@ -30,7 +30,8 @@ export type ChannelGlobalDefaults = Pick<ConfigView, 'events' | 'content'>
 
 export type ChannelType = 'qq' | 'feishu'
 export type FeishuReceiveIdType = 'open_id' | 'chat_id' | 'user_id' | 'union_id' | 'email'
-export type SessionScope = 'all' | 'filter'
+/** 每台机器人关心哪些会话：全局（所有）/ 只这一个 / 列表中这几个。 */
+export type SessionScope = 'all' | 'single' | 'filter'
 
 export const FEISHU_RECEIVE_ID_TYPES: readonly FeishuReceiveIdType[] = [
   'open_id',
@@ -53,10 +54,19 @@ export interface ChannelDraft {
   feishuReceiveId: string
   feishuReceiveIdType: FeishuReceiveIdType
   mode: 'active' | 'passive'
-  /** 会话过滤：`all` = 关心全局（所有会话），`filter` = 只看下面的列表。 */
+  /** 会话过滤：`all` = 关心全局（所有会话），`single` = 只看绑定的那一个，`filter` = 只看下面的列表。 */
   sessionScope: SessionScope
+  /** `sessionScope === 'single'` 时绑定的会话 id（完整 id，不是短 id）。 */
+  sessionId: string
   /** 文本域里一行一个；空行忽略。 */
   sessionFilter: string
+  /**
+   * 推送正文带几轮历史：`null` = 跟随全局，`0` = 不带历史。
+   *
+   * 用 `null` 而不是 `undefined` 是因为它要能被 React state 直接持有；协议那边
+   * `null` 同样是「回到跟随全局」。
+   */
+  historyTurns: number | null
   bindUrl: string
   /** 通知规则是否覆盖全局。false 时 `events` 只是「翻开关时的初值」，不生效。 */
   overrideEvents: boolean
@@ -92,7 +102,9 @@ export function toDraft(channel: ChannelView): ChannelDraft {
     feishuReceiveIdType: channel.feishuReceiveIdType,
     mode: channel.mode,
     sessionScope: channel.sessionScope,
+    sessionId: channel.sessionId ?? '',
     sessionFilter: formatSessionFilter(channel.sessionFilter),
+    historyTurns: typeof channel.historyTurns === 'number' ? channel.historyTurns : null,
     bindUrl: channel.bindUrl ?? '',
     overrideEvents: channel.overrideEvents,
     // 即使没开覆盖也照抄生效值：用户点开「自定义」的那一刻，看到的应该是
@@ -134,7 +146,10 @@ export function toPatch(draft: ChannelDraft): ChannelPatch {
     feishuReceiveIdType: draft.feishuReceiveIdType,
     mode: draft.mode,
     sessionScope: draft.sessionScope,
+    sessionId: draft.sessionId.trim(),
     sessionFilter: parseSessionFilter(draft.sessionFilter),
+    // 三态原样送出：`null`＝回到跟随全局，`0`＝这台机器人不带历史。
+    historyTurns: draft.historyTurns,
     bindUrl: draft.bindUrl.trim(),
     overrideEvents: draft.overrideEvents,
     events: draft.overrideEvents ? { ...draft.events } : null,
@@ -178,7 +193,10 @@ export function createDraft(
     // 新机器人默认**关心全局**（所有会话），这样「加一个机器人」不会是个哑巴；
     // 只想收特定会话的人可以到「更多设置 → 会话过滤」里改成列表。
     sessionScope: 'all',
+    sessionId: '',
     sessionFilter: '',
+    // 新机器人跟随全局的历史轮数：不替用户做「带不带历史」这个决定。
+    historyTurns: null,
     bindUrl: '',
     overrideEvents: false,
     events: { ...global.events },

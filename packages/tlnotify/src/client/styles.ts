@@ -262,6 +262,63 @@ export const CLIENT_CSS = `
 }
 .tln-caret { flex: none; color: var(--dsw-alias-label-tertiary, #8a8a8a); font-size: 12px; }
 
+/* 「会话过滤」里的会话清单：一屏能点选，滚不动也能手填。 */
+.tln-sessions { display: flex; flex-direction: column; gap: 8px; }
+.tln-sessions-head { display: flex; align-items: center; gap: 8px; }
+.tln-sessions-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+  border-radius: 8px;
+}
+.tln-session-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 7px 10px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.14));
+  cursor: pointer;
+}
+.tln-session-item:last-child { border-bottom: none; }
+.tln-session-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08)); }
+.tln-session-item[data-active='true'] { background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14)); }
+.tln-session-item:disabled { cursor: default; opacity: .6; }
+.tln-session-mark {
+  flex: none;
+  width: 14px;
+  color: var(--dsw-alias-state-business-primary, #2f7d32);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tln-session-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tln-session-title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tln-session-meta {
+  color: var(--dsw-alias-label-tertiary, #8a8a8a);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tln-session-empty {
+  padding: 10px;
+  color: var(--dsw-alias-label-tertiary, #8a8a8a);
+  font-size: 12px;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.32));
+  border-radius: 8px;
+}
+
 .tln-subpage { display: flex; flex-direction: column; gap: 12px; }
 .tln-subpage-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .tln-tabs { display: inline-flex; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.32)); border-radius: 8px; overflow: hidden; }

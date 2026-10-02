@@ -2225,30 +2225,6 @@ window.__ModuleLoader__.load({
           }
         );
       }
-      function TextArea(props) {
-        const [draft, setDraft] = import_react.default.useState(props.value);
-        const [focused, setFocused] = import_react.default.useState(false);
-        import_react.default.useEffect(() => {
-          if (!focused) setDraft(props.value);
-        }, [props.value, focused]);
-        return /* @__PURE__ */ import_react.default.createElement(
-          "textarea",
-          {
-            className: "tln-textarea",
-            value: draft,
-            rows: props.rows ?? 3,
-            placeholder: props.placeholder,
-            disabled: props.disabled === true,
-            spellCheck: false,
-            onFocus: () => setFocused(true),
-            onBlur: () => {
-              setFocused(false);
-              if (draft !== props.value) props.onCommit(draft);
-            },
-            onChange: (event) => setDraft(event.target.value)
-          }
-        );
-      }
       function NumInput(props) {
         const [draft, setDraft] = import_react.default.useState(String(props.value));
         const [focused, setFocused] = import_react.default.useState(false);
@@ -2440,7 +2416,9 @@ window.__ModuleLoader__.load({
           feishuReceiveIdType: channel.feishuReceiveIdType,
           mode: channel.mode,
           sessionScope: channel.sessionScope,
+          sessionId: channel.sessionId ?? "",
           sessionFilter: formatSessionFilter(channel.sessionFilter),
+          historyTurns: typeof channel.historyTurns === "number" ? channel.historyTurns : null,
           bindUrl: channel.bindUrl ?? "",
           overrideEvents: channel.overrideEvents,
           // 即使没开覆盖也照抄生效值：用户点开「自定义」的那一刻，看到的应该是
@@ -2467,7 +2445,10 @@ window.__ModuleLoader__.load({
           feishuReceiveIdType: draft.feishuReceiveIdType,
           mode: draft.mode,
           sessionScope: draft.sessionScope,
+          sessionId: draft.sessionId.trim(),
           sessionFilter: parseSessionFilter(draft.sessionFilter),
+          // 三态原样送出：`null`＝回到跟随全局，`0`＝这台机器人不带历史。
+          historyTurns: draft.historyTurns,
           bindUrl: draft.bindUrl.trim(),
           overrideEvents: draft.overrideEvents,
           events: draft.overrideEvents ? { ...draft.events } : null,
@@ -2503,7 +2484,10 @@ window.__ModuleLoader__.load({
           // 新机器人默认**关心全局**（所有会话），这样「加一个机器人」不会是个哑巴；
           // 只想收特定会话的人可以到「更多设置 → 会话过滤」里改成列表。
           sessionScope: "all",
+          sessionId: "",
           sessionFilter: "",
+          // 新机器人跟随全局的历史轮数：不替用户做「带不带历史」这个决定。
+          historyTurns: null,
           bindUrl: "",
           overrideEvents: false,
           events: { ...global.events },
@@ -2560,6 +2544,7 @@ window.__ModuleLoader__.load({
             secretEpoch: props.secretEpoch,
             isDefault: props.defaultChannelId === openBot.id,
             tab: subTab,
+            sessionPicker: props.sessionPicker,
             onTab: setSubTab,
             onChange: (patch) => update(openBot.id, patch),
             onSecret: props.onSecret,
@@ -2595,6 +2580,7 @@ window.__ModuleLoader__.load({
             qr: props.qr && props.qr.channelId === draft.id ? props.qr : void 0,
             test: props.test && props.test.channelId === draft.id ? props.test : void 0,
             provision: props.provision && props.provision.channelId === draft.id ? props.provision : void 0,
+            sessionPicker: props.sessionPicker,
             onChange: (patch) => update(draft.id, patch),
             onSecret: props.onSecret,
             onDefault: props.onDefault,
@@ -2845,8 +2831,60 @@ window.__ModuleLoader__.load({
           }
         ))) : null);
       }
+      function sessionMeta(t, session) {
+        const parts = [];
+        if (session.project) parts.push(session.project);
+        if (session.updatedAt > 0) parts.push(new Date(session.updatedAt).toLocaleString());
+        if (session.running) parts.push(t("sessionRunning"));
+        if (session.subagent) parts.push(t("sessionSubagent"));
+        return parts.join(" \xB7 ");
+      }
+      function SessionList(props) {
+        const { t } = props;
+        const selected = new Set(props.selected);
+        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-sessions" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-sessions-head" }, /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, props.loading ? t("sessionLoading") : t("sessionCount", { n: props.sessions.length })), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy || props.loading, onClick: props.onReload }, t("sessionReload"))), props.unavailable ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "warn" }, props.unavailable) : null, props.sessions.length > 0 ? /* @__PURE__ */ import_react4.default.createElement(
+          "div",
+          {
+            className: "tln-sessions-list",
+            role: props.multi ? "group" : "radiogroup",
+            "aria-label": t("tabSessions")
+          },
+          props.sessions.map((session) => {
+            const active = selected.has(session.id);
+            return /* @__PURE__ */ import_react4.default.createElement(
+              "button",
+              {
+                key: session.id,
+                type: "button",
+                role: props.multi ? "checkbox" : "radio",
+                "aria-checked": active,
+                className: "tln-session-item",
+                "data-active": active ? "true" : "false",
+                disabled: props.busy,
+                onClick: () => props.onToggle(session.id)
+              },
+              /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-session-mark", "aria-hidden": "true" }, active ? "\u2713" : ""),
+              /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-session-text" }, /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-session-title" }, session.title), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-session-meta" }, sessionMeta(t, session)))
+            );
+          })
+        ) : props.unavailable || props.loading ? null : /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-session-empty" }, t("sessionEmpty")), /* @__PURE__ */ import_react4.default.createElement(Row, { label: props.manualLabel, hint: t("sessionManualHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: props.manual,
+            disabled: props.busy,
+            placeholder: "session-xxxxxxxx",
+            onCommit: props.onManual
+          }
+        )));
+      }
       function SessionsTab(props) {
         const { t, draft } = props;
+        const picker = props.sessionPicker;
+        const filter = parseSessionFilter(draft.sessionFilter);
+        const toggleFilter = (sessionId) => {
+          const next = filter.includes(sessionId) ? filter.filter((item) => item !== sessionId) : [...filter, sessionId];
+          props.onChange({ sessionFilter: formatSessionFilter(next) });
+        };
         return /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("tabSessions"), hint: t("scopeHint") }, /* @__PURE__ */ import_react4.default.createElement(
           Seg,
           {
@@ -2855,19 +2893,65 @@ window.__ModuleLoader__.load({
             ariaLabel: t("tabSessions"),
             options: [
               { value: "all", label: t("scopeAll") },
+              { value: "single", label: t("scopeSingle") },
               { value: "filter", label: t("scopeFilter") }
             ],
             onChange: (value) => props.onChange({ sessionScope: value })
           }
-        )), draft.sessionScope === "filter" ? /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("sessionFilter"), hint: t("sessionFilterHint") }, /* @__PURE__ */ import_react4.default.createElement(
-          TextArea,
+        )), draft.sessionScope === "all" ? /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("scopeAllHint")) : null, draft.sessionScope === "single" ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(
+          SessionList,
           {
-            value: draft.sessionFilter,
-            disabled: props.busy,
-            rows: 4,
-            onCommit: (value) => props.onChange({ sessionFilter: value })
+            t,
+            sessions: picker.sessions,
+            unavailable: picker.unavailable,
+            loading: picker.loading,
+            busy: props.busy,
+            selected: draft.sessionId ? [draft.sessionId] : [],
+            multi: false,
+            onReload: picker.onReload,
+            onToggle: (sessionId) => props.onChange({ sessionId: draft.sessionId === sessionId ? "" : sessionId }),
+            manual: draft.sessionId,
+            onManual: (value) => props.onChange({ sessionId: value.trim() }),
+            manualLabel: t("sessionId")
           }
-        )) : null);
+        ), draft.sessionId ? /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("scopeSingleBound", { id: draft.sessionId })) : /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "warn" }, t("scopeSingleUnbound"))) : null, draft.sessionScope === "filter" ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(
+          SessionList,
+          {
+            t,
+            sessions: picker.sessions,
+            unavailable: picker.unavailable,
+            loading: picker.loading,
+            busy: props.busy,
+            selected: filter,
+            multi: true,
+            onReload: picker.onReload,
+            onToggle: toggleFilter,
+            manual: draft.sessionFilter,
+            onManual: (value) => props.onChange({ sessionFilter: value }),
+            manualLabel: t("sessionFilter")
+          }
+        ), /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("sessionFilterHint"))) : null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("historyTurns"), hint: t("historyTurnsHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Seg,
+          {
+            value: draft.historyTurns === null ? "global" : "custom",
+            disabled: props.busy,
+            ariaLabel: t("historyTurns"),
+            options: [
+              { value: "global", label: t("followGlobal") },
+              { value: "custom", label: t("custom") }
+            ],
+            onChange: (value) => props.onChange({ historyTurns: value === "global" ? null : 3 })
+          }
+        )), draft.historyTurns === null ? /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("historyFollowGlobal", { n: picker.globalTurns })) : /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("historyTurnsCount") }, /* @__PURE__ */ import_react4.default.createElement(
+          NumInput,
+          {
+            value: draft.historyTurns,
+            min: 0,
+            max: 20,
+            disabled: props.busy,
+            onCommit: (value) => props.onChange({ historyTurns: value })
+          }
+        )));
       }
       function AdvancedTab(props) {
         const { t, draft } = props;
@@ -2964,7 +3048,8 @@ window.__ModuleLoader__.load({
         "bind",
         "provision.begin",
         "provision.poll",
-        "provision.cancel"
+        "provision.cancel",
+        "sessions.list"
       ]);
       function rpcEndpoint(method) {
         return `${RPC_ENDPOINT_PREFIX}/${method}`;
@@ -3064,6 +3149,9 @@ window.__ModuleLoader__.load({
         const [test, setTest] = import_react5.default.useState(void 0);
         const [provision, setProvision] = import_react5.default.useState(void 0);
         const [secretEpoch, setSecretEpoch] = import_react5.default.useState(0);
+        const [sessions, setSessions] = import_react5.default.useState([]);
+        const [sessionsUnavailable, setSessionsUnavailable] = import_react5.default.useState(void 0);
+        const [sessionsLoading, setSessionsLoading] = import_react5.default.useState(true);
         const applyState = import_react5.default.useCallback((next, force = false) => {
           setState(next);
           setDrafts(
@@ -3089,6 +3177,27 @@ window.__ModuleLoader__.load({
         import_react5.default.useEffect(() => {
           void reload();
         }, [reload]);
+        const loadSessions = import_react5.default.useCallback(async () => {
+          setSessionsLoading(true);
+          try {
+            const result = await rpc.call("sessions.list");
+            if (!result.ok) {
+              setSessions([]);
+              setSessionsUnavailable(result.error.message);
+              return;
+            }
+            setSessions(result.value.sessions);
+            setSessionsUnavailable(result.value.unavailable);
+          } catch (error2) {
+            setSessions([]);
+            setSessionsUnavailable(error2 instanceof Error ? error2.message : String(error2));
+          } finally {
+            setSessionsLoading(false);
+          }
+        }, [rpc]);
+        import_react5.default.useEffect(() => {
+          void loadSessions();
+        }, [loadSessions]);
         import_react5.default.useEffect(() => {
           if (!flash) return;
           const timer = window.setTimeout(() => setFlash(void 0), 2200);
@@ -3317,6 +3426,13 @@ window.__ModuleLoader__.load({
             qr,
             test,
             provision,
+            sessionPicker: {
+              sessions,
+              unavailable: sessionsUnavailable,
+              onReload: () => void loadSessions(),
+              loading: sessionsLoading,
+              globalTurns: config.session.context.previousTurns
+            },
             onChange: (next) => commitChannels(next),
             onAdd: addChannel,
             onSecret: saveSecret,
@@ -3629,8 +3745,24 @@ window.__ModuleLoader__.load({
         followGlobalHint: "\u7528\u5168\u5C40\u7684\u300C\u63A8\u54EA\u4E9B\u4E8B\u4EF6\u300D\u4E0E\u300C\u6B63\u6587\u5185\u5BB9\u300D\u3002",
         customHint: "\u8FD9\u4E00\u4E2A\u673A\u5668\u4EBA\u5355\u72EC\u8BBE\u7F6E\uFF0C\u4E0B\u9762\u7684\u5F00\u5173\u53EA\u5F71\u54CD\u5B83\u3002",
         scopeAll: "\u5173\u5FC3\u5168\u90E8\u4F1A\u8BDD",
+        scopeSingle: "\u53EA\u5173\u5FC3\u4E00\u4E2A\u4F1A\u8BDD",
         scopeFilter: "\u53EA\u5173\u5FC3\u5217\u8868\u91CC\u7684\u4F1A\u8BDD",
-        scopeHint: "\u300C\u5173\u5FC3\u5168\u90E8\u4F1A\u8BDD\u300D\uFF1D\u6240\u6709\u4F1A\u8BDD\u7684\u4E8B\u4EF6\u90FD\u63A8\u7ED9\u5B83\uFF1B\u300C\u53EA\u5173\u5FC3\u5217\u8868\u300D\uFF1D\u53EA\u63A8\u4E0B\u9762\u5217\u51FA\u7684\u4F1A\u8BDD\u3002",
+        scopeHint: "\u4E09\u6863\u4EFB\u9009\uFF1A\u5168\u90E8\u4F1A\u8BDD / \u53EA\u63A8\u4E00\u4E2A\u4F1A\u8BDD\uFF08\u4E0B\u9762\u70B9\u9009\uFF0C\u53EF\u968F\u65F6\u6362\uFF09/ \u53EA\u63A8\u5217\u8868\u91CC\u52FE\u9009\u7684\u51E0\u4E2A\u3002",
+        scopeAllHint: "\u6240\u6709\u4F1A\u8BDD\u7684\u4E8B\u4EF6\u90FD\u63A8\u7ED9\u5B83\u3002",
+        scopeSingleBound: "\u53EA\u63A8\u8FD9\u4E2A\u4F1A\u8BDD\uFF1A{id}",
+        scopeSingleUnbound: "\u8FD8\u6CA1\u9009\u4F1A\u8BDD\u2014\u2014\u8FD9\u53F0\u673A\u5668\u4EBA\u73B0\u5728\u4E0D\u4F1A\u63A8\u4EFB\u4F55\u4E1C\u897F\u3002",
+        sessionId: "\u4F1A\u8BDD ID",
+        sessionCount: "{n} \u4E2A\u4F1A\u8BDD",
+        sessionLoading: "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u5217\u8868\u2026",
+        sessionReload: "\u5237\u65B0\u5217\u8868",
+        sessionEmpty: "\u4E00\u4E2A\u4F1A\u8BDD\u90FD\u8FD8\u6CA1\u6709\u3002\u5148\u53BB\u5F00\u4E00\u4E2A\u4F1A\u8BDD\uFF0C\u518D\u56DE\u6765\u9009\u3002",
+        sessionRunning: "\u8FD0\u884C\u4E2D",
+        sessionSubagent: "\u5B50 Agent",
+        sessionManualHint: "\u4ECE\u4E0A\u9762\u70B9\u9009\uFF1B\u4E5F\u53EF\u4EE5\u76F4\u63A5\u7C98\u4F1A\u8BDD id\uFF08\u5217\u8868\u8BFB\u4E0D\u5230\u65F6\u7684\u515C\u5E95\uFF09\u3002",
+        historyTurns: "\u9644\u5E26\u5386\u53F2\u8BB0\u5F55",
+        historyTurnsHint: "\u8FD9\u6761\u901A\u77E5\u8981\u4E0D\u8981\u5E26\u4E0A\u8BE5\u4F1A\u8BDD\u6700\u8FD1\u51E0\u8F6E\u7684\u63D0\u95EE\u3002",
+        historyTurnsCount: "\u8F6E\u6570\uFF080 = \u4E0D\u5E26\uFF09",
+        historyFollowGlobal: "\u8DDF\u968F\u5168\u5C40\uFF1A\u5F53\u524D {n} \u8F6E\u3002",
         groupChatId: "\u7FA4 ID",
         groupChatIdHint: "\u53EF\u9009\u3002\u586B\u4E86\u4E4B\u540E\u8FD9\u4E2A\u7FA4\u4E5F\u4F1A\u6536\u5230\u901A\u77E5\uFF08\u98DE\u4E66\u7528 chat_id\uFF0CQQ \u7528\u7FA4 openid\uFF09\u3002",
         wizard: "\u63A5\u5165\u5411\u5BFC",
@@ -3801,8 +3933,24 @@ window.__ModuleLoader__.load({
         followGlobalHint: "Use the global \u201Cwhich events\u201D and \u201Cmessage body\u201D settings.",
         customHint: "Configured for this bot alone; the switches below affect nothing else.",
         scopeAll: "All sessions",
+        scopeSingle: "One session",
         scopeFilter: "Only the listed sessions",
-        scopeHint: "\u201CAll sessions\u201D pushes every session to this bot; \u201COnly the listed sessions\u201D pushes just the ids below.",
+        scopeHint: "Pick one: every session; a single session (choose below, switch any time); or a checked list.",
+        scopeAllHint: "Every session is pushed to this bot.",
+        scopeSingleBound: "Pushes only this session: {id}",
+        scopeSingleUnbound: "No session chosen yet \u2014 this bot will push nothing.",
+        sessionId: "Session id",
+        sessionCount: "{n} sessions",
+        sessionLoading: "Loading sessions\u2026",
+        sessionReload: "Refresh list",
+        sessionEmpty: "No sessions yet. Start a session and come back.",
+        sessionRunning: "running",
+        sessionSubagent: "subagent",
+        sessionManualHint: "Pick above, or paste a session id (fallback when the list is unavailable).",
+        historyTurns: "Include history",
+        historyTurnsHint: "Whether this notification carries recent turns of that session.",
+        historyTurnsCount: "Turns (0 = none)",
+        historyFollowGlobal: "Following global: {n} turns.",
         groupChatId: "Group id",
         groupChatIdHint: "Optional. When set, that group is notified too (chat_id on Feishu, group openid on QQ).",
         wizard: "Setup guide",
@@ -4118,6 +4266,63 @@ window.__ModuleLoader__.load({
       padding: 0 12px 12px;
     }
     .tln-caret { flex: none; color: var(--dsw-alias-label-tertiary, #8a8a8a); font-size: 12px; }
+    
+    /* \u300C\u4F1A\u8BDD\u8FC7\u6EE4\u300D\u91CC\u7684\u4F1A\u8BDD\u6E05\u5355\uFF1A\u4E00\u5C4F\u80FD\u70B9\u9009\uFF0C\u6EDA\u4E0D\u52A8\u4E5F\u80FD\u624B\u586B\u3002 */
+    .tln-sessions { display: flex; flex-direction: column; gap: 8px; }
+    .tln-sessions-head { display: flex; align-items: center; gap: 8px; }
+    .tln-sessions-list {
+      display: flex;
+      flex-direction: column;
+      max-height: 260px;
+      overflow-y: auto;
+      border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+      border-radius: 8px;
+    }
+    .tln-session-item {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      padding: 7px 10px;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.14));
+      cursor: pointer;
+    }
+    .tln-session-item:last-child { border-bottom: none; }
+    .tln-session-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08)); }
+    .tln-session-item[data-active='true'] { background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14)); }
+    .tln-session-item:disabled { cursor: default; opacity: .6; }
+    .tln-session-mark {
+      flex: none;
+      width: 14px;
+      color: var(--dsw-alias-state-business-primary, #2f7d32);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .tln-session-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .tln-session-title {
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tln-session-meta {
+      color: var(--dsw-alias-label-tertiary, #8a8a8a);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tln-session-empty {
+      padding: 10px;
+      color: var(--dsw-alias-label-tertiary, #8a8a8a);
+      font-size: 12px;
+      border: 1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.32));
+      border-radius: 8px;
+    }
     
     .tln-subpage { display: flex; flex-direction: column; gap: 12px; }
     .tln-subpage-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }

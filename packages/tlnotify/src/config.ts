@@ -301,14 +301,20 @@ const ChannelSchema = Schema.object({
     .default('open_id')
     .description('飞书 receive_id_type'),
   mode: Schema.union(['active', 'passive'] as const).default('active').description('投递模式'),
-  sessionFilter: Schema.array(Schema.string()).default([]).description('只推这些会话；留空 = 全部'),
   bindUrl: Schema.string()
     .default('')
     .description('扫码绑定用的机器人分享链接（QQ 必填；飞书可留空，由 App ID 推导）'),
   label: Schema.string().default('').description('别名，只在设置页显示；留空显示通道 id'),
-  sessionScope: Schema.union(['all', 'filter'] as const)
+  sessionScope: Schema.union(['all', 'single', 'filter'] as const)
     .default('all')
-    .description('关心全部会话（all）/ 只关心 sessionFilter 里的会话（filter）'),
+    .description('关心全部会话（all）/ 只关心绑定的那一个会话（single）/ 只关心列表里的会话（filter）'),
+  sessionId: Schema.string().default('').description('单会话模式绑定的会话 id'),
+  sessionFilter: Schema.array(Schema.string()).default([]).description('只推这些会话；留空 = 全部'),
+  historyTurns: Schema.number()
+    .min(0)
+    .max(20)
+    .step(1)
+    .description('正文附带该会话最近 N 轮历史；不填 = 跟随全局，0 = 不带'),
   overrideEvents: Schema.boolean().default(false).description('事件开关是否覆盖全局'),
   events: EventsSchema,
   overrideContent: Schema.boolean().default(false).description('正文内容是否覆盖全局'),
@@ -387,15 +393,21 @@ export function resolveChannelSettings(
 /**
  * 这台机器人是否关心该会话。
  *
- * `sessionScope` 缺省时按 `sessionFilter` 是否有值推断，保证 0.1.3 之前
- * 「留空 = 全部、填了 = 白名单」的配置继续按原意工作。
+ * 三态：`'all'` 关心全部；`'single'` 只关心 `sessionId` 绑定的那一个（还没选
+ * 会话时谁都不关心，宁可安静也别突然刷屏）；`'filter'` 只关心
+ * `sessionFilter` 列表里的。
+ *
+ * `sessionScope` 缺省时按 `sessionId` / `sessionFilter` 是否有值推断，保证旧
+ * 配置「留空 = 全部、填了 = 白名单」继续按原意工作。
  */
 export function channelCaresAboutSession(
-  channel: Pick<ChannelConfig, 'sessionScope' | 'sessionFilter'>,
+  channel: Pick<ChannelConfig, 'sessionScope' | 'sessionId' | 'sessionFilter'>,
   sessionId: string,
 ): boolean {
   const filter = Array.isArray(channel.sessionFilter) ? channel.sessionFilter : []
-  const scope = channel.sessionScope ?? (filter.length > 0 ? 'filter' : 'all')
-  if (scope !== 'filter') return true
+  const single = typeof channel.sessionId === 'string' ? channel.sessionId.trim() : ''
+  const scope = channel.sessionScope ?? (single ? 'single' : filter.length > 0 ? 'filter' : 'all')
+  if (scope === 'all') return true
+  if (scope === 'single') return single.length > 0 && single === sessionId
   return filter.includes(sessionId)
 }

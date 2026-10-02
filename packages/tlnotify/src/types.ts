@@ -264,11 +264,20 @@ export interface ChannelConfig {
   /**
    * 关心的会话范围。
    *
-   * `'all'` = **关心全局**（任何会话的事件都能投给它）；`'filter'` = 只接收
-   * `sessionFilter` 列表里的会话。缺省时按 `sessionFilter` 是否非空推断，
-   * 以保持「留空 = 全部」的老语义。
+   * `'all'` = **关心全局**（任何会话的事件都能投给它）；`'single'` = 只推
+   * `sessionId` 绑定的那一个会话；`'filter'` = 只接收 `sessionFilter` 列表里的
+   * 会话。缺省时按 `sessionId` / `sessionFilter` 是否有值推断，以保持
+   * 「留空 = 全部」的老语义。
    */
-  sessionScope?: 'all' | 'filter'
+  sessionScope?: 'all' | 'single' | 'filter'
+  /**
+   * 单会话模式绑定的会话 id（完整 id，不是短 id）。
+   *
+   * 空串 = 还没选：这时 `sessionScope === 'single'` 不会推任何会话（宁可安静，
+   * 也不要因为「没选就给全部」而突然刷屏）。设置页选定后会自动带上会话标题，
+   * 见 `ChannelSessionSummary`。
+   */
+  sessionId?: string
   /** 通道只接收这些会话的事件；`sessionScope === 'filter'` 时才生效。 */
   sessionFilter?: string[]
   /** 事件开关是否覆盖全局（false / 缺省 = 跟随全局 `config.events`）。 */
@@ -279,6 +288,13 @@ export interface ChannelConfig {
   overrideContent?: boolean
   /** 覆盖用的正文设置；仅 `overrideContent === true` 时生效。 */
   content?: ContentConfig
+  /**
+   * 正文里附上该会话最近几轮历史。
+   *
+   * 三态：`undefined` = 跟随全局 `session.context.previousTurns`；`0` = 这台
+   * 机器人**不带**历史；`N > 0` = 带最近 N 轮（上限 20）。
+   */
+  historyTurns?: number
   // ---- QQ ----
   /** 机器人 AppID（QQ 开放平台）。 */
   appId?: string

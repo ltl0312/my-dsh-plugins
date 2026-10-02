@@ -21,9 +21,11 @@ import type { Translator } from '../i18n.js'
 import { createClientRpc } from '../rpc.js'
 import type {
   BindPayload,
+  ChannelSessionSummary,
   PatchPayload,
   ProvisionSnapshot,
   QrPayload,
+  SessionListPayload,
   StatePayload,
   TestPayload,
   TlnotifyPatch,
@@ -64,6 +66,10 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
   const [test, setTest] = React.useState<TestState | undefined>(undefined)
   const [provision, setProvision] = React.useState<ProvisionState | undefined>(undefined)
   const [secretEpoch, setSecretEpoch] = React.useState(0)
+  /** 现有会话清单（「会话过滤」那一页的三档选择都靠它）。 */
+  const [sessions, setSessions] = React.useState<ChannelSessionSummary[]>([])
+  const [sessionsUnavailable, setSessionsUnavailable] = React.useState<string | undefined>(undefined)
+  const [sessionsLoading, setSessionsLoading] = React.useState(true)
 
   /**
    * `force` 无视「通道 id 集合没变就保留本地草稿」的短路。
@@ -99,6 +105,35 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
   React.useEffect(() => {
     void reload()
   }, [reload])
+
+  /**
+   * 拉一次会话清单。
+   *
+   * 宿主那边读不到会话服务时**不算失败**：它会回一条 `unavailable` 说明，页面照常
+   * 显示，并把手填会话 id 的输入框留在原地。这里只用 try/catch 兜住传输层异常。
+   */
+  const loadSessions = React.useCallback(async (): Promise<void> => {
+    setSessionsLoading(true)
+    try {
+      const result = await rpc.call<SessionListPayload>('sessions.list')
+      if (!result.ok) {
+        setSessions([])
+        setSessionsUnavailable(result.error.message)
+        return
+      }
+      setSessions(result.value.sessions)
+      setSessionsUnavailable(result.value.unavailable)
+    } catch (error) {
+      setSessions([])
+      setSessionsUnavailable(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSessionsLoading(false)
+    }
+  }, [rpc])
+
+  React.useEffect(() => {
+    void loadSessions()
+  }, [loadSessions])
 
   React.useEffect(() => {
     if (!flash) return
@@ -436,6 +471,13 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
         qr={qr}
         test={test}
         provision={provision}
+        sessionPicker={{
+          sessions,
+          unavailable: sessionsUnavailable,
+          onReload: () => void loadSessions(),
+          loading: sessionsLoading,
+          globalTurns: config.session.context.previousTurns,
+        }}
         onChange={(next) => commitChannels(next)}
         onAdd={addChannel}
         onSecret={saveSecret}

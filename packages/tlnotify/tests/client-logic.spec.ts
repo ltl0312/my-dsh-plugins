@@ -40,6 +40,8 @@ const FULL_VIEW: ChannelView = {
   feishuAppSecret: { configured: false, hint: '' },
   label: '主机器人',
   sessionScope: 'filter',
+  sessionId: 'abcdef12-0000-0000-0000-000000000000',
+  historyTurns: 2,
   overrideEvents: false,
   events: {
     onTurnEnd: true,
@@ -141,6 +143,34 @@ describe('toPatch', () => {
   it('toChannelPatches 与草稿等长同序', () => {
     const patches = toChannelPatches([toDraft(FULL_VIEW), createDraft('feishu', ['qq-main'], GLOBAL)])
     expect(patches.map((p) => p.id)).toEqual(['qq-main', 'feishu-1'])
+  })
+})
+
+describe('会话范围三档与历史轮数（草稿模型）', () => {
+  it('createDraft 默认关心全部会话、还没绑会话、历史跟随全局', () => {
+    const draft = createDraft('qq', [], GLOBAL)
+    expect(draft.sessionScope).toBe('all')
+    expect(draft.sessionId).toBe('')
+    expect(draft.historyTurns).toBeNull()
+  })
+
+  it('historyTurns 三态原样送出：null＝跟随全局，0＝不带历史，N＝N 轮', () => {
+    expect(toPatch({ ...toDraft(FULL_VIEW), historyTurns: null }).historyTurns).toBeNull()
+    expect(toPatch({ ...toDraft(FULL_VIEW), historyTurns: 0 }).historyTurns).toBe(0)
+    expect(toPatch({ ...toDraft(FULL_VIEW), historyTurns: 5 }).historyTurns).toBe(5)
+  })
+
+  it('单会话绑定往返一圈：sessionId trim 后带出，档位跟着走', () => {
+    const draft = { ...toDraft(FULL_VIEW), sessionScope: 'single' as const, sessionId: '  session-a  ' }
+    expect(toPatch(draft).sessionScope).toBe('single')
+    expect(toPatch(draft).sessionId).toBe('session-a')
+  })
+
+  it('historyTurns 从协议读回：数字照抄；缺键＝跟随全局（null，不是 0）', () => {
+    expect(toDraft(FULL_VIEW).historyTurns).toBe(2)
+    expect(toDraft({ ...FULL_VIEW, historyTurns: 0 }).historyTurns).toBe(0)
+    // 「跟随全局」在协议里就是**没有这个键**；读成 0 会让用户一进页面就被改成不带历史。
+    expect(toDraft({ ...FULL_VIEW, historyTurns: undefined }).historyTurns).toBeNull()
   })
 })
 

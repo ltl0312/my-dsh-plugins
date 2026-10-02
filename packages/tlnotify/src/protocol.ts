@@ -69,6 +69,8 @@ export type RpcMethod =
   | 'provision.begin'
   | 'provision.poll'
   | 'provision.cancel'
+  // 设置页「选会话」用：列出现有会话（带标题/目录/最近活动）。
+  | 'sessions.list'
 
 /** 方法清单，宿主用它做白名单（未知方法直接拒绝，不进业务分支）。 */
 export const RPC_METHODS: readonly RpcMethod[] = Object.freeze([
@@ -80,6 +82,7 @@ export const RPC_METHODS: readonly RpcMethod[] = Object.freeze([
   'provision.begin',
   'provision.poll',
   'provision.cancel',
+  'sessions.list',
 ] as const)
 
 /**
@@ -145,8 +148,10 @@ export interface RedactedChannel {
   enabled: boolean
   /** 别名；空串表示界面回退到 `id`。 */
   label: string
-  /** 关心全部会话 / 只关心 `sessionFilter` 列表。 */
-  sessionScope: 'all' | 'filter'
+  /** 关心全部会话 / 只关心绑定的那一个 / 只关心列表里的。 */
+  sessionScope: 'all' | 'single' | 'filter'
+  /** 单会话模式绑定的会话 id；空串 = 还没选。 */
+  sessionId: string
   sessionFilter: string[]
   /**
    * 事件开关是否覆盖全局。
@@ -159,6 +164,13 @@ export interface RedactedChannel {
   events: EventsConfig
   overrideContent: boolean
   content: ContentConfig
+  /**
+   * 正文附带该会话最近几轮历史。
+   *
+   * **缺省（`undefined`）表示跟随全局** `config.session.context.previousTurns`；
+   * 设置页靠这个区分「跟随全局」和「显式 0 轮（这台机器人不带历史）」。
+   */
+  historyTurns?: number
   appId?: string
   targetChatId?: string
   groupChatId?: string
@@ -266,8 +278,14 @@ export interface ChannelPatch {
   type?: 'qq' | 'feishu'
   enabled?: boolean
   label?: string | null
-  sessionScope?: 'all' | 'filter'
+  sessionScope?: 'all' | 'single' | 'filter'
+  /** 单会话模式绑定的会话 id；空串 / `null` = 清空（清空后单会话模式谁都不推）。 */
+  sessionId?: string | null
   sessionFilter?: string[]
+  /**
+   * 正文附带的历史轮数。`null` = 回到「跟随全局」，`0` = 这台机器人不带历史。
+   */
+  historyTurns?: number | null
   overrideEvents?: boolean
   /** `null` = 丢掉这份覆盖（同时把 `overrideEvents` 复位成 false）。 */
   events?: EventsConfig | null
@@ -471,6 +489,46 @@ export interface ProvisionPollRequest extends ProvisionRequest {
 }
 
 // ---------------------------------------------------------------------------
+// 会话列表（每机器人绑定会话用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 设置页「选会话」里的一行。
+ *
+ * 标题的回退顺序在宿主里就算好（会话标题 → 项目目录名 → 会话 id），设置页直接
+ * 显示 `title`，不必自己再推一遍；`project` / `cwd` / `updatedAt` 是给用户确认
+ * 「选的是哪个会话」的上下文——只有 id 的话，几个会话同时开着时根本认不出来。
+ */
+export interface ChannelSessionSummary {
+  /** 完整会话 id（`sessionId` / `sessionFilter` 里存的就是它）。 */
+  id: string
+  /** 可直接显示的标题（已按上面的回退顺序算好）。 */
+  title: string
+  /** 项目目录 basename（`session.header.cwd`）。 */
+  project: string
+  /** 完整工作目录；宿主拿不到就是空串。 */
+  cwd: string
+  /** 是否是子 Agent 会话（这类会话一般不该单独绑给机器人）。 */
+  subagent: boolean
+  /** 最近活动时间戳（毫秒）；拿不到就是 0。 */
+  updatedAt: number
+  /** 此刻是否有轮次在跑。 */
+  running: boolean
+}
+
+/** `sessions.list` 的返回值。 */
+export interface SessionListPayload {
+  sessions: ChannelSessionSummary[]
+  /**
+   * 读不到会话列表时的原因（宿主没有那个服务）。
+   *
+   * 有值时 `sessions` 为空数组：设置页据此提示「可以手填会话 id」，而不是把
+   * 「一个会话都没有」当成真的没有会话。
+   */
+  unavailable?: string
+}
+
+// ---------------------------------------------------------------------------
 // 方法 → 请求/响应 的映射
 // ---------------------------------------------------------------------------
 
@@ -483,4 +541,5 @@ export interface RpcContract {
   'provision.begin': { request: ProvisionRequest; response: ProvisionSnapshot }
   'provision.poll': { request: ProvisionPollRequest; response: ProvisionSnapshot }
   'provision.cancel': { request: ProvisionPollRequest; response: ProvisionSnapshot }
+  'sessions.list': { request: undefined; response: SessionListPayload }
 }

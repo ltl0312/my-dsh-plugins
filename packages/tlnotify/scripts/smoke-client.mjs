@@ -126,7 +126,9 @@ function stateValue() {
           enabled: true,
           label: '主机器人',
           sessionScope: 'filter',
-          sessionFilter: ['abcdef12'],
+          sessionId: '',
+          sessionFilter: ['abcdef12-0000-0000-0000-000000000000'],
+          historyTurns: 0,
           appId: '102000000',
           targetChatId: 'OPENID_XYZ',
           mode: 'active',
@@ -198,6 +200,33 @@ const fakeRpc = {
     const method = String(endpoint).replace(/^tlnotify\//, '')
     rpcCalls.push({ channel, endpoint, method, payload })
     if (method === 'state') return { ok: true, value: stateValue() }
+    if (method === 'sessions.list') {
+      return {
+        ok: true,
+        value: {
+          sessions: [
+            {
+              id: 'abcdef12-0000-0000-0000-000000000000',
+              title: '修设置页',
+              project: 'my-dsh-plugins',
+              cwd: 'D:/Code/my-dsh-plugins',
+              subagent: false,
+              updatedAt: 1_760_000_000_000,
+              running: true,
+            },
+            {
+              id: '12345678-0000-0000-0000-000000000000',
+              title: '写文档',
+              project: 'notes',
+              cwd: 'D:/notes',
+              subagent: false,
+              updatedAt: 1_759_000_000_000,
+              running: false,
+            },
+          ],
+        },
+      }
+    }
     if (method === 'patch') {
       return { ok: true, value: { applied: 'hot', changed: ['enabled'], config: stateValue().config } }
     }
@@ -437,6 +466,75 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
   check('宿主给的 qrText 被画成二维码', () => {
     assert.ok(newCard?.querySelector('.tln-qr-img svg'), '没有渲染二维码')
     assert.ok(newCard.textContent.includes('用手机 QQ 扫码创建机器人'), '没有显示扫码标题')
+  })
+}
+
+// ── 5.5 每机器人的会话范围：三档 + 从列表里点选（而不是手打 id） ──────────────
+{
+  const listCalls = rpcCalls.filter((call) => call.method === 'sessions.list')
+  check('设置页加载时就拉了会话清单（走宿主 RPC，不自己读 ctx.sessions）', () => {
+    assert.ok(listCalls.length > 0, '没有调用 sessions.list')
+    assert.equal(listCalls[0].channel, '/api')
+    assert.equal(listCalls[0].endpoint, 'tlnotify/sessions.list')
+  })
+
+  const card = container.querySelector('[data-bot-id="qq-main"]')
+  const more = [...(card?.querySelectorAll('button') ?? [])].find((b) => b.textContent === '更多设置')
+  check('卡片里能找到「更多设置」', () => assert.ok(more, '没有更多设置按钮'))
+  await clickOnce(more)
+
+  const sessionTab = [...container.querySelectorAll('.tln-tabs button')].find((b) => b.textContent === '会话过滤')
+  check('子页里有「会话过滤」页签', () => assert.ok(sessionTab, '没有会话页签'))
+  await clickOnce(sessionTab)
+
+  const rows = () => [...container.querySelectorAll('.tln-session-item')]
+  check('会话按标题列出来（带项目与最近活动，不是裸 id）', () => {
+    assert.equal(rows().length, 2, `会话行数不对：${rows().length}`)
+    const joined = rows().map((el) => el.textContent ?? '').join(' | ')
+    assert.ok(joined.includes('修设置页'), `列表里没有标题：${joined}`)
+    assert.ok(joined.includes('my-dsh-plugins'), `列表里没有项目名：${joined}`)
+  })
+
+  check('已勾选的会话被标出来（数据里存的是完整 id，不是短 id）', () => {
+    const active = rows().filter((el) => el.getAttribute('data-active') === 'true')
+    assert.equal(active.length, 1, `选中行数不对：${active.length}`)
+    assert.ok((active[0]?.textContent ?? '').includes('修设置页'), '选中的不是夹具里那条')
+  })
+
+  // 切到「只关心一个会话」：列表变单选，此时还没绑定 → 页面必须明说「谁都不推」。
+  const singleSeg = [...container.querySelectorAll('.tln-seg button')].find((b) => b.textContent === '只关心一个会话')
+  check('会话范围是三档，其中包含「只关心一个会话」', () => assert.ok(singleSeg, '没有单会话档'))
+  await clickOnce(singleSeg)
+
+  check('还没绑定会话时明说「什么都不会推」', () => {
+    assert.ok(text().includes('还没选会话'), `没有未绑定提醒：${text().slice(-260)}`)
+  })
+
+  const second = rows().find((el) => (el.textContent ?? '').includes('写文档'))
+  check('单会话档下能点选另一条会话', () => assert.ok(second, '没有第二条会话'))
+  await clickOnce(second)
+
+  const channelPatch = () =>
+    rpcCalls
+      .filter((call) => call.method === 'patch')
+      .map((call) => (call.payload.patch.channels ?? [])[0])
+      .filter(Boolean)
+      .pop()
+  check('点一条会话就发出「这份草稿」的 patch（sessionScope + 完整 sessionId）', () => {
+    const sent = channelPatch()
+    assert.ok(sent, '没有发出通道 patch')
+    assert.equal(sent.sessionScope, 'single')
+    assert.equal(sent.sessionId, '12345678-0000-0000-0000-000000000000')
+  })
+
+  // 历史轮数：夹具给的是 0（显式「不带」），点「跟随全局」要发出 null（删除覆盖）。
+  const followSeg = [...container.querySelectorAll('.tln-seg button')].find((b) => b.textContent === '跟随全局')
+  check('历史轮数有「跟随全局 / 自定义」两档', () => assert.ok(followSeg, '没有跟随全局档'))
+  await clickOnce(followSeg)
+  check('切回「跟随全局」发出 historyTurns: null（而不是 0）', () => {
+    const sent = channelPatch()
+    assert.ok(sent, '没有发出通道 patch')
+    assert.equal(sent.historyTurns, null)
   })
 }
 

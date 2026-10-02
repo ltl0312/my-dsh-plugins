@@ -24,9 +24,9 @@ import type {
   ChannelView,
   FeishuReceiveIdType,
 } from '../draft.js'
-import { FEISHU_RECEIVE_ID_TYPES, draftTitle } from '../draft.js'
+import { FEISHU_RECEIVE_ID_TYPES, draftTitle, formatSessionFilter, parseSessionFilter } from '../draft.js'
 import type { Translator } from '../i18n.js'
-import type { ProvisionSnapshot, QrPayload } from '../../protocol.js'
+import type { ChannelSessionSummary, ProvisionSnapshot, QrPayload } from '../../protocol.js'
 
 /** 二维码绑定的界面状态。 `phase === 'waiting'` 时页面在轮询 `bind`。 */
 export interface QrState {
@@ -53,6 +53,30 @@ export interface ProvisionState {
 export type SecretFieldName = 'appSecret' | 'feishuAppSecret'
 export type BotTab = 'rules' | 'sessions' | 'advanced'
 
+/**
+ * 「选会话」三件套。
+ *
+ * 单独打包成一个 prop，是因为它要穿过 卡片 → 子页 → 会话页 三层，而这三层
+ * 不关心它内部是什么；三层各自加三个 prop 只会让中转代码越长越容易漏。
+ */
+export interface SessionPickerProps {
+  /** 宿主列出的现有会话；空数组 + `unavailable` 有值＝列不出来。 */
+  sessions: readonly ChannelSessionSummary[]
+  /** 读不到会话列表的原因（有值就在界面上提示「可以手填」）。 */
+  unavailable: string | undefined
+  /** 重新拉一次列表。 */
+  onReload: () => void
+  /** 列表是否正在路上。 */
+  loading: boolean
+  /**
+   * 全局的历史轮数。
+   *
+   * 放在这里是因为这一页唯一用到它的地方就是「跟随全局」那句提示——用户得能看见
+   * 自己跟的是几轮，否则「跟随全局」是个看不见的黑盒。
+   */
+  globalTurns: number
+}
+
 export interface ChannelPanelProps {
   t: Translator
   drafts: readonly ChannelDraft[]
@@ -67,6 +91,8 @@ export interface ChannelPanelProps {
   qr: QrState | undefined
   test: TestState | undefined
   provision: ProvisionState | undefined
+  /** 「选会话」用的会话清单（三档会话范围里的后两档都要它）。 */
+  sessionPicker: SessionPickerProps
   onChange: (next: readonly ChannelDraft[]) => void
   /** `provision=true` 表示这是一次「扫码接入」：造完卡马上开始扫码。 */
   onAdd: (type: ChannelType, provision: boolean) => void
@@ -134,6 +160,7 @@ export function ChannelPanel(props: ChannelPanelProps): React.ReactElement {
           secretEpoch={props.secretEpoch}
           isDefault={props.defaultChannelId === openBot.id}
           tab={subTab}
+          sessionPicker={props.sessionPicker}
           onTab={setSubTab}
           onChange={(patch) => update(openBot.id, patch)}
           onSecret={props.onSecret}
@@ -183,6 +210,7 @@ export function ChannelPanel(props: ChannelPanelProps): React.ReactElement {
               provision={
                 props.provision && props.provision.channelId === draft.id ? props.provision : undefined
               }
+              sessionPicker={props.sessionPicker}
               onChange={(patch) => update(draft.id, patch)}
               onSecret={props.onSecret}
               onDefault={props.onDefault}
@@ -221,6 +249,7 @@ interface BotCardProps {
   qr: QrState | undefined
   test: TestState | undefined
   provision: ProvisionState | undefined
+  sessionPicker: SessionPickerProps
   onChange: (patch: Partial<ChannelDraft>) => void
   onSecret: (id: string, field: SecretFieldName, value: string) => void
   onDefault: (id: string | null) => void
@@ -540,6 +569,7 @@ interface BotSettingsPageProps {
   secretEpoch: number
   isDefault: boolean
   tab: BotTab
+  sessionPicker: SessionPickerProps
   onTab: (tab: BotTab) => void
   onChange: (patch: Partial<ChannelDraft>) => void
   onSecret: (id: string, field: SecretFieldName, value: string) => void
@@ -677,8 +707,113 @@ function RulesTab(props: BotSettingsPageProps): React.ReactElement {
   )
 }
 
+/** 一行的副标题：项目目录 · 最近活动（能看出是哪天的会话）。 */
+function sessionMeta(t: Translator, session: ChannelSessionSummary): string {
+  const parts: string[] = []
+  if (session.project) parts.push(session.project)
+  if (session.updatedAt > 0) parts.push(new Date(session.updatedAt).toLocaleString())
+  if (session.running) parts.push(t('sessionRunning'))
+  if (session.subagent) parts.push(t('sessionSubagent'))
+  return parts.join(' · ')
+}
+
+/**
+ * 会话清单：一套渲染，三种用法。
+ *
+ * `multi=false` 是单选（点一行就绑定它，再点一次取消），`multi=true` 是多选
+ * （点一行加/减）。两种模式都保留下面那个手填输入框：列表读不到、或者要绑一个
+ * 还没出现在列表里的会话时，手填是唯一出路——所以它不是「高级选项」，是兜底。
+ */
+function SessionList(props: {
+  t: Translator
+  sessions: readonly ChannelSessionSummary[]
+  unavailable: string | undefined
+  loading: boolean
+  busy: boolean
+  /** 已选中的会话 id。 */
+  selected: readonly string[]
+  multi: boolean
+  onReload: () => void
+  onToggle: (sessionId: string) => void
+  /** 手填输入框的值与提交。 */
+  manual: string
+  onManual: (value: string) => void
+  manualLabel: string
+}): React.ReactElement {
+  const { t } = props
+  const selected = new Set(props.selected)
+  return (
+    <div className="tln-sessions">
+      <div className="tln-sessions-head">
+        <span className="tln-hint">
+          {props.loading ? t('sessionLoading') : t('sessionCount', { n: props.sessions.length })}
+        </span>
+        <span className="tln-spacer" />
+        <Btn size="sm" disabled={props.busy || props.loading} onClick={props.onReload}>
+          {t('sessionReload')}
+        </Btn>
+      </div>
+
+      {props.unavailable ? <Note tone="warn">{props.unavailable}</Note> : null}
+
+      {props.sessions.length > 0 ? (
+        <div
+          className="tln-sessions-list"
+          role={props.multi ? 'group' : 'radiogroup'}
+          aria-label={t('tabSessions')}
+        >
+          {props.sessions.map((session) => {
+            const active = selected.has(session.id)
+            return (
+              <button
+                key={session.id}
+                type="button"
+                role={props.multi ? 'checkbox' : 'radio'}
+                aria-checked={active}
+                className="tln-session-item"
+                data-active={active ? 'true' : 'false'}
+                disabled={props.busy}
+                onClick={() => props.onToggle(session.id)}
+              >
+                <span className="tln-session-mark" aria-hidden="true">
+                  {active ? '✓' : ''}
+                </span>
+                <span className="tln-session-text">
+                  <span className="tln-session-title">{session.title}</span>
+                  <span className="tln-session-meta">{sessionMeta(t, session)}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      ) : props.unavailable || props.loading ? null : (
+        <div className="tln-session-empty">{t('sessionEmpty')}</div>
+      )}
+
+      <Row label={props.manualLabel} hint={t('sessionManualHint')}>
+        <TextInput
+          value={props.manual}
+          disabled={props.busy}
+          placeholder="session-xxxxxxxx"
+          onCommit={props.onManual}
+        />
+      </Row>
+    </div>
+  )
+}
+
 function SessionsTab(props: BotSettingsPageProps): React.ReactElement {
   const { t, draft } = props
+  const picker = props.sessionPicker
+  const filter = parseSessionFilter(draft.sessionFilter)
+
+  const toggleFilter = (sessionId: string): void => {
+    const next = filter.includes(sessionId)
+      ? filter.filter((item) => item !== sessionId)
+      : [...filter, sessionId]
+    props.onChange({ sessionFilter: formatSessionFilter(next) })
+  }
+
   return (
     <React.Fragment>
       <Row label={t('tabSessions')} hint={t('scopeHint')}>
@@ -688,21 +823,89 @@ function SessionsTab(props: BotSettingsPageProps): React.ReactElement {
           ariaLabel={t('tabSessions')}
           options={[
             { value: 'all' as const, label: t('scopeAll') },
+            { value: 'single' as const, label: t('scopeSingle') },
             { value: 'filter' as const, label: t('scopeFilter') },
           ]}
           onChange={(value) => props.onChange({ sessionScope: value })}
         />
       </Row>
+
+      {draft.sessionScope === 'all' ? <p className="tln-hint">{t('scopeAllHint')}</p> : null}
+
+      {draft.sessionScope === 'single' ? (
+        <React.Fragment>
+          <SessionList
+            t={t}
+            sessions={picker.sessions}
+            unavailable={picker.unavailable}
+            loading={picker.loading}
+            busy={props.busy}
+            selected={draft.sessionId ? [draft.sessionId] : []}
+            multi={false}
+            onReload={picker.onReload}
+            // 再点一次同一个会话＝取消绑定（回到「还没选」，此时谁都不推）。
+            onToggle={(sessionId) =>
+              props.onChange({ sessionId: draft.sessionId === sessionId ? '' : sessionId })
+            }
+            manual={draft.sessionId}
+            onManual={(value) => props.onChange({ sessionId: value.trim() })}
+            manualLabel={t('sessionId')}
+          />
+          {draft.sessionId ? (
+            <p className="tln-hint">
+              {t('scopeSingleBound', { id: draft.sessionId })}
+            </p>
+          ) : (
+            <Note tone="warn">{t('scopeSingleUnbound')}</Note>
+          )}
+        </React.Fragment>
+      ) : null}
+
       {draft.sessionScope === 'filter' ? (
-        <Row label={t('sessionFilter')} hint={t('sessionFilterHint')}>
-          <TextArea
-            value={draft.sessionFilter}
+        <React.Fragment>
+          <SessionList
+            t={t}
+            sessions={picker.sessions}
+            unavailable={picker.unavailable}
+            loading={picker.loading}
+            busy={props.busy}
+            selected={filter}
+            multi
+            onReload={picker.onReload}
+            onToggle={toggleFilter}
+            manual={draft.sessionFilter}
+            onManual={(value) => props.onChange({ sessionFilter: value })}
+            manualLabel={t('sessionFilter')}
+          />
+          <p className="tln-hint">{t('sessionFilterHint')}</p>
+        </React.Fragment>
+      ) : null}
+
+      <Row label={t('historyTurns')} hint={t('historyTurnsHint')}>
+        <Seg
+          value={draft.historyTurns === null ? 'global' : 'custom'}
+          disabled={props.busy}
+          ariaLabel={t('historyTurns')}
+          options={[
+            { value: 'global' as const, label: t('followGlobal') },
+            { value: 'custom' as const, label: t('custom') },
+          ]}
+          onChange={(value) => props.onChange({ historyTurns: value === 'global' ? null : 3 })}
+        />
+      </Row>
+      {draft.historyTurns === null ? (
+        <p className="tln-hint">{t('historyFollowGlobal', { n: picker.globalTurns })}</p>
+      ) : (
+        <Row label={t('historyTurnsCount')}>
+          <NumInput
+            value={draft.historyTurns}
+            min={0}
+            max={20}
             disabled={props.busy}
-            rows={4}
-            onCommit={(value) => props.onChange({ sessionFilter: value })}
+            onCommit={(value) => props.onChange({ historyTurns: value })}
           />
         </Row>
-      ) : null}
+      )}
     </React.Fragment>
   )
 }

@@ -82,6 +82,7 @@ import {
   RPC_ROUTE_PREFIX,
   rpcRoutePath,
   type BindPayload,
+  type ChannelSessionSummary,
   type PatchPayload,
   type PendingBind,
   type ProvisionSnapshot,
@@ -90,6 +91,7 @@ import {
   type RpcRequestEnvelope,
   type RpcResponseEnvelope,
   type RpcResult,
+  type SessionListPayload,
   type StatePayload,
   type TestPayload,
 } from './protocol.js'
@@ -135,6 +137,21 @@ const SEEN_INBOUND_LIMIT = 800
  * 落空，设置页永远停在「正在读取配置…」。`tests/install-rpc.spec.ts` 现在锁死这一点。
  */
 const CONNECTION_SERVICE = 'connection'
+
+/**
+ * 宿主「会话清单」服务的名字（设置页「选会话」用）。
+ *
+ * 出处：`@deepseek-ai/dsh-api-session-controller/lib/index.js:2847`
+ * `super(ctx, "sessionController", { namespace: "session" })`；同文件 `:2954` 的
+ * `async list(_request, signal) { return { items: await this.listState.list(signal) } }`
+ * 是**本进程内的真实实现**（不是远程桩），所以能直接调它的 `list()`。
+ * 官方生态里 dsh-im 的宿主也是注入这两个服务（`plugin-src/host/index.mjs:110`
+ * `['sessionController', 'workspaceController']`）。
+ *
+ * 与 `connection` 一样**不进插件级 `inject`**：那是激活门，headless 或不带这套
+ * 服务的部署会整插件不激活。取不到就是「列不出会话」，设置页退回手填会话 id。
+ */
+const SESSION_CONTROLLER_SERVICE = 'sessionController'
 
 /**
  * 取服务失败后的重试间隔。
@@ -258,6 +275,62 @@ function readConnectionFetch(ctx: TlnotifyHost): HostConnectionFetchLike | undef
   }
   const fetch = service?.fetch
   return fetch && typeof fetch.register === 'function' ? fetch : undefined
+}
+
+// ---------------------------------------------------------------------------
+// 会话列表（设置页「选会话」用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 宿主会话清单服务的最小视图。
+ *
+ * 真正的服务是 `@deepseek-ai/dsh-api-session-controller` 的 `sessionController`
+ * （`lib/index.js:2847` `super(ctx, "sessionController", { namespace: "session" })`），
+ * 它的 `list()`（`:2954`）是本进程内的真实实现、不是远程桩，所以能直接调。
+ * 官方生态里 dsh-im 也是这么注入的（`plugin-src/host/index.mjs:110`）。
+ *
+ * 只要这两样：能列出、能 await。字段一律按 `unknown` 读——这个服务是别的包提供
+ * 的，形状变了应该降级成「列不出来」，而不是让设置页整页崩掉。
+ */
+interface HostSessionControllerLike {
+  list?: (request: unknown, signal?: unknown) => unknown
+}
+
+/** 一行会话摘要（宿主侧的 `SessionSummary`，只声明我们读的那几个字段）。 */
+interface HostSessionSummaryLike {
+  sessionId?: unknown
+  updatedAt?: unknown
+  running?: unknown
+  origin?: unknown
+  cwd?: unknown
+  projections?: unknown
+}
+
+/**
+ * 安全地取宿主会话清单服务；取不到返回 `undefined`，**任何情况下都不抛**。
+ *
+ * 与 `readConnectionFetch()` 同一个道理：`ctx.get` 未就绪返回 `undefined`，
+ * 属性访问取不到会抛，所以整段 try/catch。这里**不重试、不警告**——设置页点
+ * 「刷新」会重新调一次，比后台轮询更贴近实际需要。
+ */
+function readSessionController(ctx: TlnotifyHost): HostSessionControllerLike | undefined {
+  try {
+    if (typeof ctx.get !== 'function') return undefined
+    const service = ctx.get(SESSION_CONTROLLER_SERVICE) as HostSessionControllerLike | undefined
+    return service && typeof service.list === 'function' ? service : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 从 `projections.values.title` 里读标题——宿主列表行本身没有 title 字段。 */
+function sessionTitleOf(summary: HostSessionSummaryLike): string {
+  const projections = summary.projections
+  if (!projections || typeof projections !== 'object') return ''
+  const values = (projections as { values?: unknown }).values
+  if (!values || typeof values !== 'object') return ''
+  const title = (values as Record<string, unknown>).title
+  return typeof title === 'string' ? title.trim() : ''
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +720,8 @@ class Tlnotify {
           return this.#rpcProvisionPoll(payload)
         case 'provision.cancel':
           return this.#rpcProvisionCancel(payload)
+        case 'sessions.list':
+          return await this.#rpcSessionsList()
         default:
           return fail('unknown-method', `未知的设置页方法：${endpoint}`, { expected: [...RPC_METHODS] })
       }
@@ -963,6 +1038,70 @@ class Tlnotify {
   }
 
   /**
+   * 列出现有会话，供设置页「选会话」用（单会话模式绑定 / 指定多个会话）。
+   *
+   * 为什么要有这个端点：以前「指定会话」是在文本域里手打会话 id，而设置页从不
+   * 显示标题——同时开着几个会话时根本认不出哪个是哪个，选错了要到通知发出来才
+   * 发现。这里把标题、项目目录、最近活动一起给出去，界面上才谈得上「选」。
+   *
+   * 标题按 DSH 自己的回退顺序算好（会话标题 → 项目目录名 → 会话 id）：标题是
+   * 懒生成的（首条用户提问走 LLM），拿不到是常态，不能因此显示空白行。
+   *
+   * **读不到会话服务不算业务失败**：回 `ok` + `unavailable` 原因，让设置页显示
+   * 「可以手填会话 id」，而不是弹一个用户无法处理的错误。
+   */
+  async #rpcSessionsList(): Promise<RpcResult<SessionListPayload>> {
+    const controller = readSessionController(this.#host)
+    if (!controller?.list) {
+      return ok({
+        sessions: [],
+        unavailable: `宿主没有提供 ${SESSION_CONTROLLER_SERVICE} 服务，列不出会话；可以直接填会话 id。`,
+      })
+    }
+    let items: unknown
+    try {
+      const reply = (await controller.list({}, undefined)) as { items?: unknown } | undefined
+      items = reply?.items
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return ok({
+        sessions: [],
+        unavailable: `读取会话列表失败：${redactText(message)}`,
+      })
+    }
+    if (!Array.isArray(items)) {
+      return ok({ sessions: [], unavailable: '宿主返回的会话列表形状不对。' })
+    }
+
+    const sessions: ChannelSessionSummary[] = []
+    for (const entry of items) {
+      if (!entry || typeof entry !== 'object') continue
+      const summary = entry as HostSessionSummaryLike
+      const id = typeof summary.sessionId === 'string' ? summary.sessionId : ''
+      if (id.length === 0) continue
+      const cwd = typeof summary.cwd === 'string' ? summary.cwd : ''
+      const project = cwd ? projectName({ id, header: { cwd } }) : ''
+      const title = sessionTitleOf(summary)
+      sessions.push({
+        id,
+        // 三段回退：真标题 → 项目目录名 → 会话 id。
+        title: title || project || id,
+        project,
+        cwd,
+        subagent: summary.origin === 'subagent',
+        updatedAt: typeof summary.updatedAt === 'number' ? summary.updatedAt : 0,
+        running: summary.running === true,
+      })
+    }
+    // 子 Agent 会话排最后（一般不该单独绑给机器人），其余按最近活动倒序。
+    sessions.sort((a, b) => {
+      if (a.subagent !== b.subagent) return a.subagent ? 1 : -1
+      return b.updatedAt - a.updatedAt
+    })
+    return ok({ sessions })
+  }
+
+  /**
    * 扫码成功后把凭据写进配置并让通道生效。
    *
    * 由 `ProvisionManager` 调用，**抛错即等于接入失败**（它会折叠成
@@ -1223,7 +1362,9 @@ class Tlnotify {
     snapshot: TurnSnapshot | undefined,
     config: ChannelConfig,
   ): RenderOptions {
-    const wanted = Math.max(0, this.#config.session.context.previousTurns)
+    // 历史轮数是每台机器人各自的：没填就跟随全局 `session.context.previousTurns`，
+    // 填 0 表示这台机器人不带历史（用户要的是「设置页可以选择是否显示历史记录」）。
+    const wanted = Math.max(0, config.historyTurns ?? this.#config.session.context.previousTurns)
     let previousTurns = wanted > 0 ? this.#accumulator.previousTurns(sessionId, wanted + 1) : []
     // 结束类事件的快照本身就是历史里最后一条，不要既当正文又当「前 N 轮」。
     const last = previousTurns[previousTurns.length - 1]

@@ -164,6 +164,25 @@ describe('channelCaresAboutSession', () => {
     expect(channelCaresAboutSession(target, 's1')).toBe(false)
     expect(channelCaresAboutSession(target, '')).toBe(false)
   })
+
+  it("'single'：只认绑定的那个会话，别的会话与空 id 都不关心", () => {
+    const target = channel({ sessionScope: 'single', sessionId: 'session-a' })
+    expect(channelCaresAboutSession(target, 'session-a')).toBe(true)
+    expect(channelCaresAboutSession(target, 'session-b')).toBe(false)
+    expect(channelCaresAboutSession(target, '')).toBe(false)
+  })
+
+  it("'single' 但还没选会话（空 id）→ 谁都不推：宁可安静，也不要突然把全部会话刷过去", () => {
+    const target = channel({ sessionScope: 'single', sessionId: '' })
+    expect(channelCaresAboutSession(target, 'session-a')).toBe(false)
+    expect(channelCaresAboutSession(target, '')).toBe(false)
+  })
+
+  it("'single' 压过非空的 sessionFilter（用户选了「只推一个」，列表不该再起作用）", () => {
+    const target = channel({ sessionScope: 'single', sessionId: 'session-a', sessionFilter: ['session-b'] })
+    expect(channelCaresAboutSession(target, 'session-a')).toBe(true)
+    expect(channelCaresAboutSession(target, 'session-b')).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -264,7 +283,7 @@ describe('applyPatch 的每机器人字段', () => {
     })
   })
 
-  it("sessionScope 只认 'all' / 'filter'，别的值 → invalid-patch", () => {
+  it("sessionScope 只认 'all' / 'single' / 'filter'，别的值 → invalid-patch", () => {
     const result = applyPatch(configWith(channel()), { channels: [{ id: 'qq-main', sessionScope: 'none' }] })
     const error = unwrapError(result)
     expect(error.code).toBe('invalid-patch')
@@ -272,6 +291,44 @@ describe('applyPatch 的每机器人字段', () => {
 
     const ok = patchChannel(configWith(channel()), { id: 'qq-main', sessionScope: 'filter', sessionFilter: ['s1'] })
     expect(ok.sessionScope).toBe('filter')
+
+    const single = patchChannel(configWith(channel()), { id: 'qq-main', sessionScope: 'single', sessionId: 'session-a' })
+    expect(single.sessionScope).toBe('single')
+    expect(single.sessionId).toBe('session-a')
+  })
+
+  it('sessionId：空串即清空绑定（不是「留下上一次选的那个」）', () => {
+    const bound = patchChannel(configWith(channel()), { id: 'qq-main', sessionScope: 'single', sessionId: 'session-a' })
+    expect(bound.sessionId).toBe('session-a')
+
+    const cleared = patchChannel(configWith(bound), { id: 'qq-main', sessionId: '' })
+    expect(cleared.sessionId).toBeUndefined()
+  })
+
+  describe('通道级 historyTurns（三态）', () => {
+    it('null → 删掉覆盖，回到跟随全局', () => {
+      const base = configWith(channel({ historyTurns: 5 }))
+      expect(patchChannel(base, { id: 'qq-main', historyTurns: null }).historyTurns).toBeUndefined()
+    })
+
+    it('0 是合法值，且与「没设过」不是一回事（0 = 这台不带历史）', () => {
+      expect(patchChannel(configWith(channel()), { id: 'qq-main', historyTurns: 0 }).historyTurns).toBe(0)
+    })
+
+    it('-1 / 21 / 小数 / 字符串 / NaN → 全拒', () => {
+      const base = configWith(channel())
+      const bad = [-1, 21, 1.5, '3', Number.NaN, true]
+      for (const value of bad) {
+        const result = applyPatch(base, { channels: [{ id: 'qq-main', historyTurns: value }] })
+        expect(unwrapError(result).code, JSON.stringify(value)).toBe('invalid-patch')
+      }
+    })
+
+    it('关掉正文自定义（overrideContent=false）不会顺手把 historyTurns 清掉', () => {
+      const base = configWith(channel({ overrideContent: true, historyTurns: 4 }))
+      const next = patchChannel(base, { id: 'qq-main', overrideContent: false })
+      expect(next.historyTurns).toBe(4)
+    })
   })
 
   it('events / content 里出现未知键（含跨对象的键）→ invalid-patch', () => {
@@ -371,6 +428,22 @@ describe('redactChannel', () => {
     // 显式值两边的「压过」方向也要一致
     expect(redactChannel(channel({ sessionScope: 'all', sessionFilter: ['s1'] }), global).sessionScope).toBe('all')
     expect(redactChannel(channel({ sessionScope: 'filter', sessionFilter: [] }), global).sessionScope).toBe('filter')
+  })
+
+  it("'single' 的绑定 id 与 historyTurns 一并回给设置页；没设过 historyTurns 时不带这个键", () => {
+    const red = redactChannel(channel({ sessionScope: 'single', sessionId: 'session-a', historyTurns: 0 }), global)
+    expect(red.sessionScope).toBe('single')
+    expect(red.sessionId).toBe('session-a')
+    expect(red.historyTurns).toBe(0)
+
+    const follow = redactChannel(channel({ sessionScope: 'single', sessionId: 'session-a' }), global)
+    expect(follow.sessionId).toBe('session-a')
+    // 缺省＝跟随全局：必须**不带键**。带了 `0` 的话设置页会把「跟随全局」显示成「0 轮」，
+    // 用户以为自己没动过，实际已经把这台机器人改成不带历史了。
+    expect('historyTurns' in follow).toBe(false)
+
+    // 没绑会话时回空串（而不是 undefined），设置页的受控输入框才能直接吃这个值。
+    expect(redactChannel(channel(), global).sessionId).toBe('')
   })
 
   it('密钥永不出现在脱敏结果里（回归）', () => {

@@ -160,8 +160,10 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 |---|---|---|
 | `enabled` | 新建时 `false` | 该通道的开关。关掉的通道不建连、也不参与推送 |
 | `label` | `''` | 给这台机器人起的名字，只影响界面显示（配置里的键仍是 `id`） |
-| `sessionScope` | `all` | `all` 关心全局（所有会话）/ `filter` 只关心 `sessionFilter` 里列的会话 |
+| `sessionScope` | `all` | `all` 关心全局（所有会话）/ `single` 只关心 `sessionId` 那一个 / `filter` 只关心 `sessionFilter` 里列的会话 |
+| `sessionId` | `''` | 单会话模式下绑定的会话（完整 id）。**留空 = 谁都不推**：宁可安静，也不要突然把全部会话刷过去 |
 | `sessionFilter` | `[]` | 会话白名单，仅 `sessionScope: "filter"` 时生效 |
+| `historyTurns` | 跟随全局 | 这条通知带该会话最近几轮提问：`0` = 不带、`N` = 最近 N 轮（上限 20）、**省略 = 跟随全局** `session.context.previousTurns` |
 | `overrideEvents` | `false` | `false` = 事件开关跟随全局；`true` = 用本通道自己的 `events` |
 | `events` | — | 本通道的事件开关，仅 `overrideEvents: true` 时生效 |
 | `overrideContent` | `false` | `false` = 正文设置跟随全局；`true` = 用本通道自己的 `content` |
@@ -170,6 +172,14 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 `events` / `content` 的字段与顶层同名（见下面的「配置」一节）。
 手改 JSON 时注意：把 `events: null` 写回去表示**回到跟随全局**，
 不是「关掉全部事件」。
+
+`historyTurns` 是**三态**：不写这个键才是「跟随全局」，写 `0` 是「这台就是不带历史」。
+设置页的「跟随全局 / 自定义」两档对应的就是这两种写法。
+它**不挂在 `overrideContent` 下面**——关掉正文自定义不该顺手把历史也关掉。
+
+会话白名单里的 id 必须是**完整会话 id**（`519cc141-…` 那样的 UUID，不是前 8 位）：
+宿主拿事件里的完整 id 去比对，短 id 永远匹配不上。设置页的「会话过滤」页签会列出
+最近用过的会话（标题 · 项目 · 最近活动），点选即可，不用手抄 id。
 
 ---
 
@@ -284,11 +294,20 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 |---|---|---|
 | 凭据与接入 | 卡片头部 + 接入向导 | AppID、密钥、目标 id、扫码接入、测试连接、启停 |
 | 通知规则 | 更多设置 → **通知规则** | 推哪 6 类事件、正文放什么；默认**跟随全局**，可切成自定义 |
-| 会话过滤 | 更多设置 → **会话过滤** | 默认**关心全局**（所有会话），也可以只关心列表里的会话 |
+| 会话过滤 | 更多设置 → **会话过滤** | 三种范围：**所有会话** / **只关心一个会话**（可随时换）/ **只关心列表里勾选的几个**；另外还能单独决定**这条通知带不带该会话的历史** |
 
 「跟随全局」是协议里的一条明确语义：`events: null` / `content: null` 表示回到全局那一份
 （不是「关掉」），所以设置页在跟随状态下**不会**往配置里写一份会过期的副本——
 你后来改了全局开关，跟随中的机器人立刻跟着变。
+
+「会话过滤」页签会列出最近用过的会话（**真标题 · 项目 · 最近活动**，标题取不到就退到项目名，
+再取不到退到会话 id），点选即写入，不用手抄 id；读不到列表时页面上留着手填输入框兜底，
+宿主也会把「为什么读不到」写在旁边。「只关心一个会话」档下**没绑会话就等于谁都不推**，
+页面会明确写出这一点。
+
+「附带历史记录」也是每台机器人一份：`跟随全局` 用全局的
+`session.context.previousTurns`，`自定义` 写一个 0–20 的数字（`0` = 这条通知不带历史）。
+所以「全局不带历史、只有这台带 3 轮」是能表达的。
 
 `更多设置 → 高级`里还放着按机器人区分的推送方式、绑定链接、飞书接收者类型与群 ID。
 
@@ -416,6 +435,7 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 | `src/mode.ts` | `ModeState`：全局 / 单会话 / 详细名单，以及命令解析 |
 | `src/inject.ts` | `SessionInjector`（回注消息、中止会话）与 `InteractionBridge`（审批 / 提问 waterfall） |
 | `src/log.ts` | 带轮转的文件日志，失败静默 |
+| `src/provision.ts` | `ProvisionManager`：扫码创建机器人的会话（`begin` / `poll` / `cancel`），拿到凭据后回写配置 |
 | `src/channels/index.ts` | `ChannelManager`：启动 / 停止 / 发送 / 故障转移 / 分片 |
 | `src/channels/qq.ts` | QQ 单聊机器人通道 |
 | `src/channels/feishu.ts` | 飞书自建应用通道 |
@@ -443,7 +463,7 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 `react` 是唯一的 `external`——它由宿主 Web 应用提供，插件不能自带（否则 hooks 报
 invalid hook call）。
 
-### 三个值得记录的宿主事实
+### 五个值得记录的宿主事实
 
 1. **`apply` 的返回值会被丢弃**。Cordis 3.0.0 的 `MainScope.apply` 是
    `this.ensure(async () => plugin.apply(...))`，返回值直接丢掉。所以真正的卸载路径
@@ -455,6 +475,17 @@ invalid hook call）。
    `InteractionBridge` 把这两个 waterfall 桥接成「发一条 IM 消息，等按钮回来」。
 3. **不要在 agent 级监听器里 `await agent.whenIdle()`**——宿主的类型注释明确警告会死锁。
    完成门控只在 `session/event`（非 agent 事件）里查 `agent.status`。
+4. **设置页的 RPC 只能挂在 `connection.fetch.register` 上**。官方生态走的是
+   `ctx.connection.fetch.register({ path: '/api/tlnotify/<method>', methods: ['POST'], … })`，
+   而不是 `connection.rpc.handle`：后者内部要 `owner.webServer`，插件 ctx 没声明它就抛
+   （声明了又会因为 `webServer` 是激活门而让 headless 部署永不激活插件）。返回给浏览器的是
+   `connection.rpc.call('/api', 'tlnotify/<method>', payload)`。`/api` 前缀路由由
+   `dsh-client-connection` 自己挂，Host/Origin 校验与浏览器鉴权在插件 handler **之前**。
+5. **`{ patch }` 信封是宿主侧的解包责任**。契约（`src/protocol.ts`）写的是
+   `patch: { request: { patch: TlnotifyPatch } }`，设置页发的就是 `{ patch: next }`；
+   宿主必须先取 `payload.patch` 再交给 `applyPatch`。两者各自有测试，但**合起来**也要有一条
+   端到端用例（`tests/roundtrip.spec.ts`）——这个洞曾经让设置页的**每一次写入**都被白名单拒掉，
+   而页面看起来完全正常（读接口不走这条校验）。
 
 ---
 
