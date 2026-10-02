@@ -8,13 +8,14 @@
        * <svg> 负责贝塞尔连线（在节点层之下）；
        * 绝对定位的卡片负责节点本体（用 HTML 卡片而不是 SVG <text>，正文省略号、
          悬停反馈、键盘焦点环都能直接复用看板既有的样式令牌）。
-     交互：空白处拖拽平移、滚轮以指针为锚点缩放、右上角 −/+/方向切换/居中。
+     交互：空白处拖拽平移、滚轮以指针为锚点缩放、右上角 −/+/方向切换/居中
+     （「居中」有可读保底：整棵树装得下就全览居中，装不下就把根节点钉在左上角让用户拖拽看局部）。
      高亮：检索激活时，命中节点发光、未命中节点淡化，命中叶子到根的整条路径连线加粗。
      配色：全部走 style.css 的 --tlm-* 令牌层，组件内不写死任何颜色（跨源 iframe 主题自适应）。 -->
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useMemoryStore } from '../stores/memory'
-import { buildGraphLayout, type GraphLayoutNode } from '../lib/graph'
+import { buildGraphLayout, computeFitView, type GraphLayoutNode } from '../lib/graph'
 
 const props = defineProps<{ active?: boolean }>()
 const store = useMemoryStore()
@@ -25,6 +26,8 @@ const MIN_SCALE = 0.25
 const MAX_SCALE = 2.2
 /** 适配留白：一键居中时四周预留的呼吸空间 */
 const FIT_MARGIN = 24
+/** 一键居中的保底缩放：真实记忆树很宽，缩到 25% 只剩一团灰，不如保底可读、让用户拖拽看局部 */
+const READABLE_SCALE = 0.6
 
 const viewport = ref<HTMLElement | null>(null)
 const scale = ref(1)
@@ -76,21 +79,32 @@ function clampScale(value: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
 }
 
-/** 一键居中：整棵树等比缩放到可视区内并居中 */
+/** 一键居中：装得下就全览居中，装不下就保底可读并把根节点钉在左上角（详见 computeFitView） */
 function fit(): void {
   const el = viewport.value
   if (el === null) return
   const width = el.clientWidth
   const height = el.clientHeight
   if (width <= 0 || height <= 0) return
-  const contentWidth = Math.max(canvasWidth.value, 1)
-  const contentHeight = Math.max(canvasHeight.value, 1)
-  const next = clampScale(
-    Math.min((width - FIT_MARGIN * 2) / contentWidth, (height - FIT_MARGIN * 2) / contentHeight, 1),
+  const root = layout.value.nodes.find((node) => node.kind === 'root')
+  const rootRect =
+    root === undefined
+      ? { left: CANVAS_PAD, top: CANVAS_PAD, width: 0, height: 0 }
+      : {
+          left: root.x + CANVAS_PAD - root.width / 2,
+          top: root.y + CANVAS_PAD - root.height / 2,
+          width: root.width,
+          height: root.height,
+        }
+  const view = computeFitView(
+    { width, height },
+    { width: canvasWidth.value, height: canvasHeight.value },
+    rootRect,
+    { margin: FIT_MARGIN, minScale: MIN_SCALE, maxScale: MAX_SCALE, readableScale: READABLE_SCALE },
   )
-  scale.value = next
-  offsetX.value = (width - contentWidth * next) / 2
-  offsetY.value = (height - contentHeight * next) / 2
+  scale.value = view.scale
+  offsetX.value = view.offsetX
+  offsetY.value = view.offsetY
   fittedKey = scopeKey.value
 }
 

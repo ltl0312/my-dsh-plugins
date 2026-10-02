@@ -8,6 +8,7 @@ import {
   GRAPH_V_GAP,
   buildGraphLayout,
   buildGraphTree,
+  computeFitView,
   type GraphLayoutNode,
 } from './graph'
 
@@ -78,6 +79,32 @@ function assertNoOverlapY(nodes: readonly GraphLayoutNode[]): void {
       const current = sorted[index] as GraphLayoutNode
       expect(previous.y + previous.height / 2).toBeLessThanOrEqual(current.y - current.height / 2)
     }
+  }
+}
+
+/**
+ * 相邻两层不得叠压：按 depth 求出每层在该轴上的 [起始, 结束] 区间，逐层两两比较。
+ * 这是「横向重叠」那个 bug 的守门测试 —— 层厚若没按生长轴上的卡片尺寸推进，
+ * 这里会立刻炸（同一层的自重叠由 assertNoOverlap / assertNoOverlapY 覆盖）。
+ */
+function assertLevelsSeparated(nodes: readonly GraphLayoutNode[], axis: 'x' | 'y'): void {
+  const bands = new Map<number, { start: number; end: number }>()
+  for (const node of nodes) {
+    const center = axis === 'x' ? node.x : node.y
+    const half = (axis === 'x' ? node.width : node.height) / 2
+    const previous = bands.get(node.depth)
+    if (previous === undefined) {
+      bands.set(node.depth, { start: center - half, end: center + half })
+      continue
+    }
+    previous.start = Math.min(previous.start, center - half)
+    previous.end = Math.max(previous.end, center + half)
+  }
+  const depths = [...bands.keys()].sort((a, b) => a - b)
+  for (let index = 1; index < depths.length; index += 1) {
+    const previous = bands.get(depths[index - 1] as number) as { start: number; end: number }
+    const current = bands.get(depths[index] as number) as { start: number; end: number }
+    expect(previous.end).toBeLessThanOrEqual(current.start)
   }
 }
 
@@ -278,30 +305,48 @@ describe('buildGraphLayout 横向布局', () => {
     expect(Number(match[4])).toBeCloseTo(pnpm.y, 5)
   })
 
-  it('层带基准线两个方向完全一致，兄弟轴改用卡片高度铺开', () => {
+  it('两条轴各自用自己的口径：生长轴按卡片宽度推进、兄弟轴按卡片高度铺开', () => {
     const vertical = buildGraphLayout(sampleNodes(), 'my-dsh-plugins')
     const layout = horizontal()
 
-    // 深度方向（层带）展开宽度：逐层取该层最高卡片 + 层间留白 GRAPH_V_GAP。
-    // 竖向它是画布高度、横向它是画布宽度，两者必须完全一致 —— 切换方向只改主轴走向，
-    // 不该顺手把行距也换一套口径。
-    const levelBandSpan = 54 + GRAPH_V_GAP + 42 + GRAPH_V_GAP + 52
+    // 生长轴（横向 = x）：逐层取该层最宽的卡片 + 层间留白 GRAPH_V_GAP
+    const levelBandSpan = 200 + GRAPH_V_GAP + 164 + GRAPH_V_GAP + 208
     expect(layout.width).toBeCloseTo(levelBandSpan, 5)
-    expect(vertical.height).toBeCloseTo(levelBandSpan, 5)
-    expect(layout.width).toBeCloseTo(260, 5)
+    expect(layout.width).toBeCloseTo(684, 5)
 
-    // 兄弟轴：横向沿 y 用「卡片高度」铺开 —— 3 张叶子 × 52 + 2 段 GRAPH_V_GAP
-    expect(layout.height).toBeCloseTo(3 * 52 + 2 * GRAPH_V_GAP, 5)
-    expect(layout.height).toBeCloseTo(268, 5)
+    // 兄弟轴（横向 = y）：3 张叶子 × 卡片高 52 + 2 段同层间距 GRAPH_H_GAP
+    expect(layout.height).toBeCloseTo(3 * 52 + 2 * GRAPH_H_GAP, 5)
+    expect(layout.height).toBeCloseTo(200, 5)
 
-    // 对照竖向的兄弟轴：沿 x 用「卡片宽度」铺开，兄弟间距用 GRAPH_H_GAP
-    // 工程化子树 (208 + 22 + 208) + 兄弟间距 + 安全子树 208
+    // 竖向口径保持原样：生长轴（y）取卡片高 + GRAPH_V_GAP，兄弟轴（x）取卡片宽 + GRAPH_H_GAP
+    expect(vertical.height).toBeCloseTo(54 + GRAPH_V_GAP + 42 + GRAPH_V_GAP + 52, 5)
+    expect(vertical.height).toBeCloseTo(260, 5)
     expect(vertical.width).toBeCloseTo(208 + GRAPH_H_GAP + 208 + GRAPH_H_GAP + 208, 5)
     expect(vertical.width).toBeCloseTo(668, 5)
+
+    // 两个方向的层与层都必须真的分开
+    assertLevelsSeparated(vertical.nodes, 'y')
+    assertLevelsSeparated(layout.nodes, 'x')
+  })
+
+  it('相邻层不得叠压：横向层厚必须按卡片宽度推进（曾经的横向重叠 bug）', () => {
+    const layout = horizontal()
+    assertLevelsSeparated(layout.nodes, 'x')
+
+    const root = findNode(layout.nodes, GRAPH_ROOT_ID)
+    const engineering = findNode(layout.nodes, '10')
+    const pnpm = findNode(layout.nodes, '11')
+
+    // 父卡右边界 → 子卡左边界，恰好留出一段 GRAPH_V_GAP：
+    // 旧实现用「卡片高度 52 + GRAPH_V_GAP」当层厚，横向每层只前进 108px，
+    // 而卡片宽 208px，父子卡片直接叠掉 100px —— 这里就是那个回归点。
+    expect(root.x + root.width / 2).toBeCloseTo(engineering.x - engineering.width / 2 - GRAPH_V_GAP, 5)
+    expect(engineering.x + engineering.width / 2).toBeCloseTo(pnpm.x - pnpm.width / 2 - GRAPH_V_GAP, 5)
+    expect(root.width).toBeGreaterThan(0)
   })
 
   it('深树横竖互换：竖向是细高条，横向翻成扁宽条', () => {
-    // 五层链式目录（每层只有一个子节点）：深度跨度远大于兄弟跨度
+    // 六层链式目录（根 + 四个中间目录 + 一个叶子，每层只有一个子节点）：深度跨度远大于兄弟跨度
     const deep: MemoryNodeDto[] = [
       makeNode({ id: 'a', name: 'A', path: '/A/' }),
       makeNode({ id: 'b', name: 'B', parent_id: 'a', path: '/A/B/' }),
@@ -312,15 +357,23 @@ describe('buildGraphLayout 横向布局', () => {
     const vertical = buildGraphLayout(deep, 'root')
     const layout = buildGraphLayout(deep, 'root', {}, { direction: 'horizontal' })
 
-    // 竖向：宽度只有单张卡片，高度是 5 层累加 —— 又高又细，这就是用户看不清的竖条
+    // 竖向：宽度只有单张最宽卡片（叶子 208），高度是 6 层累加 —— 层厚 54 + 42×4 + 52，层间 5 段 GRAPH_V_GAP
+    expect(vertical.width).toBeCloseTo(208, 5)
+    expect(vertical.height).toBeCloseTo(54 + 42 * 4 + 52 + GRAPH_V_GAP * 5, 5)
+    expect(vertical.height).toBeCloseTo(554, 5)
     expect(vertical.height).toBeGreaterThan(vertical.width)
-    // 横向：同一棵树翻过来 —— 又宽又扁，深度摊到横轴上
-    expect(layout.width).toBeGreaterThan(layout.height)
-    // 深度方向的展开跨度两个方向严格相等（竖向的高度 == 横向的宽度）
-    expect(layout.width).toBeCloseTo(vertical.height, 5)
-    // 兄弟轴两方向单位不同（竖向按卡片宽度铺、横向按卡片高度铺），
-    // 所以横向高度只等于「沿高度口径重算的兄弟跨度」：根卡片高 54 > 子树高 52
+
+    // 横向：同一棵树把深度摊到 x 轴上 —— 逐层「该层最宽卡片 + GRAPH_V_GAP」，末层不再加留白。
+    // 兄弟轴只剩根卡片高度 54，于是它又宽又扁。
+    expect(layout.width).toBeCloseTo(
+      (200 + GRAPH_V_GAP) + (164 + GRAPH_V_GAP) * 4 + (208 + GRAPH_V_GAP) - GRAPH_V_GAP,
+      5,
+    )
+    expect(layout.width).toBeCloseTo(1344, 5)
     expect(layout.height).toBeCloseTo(54, 5)
+    expect(layout.width).toBeGreaterThan(layout.height)
+
+    assertLevelsSeparated(layout.nodes, 'x')
   })
 
   it('横向布局同样传播检索高亮', () => {
@@ -330,5 +383,47 @@ describe('buildGraphLayout 横向布局', () => {
     expect(findNode(layout.nodes, GRAPH_ROOT_ID).onHitPath).toBe(true)
     expect(findNode(layout.nodes, '21').dim).toBe(true)
     expect(layout.links.filter((link) => link.hit).map((link) => link.to).sort()).toEqual(['10', '11'])
+  })
+})
+
+describe('computeFitView 一键居中', () => {
+  const fitOptions = { margin: 24, minScale: 0.25, maxScale: 2.2, readableScale: 0.6 }
+  const viewport = { width: 1100, height: 700 }
+  const rootRect = { left: 44, top: 44, width: 200, height: 54 }
+
+  it('整棵树装得下时全览居中（与旧行为一致）', () => {
+    const canvas = { width: 600, height: 400 }
+    const view = computeFitView(viewport, canvas, rootRect, fitOptions)
+    const expected = Math.min((1100 - 48) / 600, (700 - 48) / 400, 1)
+    expect(view.anchored).toBe('canvas')
+    expect(view.scale).toBeCloseTo(expected, 5)
+    expect(view.offsetX).toBeCloseTo((1100 - 600 * view.scale) / 2, 5)
+    expect(view.offsetY).toBeCloseTo((700 - 400 * view.scale) / 2, 5)
+  })
+
+  it('装不下时保底可读并把根节点钉在左上角，不再缩成 25% 的一团灰', () => {
+    // 真实库里最宽的作用域：竖向画布 11630×476（含两侧 CANVAS_PAD 44）
+    const canvas = { width: 11630 + 88, height: 476 + 88 }
+    const view = computeFitView(viewport, canvas, rootRect, fitOptions)
+    expect(view.anchored).toBe('root')
+    expect(view.scale).toBeCloseTo(0.6, 5)
+    // 根卡片左上角正好落在 margin 处，用户从根开始往右/往下拖
+    expect(rootRect.left * view.scale + view.offsetX).toBeCloseTo(24, 5)
+    expect(rootRect.top * view.scale + view.offsetY).toBeCloseTo(24, 5)
+    // 旧的「无底线缩小」算法在这个画布上会得到比可读下限更小的值
+    const oldScale = Math.min((1100 - 48) / canvas.width, (700 - 48) / canvas.height, 1)
+    expect(oldScale).toBeLessThan(0.6)
+  })
+
+  it('缩放下限夹取：可读下限低于 minScale 时以 minScale 为准；适配本身不把树放大超过 1 倍', () => {
+    const canvas = { width: 11630 + 88, height: 476 + 88 }
+    const capped = computeFitView(viewport, canvas, rootRect, { ...fitOptions, minScale: 0.8 })
+    expect(capped.scale).toBeCloseTo(0.8, 5)
+    expect(capped.anchored).toBe('root')
+
+    const huge = computeFitView({ width: 5000, height: 5000 }, { width: 100, height: 100 }, rootRect, fitOptions)
+    expect(huge.anchored).toBe('canvas')
+    expect(huge.scale).toBeCloseTo(1, 5)
+    expect(huge.offsetX).toBeCloseTo((5000 - 100) / 2, 5)
   })
 })

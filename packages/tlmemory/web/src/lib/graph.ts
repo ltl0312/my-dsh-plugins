@@ -6,11 +6,12 @@
 //   2. 布局             —— 经典「子树跨度 + 逐层居中」紧凑排布，父节点恒居于子节点跨度正中；
 //   3. 高亮             —— 命中叶子到根的整条路径标记，供渲染层做发光 / 淡化。
 //
-// 两个方向共用同一套算法，只把「主轴 / 次轴」对调（见 layoutNodes）：
-//   * vertical   自顶向下，兄弟沿 x 轴排开、层沿 y 轴下探（默认，深树可读）；
-//   * horizontal 自左向右，兄弟沿 y 轴排开、层沿 x 轴右推（宽树可读，但排布更紧凑、节点更大）。
-// 因此下面的 GRAPH_H_GAP / GRAPH_V_GAP 命名始终以**竖向布局**为主轴参照：
-// GRAPH_H_GAP 是同层兄弟间距，GRAPH_V_GAP 是相邻层留白；横向布局下两者互换使用。
+// 两个方向共用同一套算法，只把「主轴（兄弟轴）/ 次轴（层轴）」对调（见 layoutNodes）：
+//   * vertical   自顶向下，兄弟沿 x 轴排开、层沿 y 轴下探（深树可读）；
+//   * horizontal 自左向右，兄弟沿 y 轴排开、层沿 x 轴右推（宽树可读：兄弟摊在更便宜的竖轴上）。
+// 留白口径与方向无关，方向只决定它落在哪条轴上：GRAPH_H_GAP 恒为同层兄弟间距，
+// GRAPH_V_GAP 恒为相邻层留白（即生长轴上的留白）。卡片则在 x 轴占宽、在 y 轴占高 ——
+// 谁当生长轴，谁就按「该轴的卡片尺寸 + GRAPH_V_GAP」逐层推进，两张卡才不会叠在一起。
 //
 // 为什么用 parent_id 而不是按 path 切分：path 是物化路径，叶子节点与其所属目录共用
 // 同一个 path 字面（叶子的 path 就是父目录的 path），按 path 切分会把叶子错挂一层。
@@ -32,10 +33,10 @@ export const GRAPH_NODE_SIZE: Record<GraphNodeKind, { width: number; height: num
   leaf: { width: 208, height: 52 },
 }
 
-/** 竖向布局：同层兄弟节点之间的水平间距；横向布局下用作相邻层之间的留白 */
+/** 同层兄弟节点之间的间距（与方向无关：竖向落在 x 轴、横向落在 y 轴） */
 export const GRAPH_H_GAP = 22
 
-/** 竖向布局：相邻层级之间的垂直留白（不含卡片自身高度）；横向布局下用作同层兄弟间距 */
+/** 相邻层级之间的留白，不含卡片自身尺寸（即生长轴上的留白；竖向落在 y 轴、横向落在 x 轴） */
 export const GRAPH_V_GAP = 56
 
 /** 树节点（还原出的多叉树；仅用于布局，不直接渲染） */
@@ -227,14 +228,16 @@ export interface GraphLayoutOptions {
 /**
  * 计算树状图谱布局。
  *
- * 排布算法（两个方向共用）：先自底向上量出每个节点的「子树分配跨度」
- * （竖向 = max(自身卡片宽, 子节点分配宽之和 + 兄弟间距)，横向同理但取高），
- * 再自顶向下把这段跨度切成若干区间。子节点在各自区间内居中，父节点对准首尾子节点
- * 可见卡片的跨度中点并夹回自己的分配区间 —— 因为分配跨度永不小于子跨度与自身卡片
- * 尺寸，所以兄弟子树之间绝不会重叠。
+ * 排布算法（两个方向共用）：
+ *   1. 兄弟轴上先自底向上量出每个节点的「子树分配跨度」
+ *      （= max(自身卡片在兄弟轴上的尺寸, 子节点分配跨度之和 + GRAPH_H_GAP)），
+ *      再自顶向下把这段跨度切成若干区间：子节点在各自区间内居中，父节点对准首尾子节点
+ *      可见卡片的跨度中点并夹回自己的分配区间 —— 分配跨度永不小于子跨度与自身卡片尺寸，
+ *      所以兄弟子树之间绝不会重叠；
+ *   2. 生长轴上逐层推进：层厚 = 该层卡片在生长轴上的最大尺寸 + GRAPH_V_GAP，
+ *      相邻两层因此永不叠压（横向曾误用卡片高度当层厚，结果层与层叠成一团）。
  *
- * 竖向：兄弟在 x 轴排开、层沿 y 轴下探；
- * 横向：兄弟在 y 轴排开、层沿 x 轴右推（只是把主轴与次轴对调，见 layoutNodes）。
+ * 竖向：兄弟在 x 轴排开、层沿 y 轴下探；横向：兄弟在 y 轴排开、层沿 x 轴右推。
  */
 export function buildGraphLayout(
   nodes: readonly MemoryNodeDto[],
@@ -248,12 +251,12 @@ export function buildGraphLayout(
   const searching = highlight.searching === true
   const root = buildGraphTree(nodes, rootLabel)
 
-  // 1) 子树分配跨度（竖向取宽 / 横向取高）
+  // 1) 子树分配跨度 = 在**兄弟轴**上占的宽度：竖向取卡片宽、横向取卡片高
   const subtreeSpan = new Map<string, number>()
   const measure = (node: GraphTreeNode): number => {
     const size = GRAPH_NODE_SIZE[node.kind]
     const own = horizontal ? size.height : size.width
-    const siblingGap = horizontal ? GRAPH_V_GAP : GRAPH_H_GAP
+    const siblingGap = GRAPH_H_GAP
     let span = own
     if (node.children.length > 0) {
       let childrenSpan = 0
@@ -268,8 +271,10 @@ export function buildGraphLayout(
   }
   const mainCanvasSpan = measure(root)
 
-  // 2) 逐层分配次轴基准线：层带高 = 该层最高卡片（即卡片高度）+ 固定留白。
-  //    两个方向共用同一套基准线，切换方向时纵向节奏保持一致。
+  // 2) 逐层分配生长轴基准线：层厚 = 该层卡片在**生长轴**上的最大尺寸（竖向取高、横向取宽），
+  //    再加固定的层间留白 GRAPH_V_GAP。
+  //    踩过的坑（有测试守着）：早先两个方向都按「卡片高度 + GRAPH_V_GAP」推进层带，
+  //    横向时卡片宽 208px 却只前进 108px，相邻两层直接叠压成一团。
   const flat: GraphTreeNode[] = []
   const collect = (node: GraphTreeNode): void => {
     flat.push(node)
@@ -279,16 +284,16 @@ export function buildGraphLayout(
 
   const levelThickness = new Map<number, number>()
   for (const item of flat) {
-    // 层厚取卡片高度：两个方向的层带都靠「卡片高度 + 留白」定义视觉行距，
-    // 于是横向与竖向的整层基准线完全一致，切换方向时纵向节奏不会突然变紧。
-    const thickness = GRAPH_NODE_SIZE[item.kind].height
+    const size = GRAPH_NODE_SIZE[item.kind]
+    const thickness = horizontal ? size.width : size.height
     levelThickness.set(item.depth, Math.max(levelThickness.get(item.depth) ?? 0, thickness))
   }
   const maxDepth = flat.reduce((max, item) => Math.max(max, item.depth), 0)
   const levelCenter: number[] = []
   let levelCursor = 0
   for (let depth = 0; depth <= maxDepth; depth += 1) {
-    const thickness = levelThickness.get(depth) ?? GRAPH_NODE_SIZE.dir.height
+    const fallback = GRAPH_NODE_SIZE.dir
+    const thickness = levelThickness.get(depth) ?? (horizontal ? fallback.width : fallback.height)
     levelCenter.push(levelCursor + thickness / 2)
     levelCursor += thickness + GRAPH_V_GAP
   }
@@ -299,7 +304,7 @@ export function buildGraphLayout(
   const place = (node: GraphTreeNode, start: number): void => {
     const size = GRAPH_NODE_SIZE[node.kind]
     const ownEdge = horizontal ? size.height : size.width
-    const siblingGap = horizontal ? GRAPH_V_GAP : GRAPH_H_GAP
+    const siblingGap = GRAPH_H_GAP
     const own = subtreeSpan.get(node.id) ?? ownEdge
     mainCenter.set(node.id, start + own / 2)
     if (node.children.length === 0) return
@@ -408,5 +413,83 @@ export function buildGraphLayout(
     width: round2(horizontal ? crossCanvasSpan : mainCanvasSpan),
     height: round2(horizontal ? mainCanvasSpan : crossCanvasSpan),
     direction,
+  }
+}
+
+/** 可视区尺寸（CSS 像素） */
+export interface FitViewport {
+  width: number
+  height: number
+}
+
+/** 画布坐标系里的矩形（左上角 + 尺寸） */
+export interface FitRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+export interface FitViewOptions {
+  /** 全览时四周预留的呼吸空间 */
+  margin?: number
+  /** 手动缩放的下限（滚轮仍可一直缩到这里看全局地形） */
+  minScale?: number
+  maxScale?: number
+  /** 「一键居中」的保底缩放：宁可只给用户看局部，也不给一片看不清的森林 */
+  readableScale?: number
+}
+
+export interface FitView {
+  scale: number
+  offsetX: number
+  offsetY: number
+  /** canvas = 整棵树都装得下，全览居中；root = 装不下，退化为把根节点钉在左上角 */
+  anchored: 'canvas' | 'root'
+}
+
+/**
+ * 「一键居中」的视口计算（纯函数，便于单测，组件只负责把结果写到 transform 上）。
+ *
+ * 整棵树装得下可视区时，照旧全览居中；装不下时**不再无底线地往下缩** ——
+ * 真实记忆树是「又宽又浅」的，缩到 25% 只剩一团灰，什么也读不出来。
+ * 此时保底到 readableScale，并把根节点卡片钉在左上角 margin 处，
+ * 让用户从根开始自己拖拽查看局部（滚轮仍可缩到 minScale 看全局地形）。
+ */
+export function computeFitView(
+  viewport: FitViewport,
+  canvas: { width: number; height: number },
+  root: FitRect,
+  options: FitViewOptions = {},
+): FitView {
+  const margin = options.margin ?? 24
+  const minScale = options.minScale ?? 0.25
+  const maxScale = options.maxScale ?? 2.2
+  const readableScale = options.readableScale ?? 0.6
+  const contentWidth = Math.max(canvas.width, 1)
+  const contentHeight = Math.max(canvas.height, 1)
+  const raw = Math.min(
+    (viewport.width - margin * 2) / contentWidth,
+    (viewport.height - margin * 2) / contentHeight,
+    1,
+  )
+
+  if (raw >= readableScale) {
+    const scale = Math.min(maxScale, Math.max(minScale, raw))
+    return {
+      scale,
+      offsetX: (viewport.width - contentWidth * scale) / 2,
+      offsetY: (viewport.height - contentHeight * scale) / 2,
+      anchored: 'canvas',
+    }
+  }
+
+  // 装不下：保底可读，把根节点卡片的左上角对准 (margin, margin)
+  const scale = Math.min(maxScale, Math.max(minScale, readableScale))
+  return {
+    scale,
+    offsetX: margin - root.left * scale,
+    offsetY: margin - root.top * scale,
+    anchored: 'root',
   }
 }
