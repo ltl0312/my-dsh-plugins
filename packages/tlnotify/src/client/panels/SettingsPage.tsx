@@ -13,7 +13,7 @@
 import React from 'react'
 import { Btn, Check, Dot, Note, NumInput, Row, Section, Seg, Select } from '../components/ui.js'
 import { ChannelPanel } from './ChannelPanel.js'
-import type { QrState, SecretFieldName, TestState } from './ChannelPanel.js'
+import type { ProvisionState, QrState, SecretFieldName, TestState } from './ChannelPanel.js'
 import { createDraft, toChannelPatches, toDrafts } from '../draft.js'
 import type { ChannelDraft, ChannelType, ChannelView, ConfigView } from '../draft.js'
 import type { ClientContextLike } from '../host.js'
@@ -22,6 +22,7 @@ import { createClientRpc } from '../rpc.js'
 import type {
   BindPayload,
   PatchPayload,
+  ProvisionSnapshot,
   QrPayload,
   StatePayload,
   TestPayload,
@@ -61,23 +62,33 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
   const [flash, setFlash] = React.useState<string | undefined>(undefined)
   const [qr, setQr] = React.useState<QrState | undefined>(undefined)
   const [test, setTest] = React.useState<TestState | undefined>(undefined)
+  const [provision, setProvision] = React.useState<ProvisionState | undefined>(undefined)
   const [secretEpoch, setSecretEpoch] = React.useState(0)
 
-  const applyState = React.useCallback((next: StatePayload): void => {
+  /**
+   * `force` 无视「通道 id 集合没变就保留本地草稿」的短路。
+   *
+   * 扫码创建之后必须用它：宿主机把凭据写进了配置，但本地草稿里那个字段还是空的，
+   * 而 id 集合恰好没变——不重建的话界面会一直显示「未设置」。
+   */
+  const applyState = React.useCallback((next: StatePayload, force = false): void => {
     setState(next)
-    setDrafts((previous) => (sameChannelIds(previous, next.config.channels) ? previous : toDrafts(next.config)))
+    setDrafts((previous) =>
+      !force && sameChannelIds(previous, next.config.channels) ? previous : toDrafts(next.config),
+    )
   }, [])
 
-  const reload = React.useCallback(async (): Promise<void> => {
-    try {
-      const result = await rpc.call<StatePayload>('state')
-      if (!result.ok) {
-        setError(result.error.message)
-        return
-      }
-      setError(undefined)
-      applyState(result.value)
-    } catch (error) {
+  const reload = React.useCallback(
+    async (force = false): Promise<void> => {
+      try {
+        const result = await rpc.call<StatePayload>('state')
+        if (!result.ok) {
+          setError(result.error.message)
+          return
+        }
+        setError(undefined)
+        applyState(result.value, force)
+      } catch (error) {
       // 兜的是一类「页面永远转圈」的事故：这个 effect 里写的是 `void reload()`，
       // 所以 `rpc.call` 一旦抛出就没人接这个拒绝，页面永远停在「正在读取配置…」。
       // 宁可就地把它变成一条看得见的错误提示。
@@ -134,13 +145,93 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
     [patch],
   )
 
-  const addChannel = React.useCallback(
-    (type: ChannelType): void => {
-      const next = [...drafts, createDraft(type, drafts.map((draft) => draft.id))]
-      commitChannels(next)
+  // ── 扫码创建机器人（provision.*）─────────────────────────────────────────
+  //
+  // `begin` 由宿主去厂商那边要一张二维码（QQ 是官方「扫码创建机器人」流程），`poll`
+  // 拿同一个 attempt 的状态。轮询间隔听宿主的 `pollIntervalMs`：厂商限流策略变了，
+  // 界面不需要跟着改。
+  const beginProvision = React.useCallback(
+    async (channelId: string): Promise<void> => {
+      setProvision({ channelId })
+      const result = await rpc.call<ProvisionSnapshot>('provision.begin', { channelId })
+      if (!result.ok) {
+        setProvision({ channelId, message: result.error.message })
+        return
+      }
+      setProvision({ channelId, snapshot: result.value })
     },
-    [drafts, commitChannels],
+    [rpc],
   )
+
+  const closeProvision = React.useCallback((): void => {
+    const current = provision
+    setProvision(undefined)
+    const snapshot = current?.snapshot
+    if (!current || !snapshot) return
+    if (snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled') return
+    void rpc.call<ProvisionSnapshot>('provision.cancel', {
+      channelId: current.channelId,
+      attemptId: snapshot.attemptId,
+    })
+  }, [provision, rpc])
+
+  const addChannel = React.useCallback(
+    (type: ChannelType, startProvision = false): void => {
+      if (!state) return
+      const draft = createDraft(type, drafts.map((item) => item.id), {
+        events: state.config.events,
+        content: state.config.content,
+      })
+      const next = [...drafts, draft]
+      setDrafts(next)
+      void (async () => {
+        const saved = await patch({ channels: toChannelPatches(next) })
+        // 配置写成功之后才开始扫码：宿主那边得有这个通道，`provision.begin` 才认。
+        if (saved && startProvision) void beginProvision(draft.id)
+      })()
+    },
+    [state, drafts, patch, beginProvision],
+  )
+
+  const provisionChannelId = provision?.channelId
+  const provisionAttemptId = provision?.snapshot?.attemptId
+  const provisionState = provision?.snapshot?.state
+  const provisionInterval = provision?.snapshot?.pollIntervalMs
+
+  React.useEffect(() => {
+    if (!provisionChannelId || !provisionAttemptId) return undefined
+    if (
+      provisionState !== 'starting' &&
+      provisionState !== 'waiting' &&
+      provisionState !== 'scanned' &&
+      provisionState !== 'connecting'
+    ) {
+      return undefined
+    }
+    let cancelled = false
+
+    const tick = async (): Promise<void> => {
+      const result = await rpc.call<ProvisionSnapshot>('provision.poll', {
+        channelId: provisionChannelId,
+        attemptId: provisionAttemptId,
+      })
+      if (cancelled) return
+      if (!result.ok) {
+        setProvision({ channelId: provisionChannelId, message: result.error.message })
+        return
+      }
+      setProvision({ channelId: provisionChannelId, snapshot: result.value })
+      if (result.value.state === 'done') await reload(true)
+    }
+
+    const timer = window.setInterval(() => {
+      void tick()
+    }, Math.max(500, provisionInterval ?? 1000))
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [provisionChannelId, provisionAttemptId, provisionState, provisionInterval, rpc, reload])
 
   const saveSecret = React.useCallback(
     (id: string, field: SecretFieldName, value: string): void => {
@@ -338,11 +429,13 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
         t={t}
         drafts={drafts}
         views={config.channels}
+        global={{ events: config.events, content: config.content }}
         defaultChannelId={config.defaultChannelId}
         busy={busy}
         secretEpoch={secretEpoch}
         qr={qr}
         test={test}
+        provision={provision}
         onChange={(next) => commitChannels(next)}
         onAdd={addChannel}
         onSecret={saveSecret}
@@ -350,6 +443,8 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
         onTest={(id) => void runTest(id)}
         onQr={(id) => void openQr(id)}
         onQrClose={() => setQr(undefined)}
+        onProvision={(id) => void beginProvision(id)}
+        onProvisionClose={closeProvision}
       />
 
       <Section title={t('events')} hint={t('eventsHint')}>

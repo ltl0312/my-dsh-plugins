@@ -11,6 +11,8 @@
 import type {
   ChannelConfig,
   ChannelType,
+  ContentConfig,
+  EventsConfig,
   TlnotifyConfig,
 } from './types.js'
 import type {
@@ -23,6 +25,11 @@ import type {
   TestFailureHint,
   TlnotifyPatch,
 } from './protocol.js'
+// `defaultEvents` / `defaultContent` / `resolveChannelSettings` 都是纯函数，只是
+// 恰好住在 config.ts（那边顶层有 node:fs/os/path 的 import）。这里只取这几个，
+// 不调用任何 IO —— rpc.ts 仍然是「只做校验与脱敏」的纯逻辑。客户端不 import 本
+// 文件（浏览器侧用的是 `src/client/rpc.ts`），所以带不进任何 node 内建模块。
+import { defaultContent, defaultEvents, resolveChannelSettings } from './config.js'
 
 // ---------------------------------------------------------------------------
 // 信封
@@ -69,13 +76,25 @@ export function redactText(text: string): string {
     .replace(/("(?:appSecret|feishuAppSecret|app_secret|secret)"\s*:\s*")([^"]*)(")/gi, '$1[redacted]$3')
 }
 
-/** 单条通道 → 脱敏通道。 */
-export function redactChannel(config: ChannelConfig): RedactedChannel {
+/** 单条通道 → 脱敏通道。`events` / `content` 回的是**当前生效值**（见协议注释）。 */
+export function redactChannel(
+  config: ChannelConfig,
+  global: Pick<TlnotifyConfig, 'events' | 'content'>,
+): RedactedChannel {
+  const effective = resolveChannelSettings(global, config)
+  const filter = Array.isArray(config.sessionFilter) ? [...config.sessionFilter] : []
   return {
     id: config.id,
     type: config.type,
     enabled: config.enabled,
-    sessionFilter: Array.isArray(config.sessionFilter) ? [...config.sessionFilter] : [],
+    label: config.label ?? '',
+    // 缺省时按 sessionFilter 反推，和 `channelCaresAboutSession()` 保持同一套规则。
+    sessionScope: config.sessionScope ?? (filter.length > 0 ? 'filter' : 'all'),
+    sessionFilter: filter,
+    overrideEvents: config.overrideEvents === true,
+    events: { ...effective.events },
+    overrideContent: config.overrideContent === true,
+    content: { ...effective.content },
     ...(config.appId ? { appId: config.appId } : {}),
     ...(config.targetChatId ? { targetChatId: config.targetChatId } : {}),
     ...(config.groupChatId ? { groupChatId: config.groupChatId } : {}),
@@ -97,7 +116,7 @@ export function redactConfig(config: TlnotifyConfig, dataDir: string): StatePayl
     ...(config.defaultChannelId ? { defaultChannelId: config.defaultChannelId } : {}),
     logLevel: config.logLevel,
     dataDir,
-    channels: config.channels.map(redactChannel),
+    channels: config.channels.map((channel) => redactChannel(channel, config)),
     events: { ...config.events },
     content: { ...config.content },
     routing: { ...config.routing },
@@ -346,7 +365,13 @@ const CHANNEL_PATCH_KEYS: readonly string[] = Object.freeze([
   'id',
   'type',
   'enabled',
+  'label',
+  'sessionScope',
   'sessionFilter',
+  'overrideEvents',
+  'events',
+  'overrideContent',
+  'content',
   'appId',
   'appSecret',
   'targetChatId',
@@ -358,6 +383,68 @@ const CHANNEL_PATCH_KEYS: readonly string[] = Object.freeze([
   'mode',
   'bindUrl',
 ] as const)
+
+const SESSION_SCOPES = ['all', 'filter'] as const
+
+const EVENT_KEYS: readonly string[] = Object.freeze([
+  'onTurnEnd',
+  'onError',
+  'onAborted',
+  'onPending',
+  'onMaxTokens',
+  'includeSubagent',
+] as const)
+
+const CONTENT_KEYS: readonly string[] = Object.freeze([
+  'includeMetadata',
+  'includeUserPrompt',
+  'maxBodyChars',
+] as const)
+
+/**
+ * 事件开关补丁 → 完整的事件开关。
+ *
+ * 未提到的键**保持通道现有值**（没有就取内置默认），所以设置页可以只发改动项，
+ * 手写 RPC 的人也不会因为少写一个键就把别的开关悄悄关掉。
+ */
+function readEventsPatch(raw: unknown, path: string, base: EventsConfig | undefined): EventsConfig {
+  const record = asRecord(raw, path)
+  assertKnownKeys(record, EVENT_KEYS, `${path}.`)
+  const next: EventsConfig = { ...defaultEvents(), ...(base ?? {}) }
+  if (record.onTurnEnd !== undefined) next.onTurnEnd = requireBoolean(record.onTurnEnd, `${path}.onTurnEnd`)
+  if (record.onError !== undefined) next.onError = requireBoolean(record.onError, `${path}.onError`)
+  if (record.onAborted !== undefined) next.onAborted = requireBoolean(record.onAborted, `${path}.onAborted`)
+  if (record.onPending !== undefined) next.onPending = requireBoolean(record.onPending, `${path}.onPending`)
+  if (record.onMaxTokens !== undefined) {
+    next.onMaxTokens = requireBoolean(record.onMaxTokens, `${path}.onMaxTokens`)
+  }
+  if (record.includeSubagent !== undefined) {
+    next.includeSubagent = requireBoolean(record.includeSubagent, `${path}.includeSubagent`)
+  }
+  return next
+}
+
+/** 正文内容补丁 → 完整的正文内容。范围与 `config.ts` 的 schema 保持一致。 */
+function readContentPatch(raw: unknown, path: string, base: ContentConfig | undefined): ContentConfig {
+  const record = asRecord(raw, path)
+  assertKnownKeys(record, CONTENT_KEYS, `${path}.`)
+  const next: ContentConfig = { ...defaultContent(), ...(base ?? {}) }
+  if (record.includeMetadata !== undefined) {
+    next.includeMetadata = requireBoolean(record.includeMetadata, `${path}.includeMetadata`)
+  }
+  if (record.includeUserPrompt !== undefined) {
+    next.includeUserPrompt = requireBoolean(record.includeUserPrompt, `${path}.includeUserPrompt`)
+  }
+  if (record.maxBodyChars !== undefined) {
+    const value = record.maxBodyChars
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      reject(`${path}.maxBodyChars`, '200..20000 的数字')
+    }
+    if (value < 200 || value > 20000) reject(`${path}.maxBodyChars`, '200..20000 的数字')
+    next.maxBodyChars = Math.round(value)
+  }
+  return next
+}
 
 /** 补丁 → 完整通道配置；`base` 是该通道的现有配置（新通道则是 undefined）。 */
 function applyChannelPatch(base: ChannelConfig | undefined, raw: unknown, index: number): ChannelConfig {
@@ -401,6 +488,42 @@ function applyChannelPatch(base: ChannelConfig | undefined, raw: unknown, index:
     if (value === undefined) continue
     const read = readTextPatch(value as string | null | undefined, `${prefix}${field}`)
     assign(next, field, read.value)
+  }
+
+  // ── 每机器人独立设置 ──────────────────────────────────────────────────
+  // `events`/`content` 出现即视为「选择自定义」：发 `null` 才是回到跟随全局。
+  // 这样设置页只需要发它真正改过的那一项，手写 RPC 的人也不会因为漏发
+  // `overrideEvents` 而把一份自定义规则存成了死数据。
+  if (patch.label !== undefined) {
+    const read = readTextPatch(patch.label as string | null | undefined, `${prefix}label`)
+    next.label = read.value
+  }
+  if (patch.sessionScope !== undefined) {
+    next.sessionScope = requireEnum(patch.sessionScope, SESSION_SCOPES, `${prefix}sessionScope`)
+  }
+  if (patch.overrideEvents !== undefined) {
+    next.overrideEvents = requireBoolean(patch.overrideEvents, `${prefix}overrideEvents`)
+  }
+  if (patch.events !== undefined) {
+    if (patch.events === null) {
+      next.overrideEvents = false
+      delete next.events
+    } else {
+      next.events = readEventsPatch(patch.events, `${prefix}events`, next.events)
+      next.overrideEvents = true
+    }
+  }
+  if (patch.overrideContent !== undefined) {
+    next.overrideContent = requireBoolean(patch.overrideContent, `${prefix}overrideContent`)
+  }
+  if (patch.content !== undefined) {
+    if (patch.content === null) {
+      next.overrideContent = false
+      delete next.content
+    } else {
+      next.content = readContentPatch(patch.content, `${prefix}content`, next.content)
+      next.overrideContent = true
+    }
   }
 
   if (patch.feishuReceiveIdType !== undefined) {

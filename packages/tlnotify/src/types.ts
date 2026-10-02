@@ -258,8 +258,27 @@ export interface ChannelConfig {
   id: string
   type: ChannelType
   enabled: boolean
-  /** 通道只接收这些会话的事件；留空 = 全部。 */
+  // ---- 每机器人独立设置（设计方案《每机器人设置方案》§2）----
+  /** 别名。只在设置页显示，不参与任何标识；空串 = 显示 `id`。 */
+  label?: string
+  /**
+   * 关心的会话范围。
+   *
+   * `'all'` = **关心全局**（任何会话的事件都能投给它）；`'filter'` = 只接收
+   * `sessionFilter` 列表里的会话。缺省时按 `sessionFilter` 是否非空推断，
+   * 以保持「留空 = 全部」的老语义。
+   */
+  sessionScope?: 'all' | 'filter'
+  /** 通道只接收这些会话的事件；`sessionScope === 'filter'` 时才生效。 */
   sessionFilter?: string[]
+  /** 事件开关是否覆盖全局（false / 缺省 = 跟随全局 `config.events`）。 */
+  overrideEvents?: boolean
+  /** 覆盖用的事件开关；仅 `overrideEvents === true` 时生效。 */
+  events?: EventsConfig
+  /** 正文内容是否覆盖全局（false / 缺省 = 跟随全局 `config.content`）。 */
+  overrideContent?: boolean
+  /** 覆盖用的正文设置；仅 `overrideContent === true` 时生效。 */
+  content?: ContentConfig
   // ---- QQ ----
   /** 机器人 AppID（QQ 开放平台）。 */
   appId?: string

@@ -84,13 +84,14 @@ describe('redactText', () => {
 
 describe('redactChannel / redactConfig', () => {
   it('永不带出密钥明文，只给 configured + hint', () => {
-    const red = redactChannel(channel({ appId: '102000', appSecret: 'topsecretvalue' }))
+    // 第二个参数是「全局 events/content」：redactChannel 要拿它算出每个通道的**生效值**。
+    const red = redactChannel(channel({ appId: '102000', appSecret: 'topsecretvalue' }), configWith())
     expect(red.appSecret).toEqual({ configured: true, hint: '••••alue' })
     expect(JSON.stringify(red)).not.toContain('topsecretvalue')
   })
 
   it('空字段不出现（少一堆 `targetChatId: ""` 才不会让前端把空串当已配置）', () => {
-    const red = redactChannel(channel())
+    const red = redactChannel(channel(), configWith())
     expect('targetChatId' in red).toBe(false)
     expect('appId' in red).toBe(false)
     expect('bindUrl' in red).toBe(false)
@@ -98,7 +99,7 @@ describe('redactChannel / redactConfig', () => {
   })
 
   it('把缺省值补齐成协议里声明的必填字段', () => {
-    const red = redactChannel(channel())
+    const red = redactChannel(channel(), configWith())
     expect(red.feishuReceiveIdType).toBe('open_id')
     expect(red.mode).toBe('active')
   })

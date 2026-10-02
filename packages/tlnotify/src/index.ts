@@ -32,6 +32,7 @@ import { join } from 'node:path'
 import type { Context } from 'cordis'
 
 import type {
+  ChannelConfig,
   InboundAction,
   InboundReply,
   Notification,
@@ -41,7 +42,7 @@ import type {
   TurnSnapshot,
 } from './types.js'
 import { INTERVENTION_KINDS } from './types.js'
-import { Config, configPath, ensureDir, mergeConfig, persistEffectiveConfig, readConfigFile, readJsonFile, resolveDataDir, saveConfigFile, statePath, writeJsonFile } from './config.js'
+import { Config, configPath, ensureDir, mergeConfig, persistEffectiveConfig, readConfigFile, readJsonFile, resolveChannelSettings, resolveDataDir, saveConfigFile, statePath, writeJsonFile } from './config.js'
 import { FileLogger, joinLog, type HostLogger } from './log.js'
 import {
   extractToolCallEvent,
@@ -62,6 +63,8 @@ import { RouteTable, matchesShortId, type RouteResolution } from './route.js'
 import { describeMode, helpText, ModeState, parseCommand, type ModeCommand } from './mode.js'
 import { InteractionBridge, isInteractionAction, SessionInjector, type AgentLike } from './inject.js'
 import { ChannelManager } from './channels/index.js'
+import { channelCaresAboutSession } from './config.js'
+import { ProvisionManager, type ProvisionCredentials } from './provision.js'
 import {
   applyPatch,
   createBindToken,
@@ -81,6 +84,7 @@ import {
   type BindPayload,
   type PatchPayload,
   type PendingBind,
+  type ProvisionSnapshot,
   type QrPayload,
   type RpcMethod,
   type RpcRequestEnvelope,
@@ -273,6 +277,13 @@ class Tlnotify {
   readonly #injector: SessionInjector
   readonly #bridge: InteractionBridge
   readonly #channels: ChannelManager
+  /**
+   * 「扫码创建 QQ 机器人」的会话表（`provision.begin/poll/cancel`）。
+   *
+   * 生命周期与插件一致：构造时建、`dispose()` 时清。放在这里而不是按需 new，
+   * 是因为每次 `begin` 都会起一个还在向腾讯轮询的会话，必须有一个确定的收口点。
+   */
+  readonly #provision: ProvisionManager
   readonly #sessions = new Map<string, SessionLike>()
   readonly #claimedRequests = new Set<string>()
   readonly #seenInbound = new Set<string>()
@@ -344,6 +355,13 @@ class Tlnotify {
       onInbound: (channelId, reply) => this.#onInbound(channelId, reply),
       onAction: (channelId, action) => this.#onAction(channelId, action),
     })
+
+    this.#provision = new ProvisionManager({
+      log: this.#log,
+      // 写配置 + 重建通道都在这一句里；抛错会被 ProvisionManager 折叠成
+      // `state: 'failed'` 与一条脱敏后的提示，不会冒到 RPC 层。
+      onCredentials: (channelId, credentials) => this.#applyProvisionCredentials(channelId, credentials),
+    })
   }
 
   async start(): Promise<void> {
@@ -404,6 +422,7 @@ class Tlnotify {
       }
     }
     this.#bridge.dispose()
+    this.#provision.dispose()
     this.#gate.close()
     this.#accumulator.clear()
     if (this.#saveTimer) {
@@ -622,6 +641,12 @@ class Tlnotify {
           return this.#rpcQr(payload)
         case 'bind':
           return await this.#rpcBind(payload)
+        case 'provision.begin':
+          return await this.#rpcProvisionBegin(payload)
+        case 'provision.poll':
+          return this.#rpcProvisionPoll(payload)
+        case 'provision.cancel':
+          return this.#rpcProvisionCancel(payload)
         default:
           return fail('unknown-method', `未知的设置页方法：${endpoint}`, { expected: [...RPC_METHODS] })
       }
@@ -871,6 +896,99 @@ class Tlnotify {
     return ok({ bound: true, targetId: observed.targetId, field, expired: false })
   }
 
+  // ── 扫码创建机器人（provision.*）─────────────────────────────────────────
+  //
+  // 三个端点都是 **QQ 专用**：飞书自建应用不需要扫码创建（AppID/AppSecret 在开放
+  // 平台后台自己建），`ProvisionManager` 会直接回 `unsupported` 并附上正确流程，
+  // 所以设置页可以对着任意类型的机器人无条件调用。
+
+  #provisionTarget(payload: unknown): { requested?: string; channel?: ChannelConfig } {
+    const requested = this.#channelIdOf(payload)
+    const channel = requested
+      ? this.#config.channels.find((item) => item.id === requested)
+      : undefined
+    return { requested, channel }
+  }
+
+  #noProvisionChannel(requested: string | undefined): RpcResult<ProvisionSnapshot> {
+    return fail(
+      'no-channel',
+      requested
+        ? `配置里没有 id 为「${requested}」的通道，请刷新设置页再试。`
+        : '缺少 channelId：设置页要说明这次扫码是为哪个机器人。',
+      requested ? { channelId: requested } : {},
+    )
+  }
+
+  async #rpcProvisionBegin(payload: unknown): Promise<RpcResult<ProvisionSnapshot>> {
+    const { requested, channel } = this.#provisionTarget(payload)
+    if (!channel) return this.#noProvisionChannel(requested)
+    // 会一直挂到第一张二维码就绪（或超时/失败）才返回，所以必须是 await。
+    return await this.#provision.begin(channel)
+  }
+
+  #rpcProvisionPoll(payload: unknown): RpcResult<ProvisionSnapshot> {
+    const { requested, channel } = this.#provisionTarget(payload)
+    if (!channel) return this.#noProvisionChannel(requested)
+    const attemptId = this.#attemptIdOf(payload)
+    if (!attemptId) return fail('bad-request', '缺少 attemptId：请重新发起一次扫码。', {})
+    return this.#provision.poll(channel, attemptId)
+  }
+
+  #rpcProvisionCancel(payload: unknown): RpcResult<ProvisionSnapshot> {
+    const { requested, channel } = this.#provisionTarget(payload)
+    if (!channel) return this.#noProvisionChannel(requested)
+    const attemptId = this.#attemptIdOf(payload)
+    if (!attemptId) return fail('bad-request', '缺少 attemptId：没法确认要取消哪一次扫码。', {})
+    return this.#provision.cancel(channel, attemptId)
+  }
+
+  /**
+   * 扫码成功后把凭据写进配置并让通道生效。
+   *
+   * 由 `ProvisionManager` 调用，**抛错即等于接入失败**（它会折叠成
+   * `state: 'failed'` 并把错误文本脱敏），所以这里不做 try/catch。
+   *
+   * 四个字段一起改：`appId` / `appSecret` 是刚拿到的凭据；`targetChatId` 用扫码人的
+   * openid——腾讯在授权时已经告诉我们「这个机器人属于谁」，用户不必再去猜自己的
+   * openid；顺带把通道置为启用，因为此时凭据已经齐了，这正是 dsh-im 那种「扫完就
+   * 上线」的体感，也让新机器人不至于是一张哑巴卡片。
+   */
+  async #applyProvisionCredentials(
+    channelId: string,
+    credentials: ProvisionCredentials,
+  ): Promise<void> {
+    const channel = this.#config.channels.find((item) => item.id === channelId)
+    if (!channel) throw new Error(`通道「${channelId}」已经不在配置里了。`)
+
+    const next: TlnotifyConfig = {
+      ...this.#config,
+      channels: this.#config.channels.map((item) => {
+        if (item.id !== channelId) return item
+        return {
+          ...item,
+          appId: credentials.appId,
+          appSecret: credentials.appSecret,
+          ...(credentials.targetId ? { targetChatId: credentials.targetId } : {}),
+          enabled: true,
+        }
+      }),
+    }
+
+    // 先落盘再改内存：写不进去就让调用方看到失败，避免「界面上好了、重启后没了」。
+    saveConfigFile(this.#dataDir, next)
+    this.#config = next
+
+    if (this.#attached && this.#config.enabled) {
+      await this.#channels.stop()
+      await this.#channels.start(this.#config.channels, this.#config.defaultChannelId)
+    }
+
+    this.#log.info(
+      `扫码创建 QQ 机器人：凭据已写入配置并重建通道（通道 ${channelId}，appId=${credentials.appId}）`,
+    )
+  }
+
   /**
    * 扫码绑定的收信侧：人在 IM 里发的第一句话就是「我是谁」的证明。
    *
@@ -893,6 +1011,12 @@ class Tlnotify {
   #channelIdOf(payload: unknown): string | undefined {
     if (!payload || typeof payload !== 'object') return undefined
     const value = (payload as Record<string, unknown>).channelId
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+  }
+
+  #attemptIdOf(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== 'object') return undefined
+    const value = (payload as Record<string, unknown>).attemptId
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
   }
 
@@ -1002,11 +1126,28 @@ class Tlnotify {
 
   #shouldPush(event: RawEvent): boolean {
     if (this.#disposed || !this.#config.enabled) return false
-    const switches = switchesOf(this.#config)
+    // 单会话模式：只推绑定的那一个会话。
+    //
+    // 事件开关与「是否带上子 Agent」**不在这里**：它们已经是每台机器人各自的
+    // 配置（《每机器人设置方案》§3），只能在知道「发给哪台」之后判断，见
+    // `#wants()`。这里只做全局性、与接收方无关的过滤。
+    return this.#mode.shouldPush(event.sessionId)
+  }
+
+  /**
+   * 这台机器人关心这条事件吗？（《每机器人设置方案》§3）
+   *
+   * 三层都是每台机器人各自的：会话范围（`channelCaresAboutSession`）、事件开关
+   * （`resolveChannelSettings`）、子 Agent 折叠。`switchesOf()` 会把全局的
+   * `global.includeSubagent` 并进来——那是「所有机器人都带上子 Agent」的粗粒度
+   * 开关，仍然要生效。
+   */
+  #wants(config: ChannelConfig, event: RawEvent): boolean {
+    if (!channelCaresAboutSession(config, event.sessionId)) return false
+    const { events } = resolveChannelSettings(this.#config, config)
+    const switches = switchesOf({ events, global: this.#config.global })
     if (!isKindEnabled(event.kind, switches)) return false
     if (isSubagent(this.#sessions.get(event.sessionId)) && !switches.includeSubagent) return false
-    // 单会话模式：只推绑定的那一个会话。
-    if (!this.#mode.shouldPush(event.sessionId)) return false
     return true
   }
 
@@ -1014,9 +1155,30 @@ class Tlnotify {
 
   async #deliver(event: RawEvent): Promise<void> {
     if (this.#disposed) return
-    const notification = this.#render(event)
-    const result = await this.#channels.send(notification)
+    const targets = new Set(
+      this.#channels
+        .candidates()
+        .filter((config) => this.#wants(config, event))
+        .map((config) => config.id),
+    )
+    if (targets.size === 0) {
+      // 所有机器人都没勾这一类事件，或都不关心这个会话：安静跳过。
+      this.#log.debug(`没有机器人关心这条事件（${event.kind}），跳过`)
+      return
+    }
+    // 正文是**逐通道**渲染的：正文细节（元信息 / 提问 / 上限）也是每台机器人各自
+    // 的配置。`sendSelected` 在第一台发包成功后就停，所以这里记下每一台的渲染
+    // 结果，最后用真正发包那台的那一份去写路由表。
+    const rendered = new Map<string, Notification>()
+    const result = await this.#channels.sendSelected((channelId, config) => {
+      if (!targets.has(channelId)) return undefined
+      const notification = this.#render(event, config)
+      rendered.set(channelId, notification)
+      return notification
+    })
     if (!result) return
+    const notification = rendered.get(result.channelId)
+    if (!notification) return
     this.#route.record({
       messageId: result.messageId,
       sessionId: event.sessionId,
@@ -1029,15 +1191,19 @@ class Tlnotify {
     this.#log.info(`已通知：${notification.title}（通道 ${result.channelId}，${result.shards} 片）`)
   }
 
-  #render(event: RawEvent): Notification {
+  #render(event: RawEvent, config: ChannelConfig): Notification {
     const sessionId = event.sessionId
     // 结束类事件的轮次已经被 endTurn 推进历史，等待类事件则还在进行中；
     // 先问进行中的，再退回历史最后一条，两种情况都能拿到对的快照。
     const snapshot = this.#accumulator.liveSnapshot(sessionId) ?? this.#accumulator.previousTurns(sessionId, 1)[0]
-    return renderNotification(event, snapshot, this.#renderOptions(sessionId, snapshot))
+    return renderNotification(event, snapshot, this.#renderOptions(sessionId, snapshot, config))
   }
 
-  #renderOptions(sessionId: string, snapshot: TurnSnapshot | undefined): RenderOptions {
+  #renderOptions(
+    sessionId: string,
+    snapshot: TurnSnapshot | undefined,
+    config: ChannelConfig,
+  ): RenderOptions {
     const wanted = Math.max(0, this.#config.session.context.previousTurns)
     let previousTurns = wanted > 0 ? this.#accumulator.previousTurns(sessionId, wanted + 1) : []
     // 结束类事件的快照本身就是历史里最后一条，不要既当正文又当「前 N 轮」。
@@ -1048,7 +1214,8 @@ class Tlnotify {
     return {
       mode: this.#mode.mode,
       detailed: this.#mode.isDetailed(sessionId),
-      content: this.#config.content,
+      // 正文细节是每台机器人各自的：没开自定义就是全局值。
+      content: resolveChannelSettings(this.#config, config).content,
       session: this.#config.session,
       global: this.#config.global,
       previousTurns,

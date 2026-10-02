@@ -19,6 +19,25 @@
   它是 QQ 通道唯一的网络层，体积小（唯一运行时依赖 `ws`），因此不做成可选依赖。
 - 上游：<https://github.com/tencent-connect/qqbot-nodejs>
 
+### `@tencent-connect/qqbot-connector`
+
+- 版本：`^1.2.0`
+- 许可证：**`UNLICENSED`**（包内 `package.json` 的 `license` 字段原文如此，
+  是腾讯官方发布的包，但未以任何开源许可证授权）
+- 用途：只用于**一件事**——设置页里的「扫码接入机器人」：
+  `startQrConnect()` 向 `q.qq.com` 申请一次性绑定任务、轮询扫码结果、
+  在用户扫码确认后交出新建机器人的 `appId` / `appSecret`。
+- 声明位置：`package.json` 的 `dependencies`（**强依赖**），但它是**运行时外部依赖**：
+  构建时被 `tsup` 列为 `external`，**不会被内联进 `dist/`**，因此本仓库与
+  `dsh-plugin-tlnotify` 的发布产物里**不包含它的任何代码**，也不再分发它；
+  它由 `pnpm` 在用户机器上从 npm registry 安装（与 `@larksuiteoapi/node-sdk` 同理，
+  只是这一条由 `dependencies` 自动装上，因为扫码是 QQ 接入的主路径）。
+- 许可证提示：由于上游标为 `UNLICENSED`，本插件**不把它打进产物、不再分发**，
+  只声明依赖并按需 `import()`。若你的使用场景不允许依赖此类包，
+  可以不使用「扫码接入」，改走「手动接入」（手填 AppID / AppSecret），
+  其余功能完全不受影响。
+- 上游：<https://www.npmjs.com/package/@tencent-connect/qqbot-connector>
+
 ### `@larksuiteoapi/node-sdk`
 
 - 版本：`^1.74.0`

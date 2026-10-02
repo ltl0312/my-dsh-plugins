@@ -21,6 +21,7 @@ import type {
   Notification,
 } from '../types.js'
 import { shardNotification } from '../render.js'
+import { channelCaresAboutSession } from '../config.js'
 import { QqChannel } from './qq.js'
 import { FeishuChannel } from './feishu.js'
 
@@ -73,6 +74,25 @@ export class ChannelManager {
 
   has(channelId: string): boolean {
     return this.#channels.has(channelId)
+  }
+
+  /**
+   * 按发送顺序交出**配置里启用的**通道（含「启用了但启动失败」的那几个）。
+   *
+   * 给调用方做「这台机器人关心这条事件吗」的判断用——判断需要事件上下文
+   * （快照、模式、正文渲染），那是 `Tlnotify` 的私有状态，不该泄进这里。
+   *
+   * 有意**不**把启动失败的通道剔掉：那台机器人是用户明确打开的，它掉线应该表现成
+   * 日志里一条「发送失败」，而不是无声无息地少推一条通知。真正决定「送不送得出去」
+   * 的是发送阶段的故障转移与失败计数（`#fanout`）。
+   */
+  candidates(): ChannelConfig[] {
+    const result: ChannelConfig[] = []
+    for (const channel of this.#ordered()) {
+      const config = this.#configs.get(channel.id)
+      if (config) result.push(config)
+    }
+    return result
   }
 
   /**
@@ -162,14 +182,55 @@ export class ChannelManager {
    * 路由反查也该按首片来）。
    */
   async send(notification: Notification): Promise<SendResult | undefined> {
-    if (this.#stopped) return undefined
-    const order = this.#sendOrder(notification.sessionId)
-    if (order.length === 0) {
-      this.#log.warn('没有可用的通道，通知被丢弃')
-      return undefined
-    }
+    return this.#fanout(
+      (channel) => {
+        const config = this.#configs.get(channel.id)
+        if (config && !channelCaresAboutSession(config, notification.sessionId)) return undefined
+        return notification
+      },
+      { warnWhenSkipped: true },
+    )
+  }
 
+  /**
+   * 按调用方给的「选片函数」发送（《每机器人设置方案》§3）。
+   *
+   * 与 `send()` 的区别只有一个：正文由调用方**逐通道**渲染，因为事件开关与正文
+   * 细节现在都是每台机器人各自的。`select` 返回 undefined 就表示「这台不关心
+   * 这个事件」，跳过且不计失败。
+   *
+   * 故障转移语义不变：同一事件**只有一个**机器人真正发包（默认通道优先，
+   * 失败才轮到下一台）——否则三台机器人都开着就变成三条重复通知。
+   */
+  async sendSelected(
+    select: (channelId: string, config: ChannelConfig) => Notification | undefined,
+  ): Promise<SendResult | undefined> {
+    return this.#fanout((channel) => {
+      const config = this.#configs.get(channel.id)
+      return config ? select(channel.id, config) : undefined
+    }, { warnWhenSkipped: false })
+  }
+
+  /**
+   * 默认通道优先 → 依次尝试 → 第一台成功即停。
+   *
+   * `warnWhenSkipped` 区分两种「一个都没发」：`send()` 是「没有通道接这条会话」
+   * （该报），`sendSelected()` 是「调用方自己判断没人关心」（跳过是正常的，
+   * 报出来只会把日志刷满）。
+   */
+  async #fanout(
+    pick: (channel: Channel) => Notification | undefined,
+    options: { warnWhenSkipped: boolean },
+  ): Promise<SendResult | undefined> {
+    if (this.#stopped) return undefined
+    const order = this.#ordered()
+    let attempted = 0
+    let last: Notification | undefined
     for (const channel of order) {
+      const notification = pick(channel)
+      if (!notification) continue
+      attempted += 1
+      last = notification
       const status = this.#status.get(channel.id)
       try {
         const result = await this.#sendSharded(channel, notification)
@@ -188,7 +249,11 @@ export class ChannelManager {
         this.#log.error(`通道「${channel.id}」发送失败，尝试下一个通道：${text}`)
       }
     }
-    this.#log.error(`所有通道都发送失败，通知「${notification.title}」被丢弃`)
+    if (attempted === 0) {
+      if (options.warnWhenSkipped) this.#log.warn('没有可用的通道，通知被丢弃')
+      return undefined
+    }
+    this.#log.error(`所有通道都发送失败，通知「${last?.title ?? ''}」被丢弃`)
     return undefined
   }
 
@@ -244,15 +309,11 @@ export class ChannelManager {
   /**
    * 默认通道优先，然后按配置顺序。
    *
-   * `sessionFilter` 在这里生效：填了过滤列表的通道只接收列表里的会话，
-   * 于是「工作机器人只推工作项目」这种需求不需要额外的路由层。
+   * 会话过滤不在这里做：`send()` 走 `channelCaresAboutSession()`，`sendSelected()`
+   * 走调用方自己的选片函数——两台机器人的「关心什么」现在可以完全不同。
    */
-  #sendOrder(sessionId: string): Channel[] {
-    const all = [...this.#channels.values()].filter((channel) => {
-      const filter = this.#configs.get(channel.id)?.sessionFilter
-      if (!Array.isArray(filter) || filter.length === 0) return true
-      return filter.includes(sessionId)
-    })
+  #ordered(): Channel[] {
+    const all = [...this.#channels.values()]
     const preferred = this.#defaultChannelId
     if (!preferred) return all
     const index = all.findIndex((channel) => channel.id === preferred)

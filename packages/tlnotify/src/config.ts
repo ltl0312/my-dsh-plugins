@@ -262,6 +262,30 @@ export function persistEffectiveConfig(
  * 写了哪些键」——因此 index.ts 里另外读了一次原始 profile 补丁值来判定显式性
  * 见 `extractExplicitKeys`。
  */
+/**
+ * 事件开关。全局默认与「每机器人覆盖」共用同一份 schema——两处形状必须一致，
+ * 否则设置页把一份自定义规则存进通道、宿主读出来却是另一套字段。
+ */
+const EventsSchema = Schema.object({
+  onTurnEnd: Schema.boolean().default(true).description('任务完成'),
+  onError: Schema.boolean().default(true).description('执行错误'),
+  onAborted: Schema.boolean().default(true).description('手动中止'),
+  onPending: Schema.boolean().default(true).description('等待我回答 / 等待授权 / 等待计划确认'),
+  onMaxTokens: Schema.boolean().default(true).description('Token 达到上限'),
+  includeSubagent: Schema.boolean().default(false).description('子 Agent 事件也推送'),
+})
+  .default(defaultEvents())
+  .description('事件开关')
+
+/** 正文内容。全局默认与「每机器人覆盖」共用，理由同上。 */
+const ContentSchema = Schema.object({
+  includeMetadata: Schema.boolean().default(true).description('正文附带耗时 / token'),
+  includeUserPrompt: Schema.boolean().default(false).description('正文附带上一轮用户提问'),
+  maxBodyChars: Schema.number().min(200).max(20000).step(1).default(1800).description('正文上限字符数'),
+})
+  .default(defaultContent())
+  .description('正文内容')
+
 const ChannelSchema = Schema.object({
   id: Schema.string().default('').description('通道标识，唯一，用于 defaultChannelId 引用'),
   type: Schema.union(['qq', 'feishu'] as const).default('qq').description('通道类型'),
@@ -281,6 +305,14 @@ const ChannelSchema = Schema.object({
   bindUrl: Schema.string()
     .default('')
     .description('扫码绑定用的机器人分享链接（QQ 必填；飞书可留空，由 App ID 推导）'),
+  label: Schema.string().default('').description('别名，只在设置页显示；留空显示通道 id'),
+  sessionScope: Schema.union(['all', 'filter'] as const)
+    .default('all')
+    .description('关心全部会话（all）/ 只关心 sessionFilter 里的会话（filter）'),
+  overrideEvents: Schema.boolean().default(false).description('事件开关是否覆盖全局'),
+  events: EventsSchema,
+  overrideContent: Schema.boolean().default(false).description('正文内容是否覆盖全局'),
+  content: ContentSchema,
 })
 
 export const Config: Schema<TlnotifyConfig> = Schema.object({
@@ -290,23 +322,8 @@ export const Config: Schema<TlnotifyConfig> = Schema.object({
     .description('global=所有主会话都推；session=只推绑定的那一个会话'),
   defaultChannelId: Schema.string().default('').description('默认通道 id；留空则用第一个启用的通道'),
   channels: Schema.array(ChannelSchema).default([]).description('IM 通道列表'),
-  events: Schema.object({
-    onTurnEnd: Schema.boolean().default(true).description('任务完成'),
-    onError: Schema.boolean().default(true).description('执行错误'),
-    onAborted: Schema.boolean().default(true).description('手动中止'),
-    onPending: Schema.boolean().default(true).description('等待我回答 / 等待授权 / 等待计划确认'),
-    onMaxTokens: Schema.boolean().default(true).description('Token 达到上限'),
-    includeSubagent: Schema.boolean().default(false).description('子 Agent 事件也推送'),
-  })
-    .default(defaultEvents())
-    .description('事件开关'),
-  content: Schema.object({
-    includeMetadata: Schema.boolean().default(true).description('正文附带耗时 / token'),
-    includeUserPrompt: Schema.boolean().default(false).description('正文附带上一轮用户提问'),
-    maxBodyChars: Schema.number().min(200).max(20000).step(1).default(1800).description('正文上限字符数'),
-  })
-    .default(defaultContent())
-    .description('正文内容'),
+  events: EventsSchema,
+  content: ContentSchema,
   routing: Schema.object({
     allowPrefix: Schema.boolean().default(true).description('允许「<短id> 继续」显式前缀定向'),
     fallback: Schema.union(['latest', 'intervention', 'none'] as const)
@@ -342,3 +359,43 @@ export const Config: Schema<TlnotifyConfig> = Schema.object({
   logLevel: Schema.union(['debug', 'info', 'warn', 'error'] as const).default('info').description('日志级别'),
   dataDir: Schema.string().default('').description('数据目录；留空 = $DSH_HOME/tlnotify'),
 })
+
+// ---------------------------------------------------------------------------
+// 每机器人独立设置：生效规则
+// ---------------------------------------------------------------------------
+
+/** 一台机器人最终生效的通知规则（全局默认 + 通道覆盖）。 */
+export function resolveChannelSettings(
+  config: Pick<TlnotifyConfig, 'events' | 'content'>,
+  channel: Pick<ChannelConfig, 'overrideEvents' | 'events' | 'overrideContent' | 'content'>,
+): { events: EventsConfig; content: ContentConfig } {
+  return {
+    // 覆盖时以**内置默认值**为底，而不是全局值：用户在设置页把一台机器人切到
+    // 「自定义」时会先拿当前生效值播种、再整体上行，所以这里不该再偷偷继承
+    // 全局——否则全局一改，已经被单独设置过的机器人会跟着变，那就不叫独立了。
+    events:
+      channel.overrideEvents && channel.events
+        ? { ...defaultEvents(), ...channel.events }
+        : config.events,
+    content:
+      channel.overrideContent && channel.content
+        ? { ...defaultContent(), ...channel.content }
+        : config.content,
+  }
+}
+
+/**
+ * 这台机器人是否关心该会话。
+ *
+ * `sessionScope` 缺省时按 `sessionFilter` 是否有值推断，保证 0.1.3 之前
+ * 「留空 = 全部、填了 = 白名单」的配置继续按原意工作。
+ */
+export function channelCaresAboutSession(
+  channel: Pick<ChannelConfig, 'sessionScope' | 'sessionFilter'>,
+  sessionId: string,
+): boolean {
+  const filter = Array.isArray(channel.sessionFilter) ? channel.sessionFilter : []
+  const scope = channel.sessionScope ?? (filter.length > 0 ? 'filter' : 'all')
+  if (scope !== 'filter') return true
+  return filter.includes(sessionId)
+}

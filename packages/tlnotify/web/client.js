@@ -2431,6 +2431,7 @@ window.__ModuleLoader__.load({
           id: channel.id,
           type: channel.type,
           enabled: channel.enabled,
+          label: channel.label ?? "",
           appId: channel.appId ?? "",
           targetChatId: channel.targetChatId ?? "",
           groupChatId: channel.groupChatId ?? "",
@@ -2438,8 +2439,15 @@ window.__ModuleLoader__.load({
           feishuReceiveId: channel.feishuReceiveId ?? "",
           feishuReceiveIdType: channel.feishuReceiveIdType,
           mode: channel.mode,
+          sessionScope: channel.sessionScope,
           sessionFilter: formatSessionFilter(channel.sessionFilter),
-          bindUrl: channel.bindUrl ?? ""
+          bindUrl: channel.bindUrl ?? "",
+          overrideEvents: channel.overrideEvents,
+          // 即使没开覆盖也照抄生效值：用户点开「自定义」的那一刻，看到的应该是
+          // **当前正在生效的那份**，而不是内置默认——否则一开开关行为就变了。
+          events: { ...channel.events },
+          overrideContent: channel.overrideContent,
+          content: { ...channel.content }
         };
       }
       function toDrafts(config) {
@@ -2450,6 +2458,7 @@ window.__ModuleLoader__.load({
           id: draft.id,
           type: draft.type,
           enabled: draft.enabled,
+          label: draft.label.trim(),
           appId: draft.appId.trim(),
           targetChatId: draft.targetChatId.trim(),
           groupChatId: draft.groupChatId.trim(),
@@ -2457,8 +2466,13 @@ window.__ModuleLoader__.load({
           feishuReceiveId: draft.feishuReceiveId.trim(),
           feishuReceiveIdType: draft.feishuReceiveIdType,
           mode: draft.mode,
+          sessionScope: draft.sessionScope,
           sessionFilter: parseSessionFilter(draft.sessionFilter),
-          bindUrl: draft.bindUrl.trim()
+          bindUrl: draft.bindUrl.trim(),
+          overrideEvents: draft.overrideEvents,
+          events: draft.overrideEvents ? { ...draft.events } : null,
+          overrideContent: draft.overrideContent,
+          content: draft.overrideContent ? { ...draft.content } : null
         };
       }
       function toChannelPatches(drafts) {
@@ -2471,13 +2485,14 @@ window.__ModuleLoader__.load({
         }
         return `${type}-${Date.now()}`;
       }
-      function createDraft(type, taken) {
+      function createDraft(type, taken, global) {
         return {
           id: nextId(type, taken),
           type,
           // **默认不启用**：新通道还没有凭据，直接启用会让宿主立刻去建连并失败，
           // 在状态栏上留下一串「通道不可用」。等用户填完再自己打开。
           enabled: false,
+          label: "",
           appId: "",
           targetChatId: "",
           groupChatId: "",
@@ -2485,102 +2500,233 @@ window.__ModuleLoader__.load({
           feishuReceiveId: "",
           feishuReceiveIdType: "open_id",
           mode: "active",
+          // 新机器人默认**关心全局**（所有会话），这样「加一个机器人」不会是个哑巴；
+          // 只想收特定会话的人可以到「更多设置 → 会话过滤」里改成列表。
+          sessionScope: "all",
           sessionFilter: "",
-          bindUrl: ""
+          bindUrl: "",
+          overrideEvents: false,
+          events: { ...global.events },
+          overrideContent: false,
+          content: { ...global.content }
         };
+      }
+      function draftTitle(draft) {
+        return draft.label.trim() || draft.id;
       }
     
       // src/client/panels/ChannelPanel.tsx
-      function replaceAt(drafts, index, patch) {
-        return drafts.map((draft, cursor) => cursor === index ? { ...draft, ...patch } : draft);
+      var RAIL_TYPES = ["qq", "feishu"];
+      function railLabel(t, type) {
+        return type === "qq" ? t("railQq") : t("railFeishu");
       }
       function ChannelPanel(props) {
         const { t, drafts } = props;
-        const taken = drafts.map((draft) => draft.id);
-        return /* @__PURE__ */ import_react4.default.createElement(Section, { title: t("channels"), hint: t("channelsHint") }, drafts.length === 0 ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "warn" }, t("channelsHint")) : null, drafts.map((draft, index) => {
-          const view = props.views.find((item) => item.id === draft.id);
-          const isDefault = props.defaultChannelId === draft.id;
-          const channelTest = props.test && props.test.channelId === draft.id ? props.test : void 0;
-          const channelQr = props.qr && props.qr.channelId === draft.id ? props.qr : void 0;
-          return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card", key: `${draft.id}:${index}` }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card-head" }, /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono" }, draft.id), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), isDefault ? /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-note tln-note-ok" }, t("isDefault")) : null, /* @__PURE__ */ import_react4.default.createElement(
-            Btn,
+        const [rail, setRail] = import_react4.default.useState("qq");
+        const [openBotId, setOpenBotId] = import_react4.default.useState(null);
+        const [subTab, setSubTab] = import_react4.default.useState("rules");
+        const visible = drafts.filter((draft) => draft.type === rail);
+        const viewOf = (id) => props.views.find((item) => item.id === id);
+        const update = (id, patch) => {
+          props.onChange(drafts.map((draft) => draft.id === id ? { ...draft, ...patch } : draft));
+        };
+        const openBot = drafts.find((draft) => draft.id === openBotId);
+        return /* @__PURE__ */ import_react4.default.createElement(Section, { title: t("channels"), hint: t("channelsHint") }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-rail", role: "tablist", "aria-label": t("channels") }, RAIL_TYPES.map((type) => {
+          const count = drafts.filter((draft) => draft.type === type).length;
+          return /* @__PURE__ */ import_react4.default.createElement(
+            "button",
             {
-              size: "sm",
-              disabled: props.busy || isDefault,
-              onClick: () => props.onDefault(draft.id)
-            },
-            t("setDefault")
-          ), /* @__PURE__ */ import_react4.default.createElement(
-            Btn,
-            {
-              size: "sm",
-              variant: "danger",
-              disabled: props.busy,
+              key: type,
+              type: "button",
+              role: "tab",
+              "aria-selected": rail === type,
+              className: "tln-rail-tab",
+              "data-active": rail === type ? "true" : "false",
               onClick: () => {
-                if (typeof window !== "undefined" && !window.confirm(t("removeConfirm"))) return;
-                const next = drafts.filter((_item, cursor) => cursor !== index);
-                props.onChange(next);
+                setRail(type);
+                setOpenBotId(null);
               }
             },
-            t("remove")
-          )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("channelId"), hint: t("channelIdHint") }, /* @__PURE__ */ import_react4.default.createElement(
+            /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-rail-name" }, railLabel(t, type)),
+            /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-rail-count" }, t("botCount", { n: count }))
+          );
+        })), openBot ? /* @__PURE__ */ import_react4.default.createElement(
+          BotSettingsPage,
+          {
+            t,
+            draft: openBot,
+            view: viewOf(openBot.id),
+            busy: props.busy,
+            secretEpoch: props.secretEpoch,
+            isDefault: props.defaultChannelId === openBot.id,
+            tab: subTab,
+            onTab: setSubTab,
+            onChange: (patch) => update(openBot.id, patch),
+            onSecret: props.onSecret,
+            onDefault: props.onDefault,
+            onRemove: () => {
+              if (typeof window !== "undefined" && !window.confirm(t("removeConfirm"))) return;
+              props.onChange(drafts.filter((draft) => draft.id !== openBot.id));
+              setOpenBotId(null);
+            },
+            onBack: () => setOpenBotId(null)
+          }
+        ) : /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-bots" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-panel-head" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-section-title" }, railLabel(t, rail)), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), rail === "qq" ? /* @__PURE__ */ import_react4.default.createElement(
+          Btn,
+          {
+            variant: "primary",
+            size: "sm",
+            disabled: props.busy,
+            onClick: () => props.onAdd("qq", true)
+          },
+          t("scanAdd")
+        ) : null, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onAdd(rail, false) }, rail === "qq" ? t("manualAdd") : t("addFeishu"))), visible.length === 0 ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "warn" }, t("botEmpty")) : null, visible.map((draft) => /* @__PURE__ */ import_react4.default.createElement(
+          BotCard,
+          {
+            key: draft.id,
+            t,
+            draft,
+            view: viewOf(draft.id),
+            global: props.global,
+            busy: props.busy,
+            secretEpoch: props.secretEpoch,
+            isDefault: props.defaultChannelId === draft.id,
+            taken: drafts.map((item) => item.id),
+            qr: props.qr && props.qr.channelId === draft.id ? props.qr : void 0,
+            test: props.test && props.test.channelId === draft.id ? props.test : void 0,
+            provision: props.provision && props.provision.channelId === draft.id ? props.provision : void 0,
+            onChange: (patch) => update(draft.id, patch),
+            onSecret: props.onSecret,
+            onDefault: props.onDefault,
+            onTest: props.onTest,
+            onQr: props.onQr,
+            onQrClose: props.onQrClose,
+            onProvision: props.onProvision,
+            onProvisionClose: props.onProvisionClose,
+            onOpenSettings: (tab) => {
+              setSubTab(tab);
+              setOpenBotId(draft.id);
+            },
+            onRemove: () => {
+              if (typeof window !== "undefined" && !window.confirm(t("removeConfirm"))) return;
+              props.onChange(drafts.filter((item) => item.id !== draft.id));
+            }
+          }
+        ))));
+      }
+      function BotCard(props) {
+        const { t, draft } = props;
+        const [open, setOpen] = import_react4.default.useState(false);
+        const [wizard, setWizard] = import_react4.default.useState(false);
+        const secretConfigured = draft.type === "qq" ? props.view?.appSecret.configured === true : props.view?.feishuAppSecret.configured === true;
+        const target = draft.type === "qq" ? draft.targetChatId : draft.feishuReceiveId;
+        const appId = draft.type === "qq" ? draft.appId : draft.feishuAppId;
+        const tone = draft.enabled ? secretConfigured && target.trim().length > 0 ? "on" : "warn" : "off";
+        return /* @__PURE__ */ import_react4.default.createElement("article", { className: "tln-botCard", "data-open": open ? "true" : "false", "data-bot-id": draft.id }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-botCard-head" }, /* @__PURE__ */ import_react4.default.createElement("button", { type: "button", className: "tln-botCard-toggle", onClick: () => setOpen(!open) }, /* @__PURE__ */ import_react4.default.createElement(Dot, { tone }), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-botCard-name" }, draftTitle(draft)), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono tln-botCard-id" }, draft.id), props.isDefault ? /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-note tln-note-ok" }, t("isDefault")) : null, /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, target.trim().length === 0 ? t("summaryNoTarget") : appId.trim() || t("summaryOff")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-caret" }, open ? "\u25BE" : "\u25B8"))), open ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-botCard-body" }, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("botName"), hint: t("botNameHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.label,
+            disabled: props.busy,
+            placeholder: draft.id,
+            onCommit: (value) => props.onChange({ label: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("channelEnabled") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.enabled,
+            disabled: props.busy,
+            label: draft.enabled ? t("on") : t("off"),
+            onChange: (next) => props.onChange({ enabled: next })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("channelId"), hint: t("channelIdHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.id,
+            disabled: props.busy,
+            onCommit: (value) => {
+              const trimmed = value.trim();
+              if (trimmed.length === 0 || props.taken.includes(trimmed)) return;
+              props.onChange({ id: trimmed });
+            }
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: wizard ? "primary" : "default", disabled: props.busy, onClick: () => setWizard(!wizard) }, t("wizard")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onOpenSettings("rules") }, t("more")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onTest(draft.id) }, props.busy ? t("testing") : t("test")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy || props.isDefault, onClick: () => props.onDefault(draft.id) }, t("setDefault")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "danger", disabled: props.busy, onClick: props.onRemove }, t("remove"))), props.test ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: props.test.tone === "ok" ? "ok" : "error" }, props.test.text) : null, props.provision ? /* @__PURE__ */ import_react4.default.createElement(
+          ProvisionBlock,
+          {
+            t,
+            draft,
+            state: props.provision,
+            busy: props.busy,
+            onRetry: () => props.onProvision(draft.id),
+            onClose: props.onProvisionClose
+          }
+        ) : null, props.qr ? /* @__PURE__ */ import_react4.default.createElement(QrBlock, { t, qr: props.qr, onClose: props.onQrClose }) : null, wizard ? /* @__PURE__ */ import_react4.default.createElement(
+          SetupWizard,
+          {
+            t,
+            draft,
+            view: props.view,
+            appId,
+            target,
+            secretConfigured,
+            busy: props.busy,
+            secretEpoch: props.secretEpoch,
+            test: props.test,
+            onChange: props.onChange,
+            onSecret: props.onSecret,
+            onTest: props.onTest,
+            onQr: props.onQr,
+            onProvision: props.onProvision
+          }
+        ) : null) : null);
+      }
+      function SetupWizard(props) {
+        const { t, draft } = props;
+        const done = [
+          props.appId.trim().length > 0,
+          props.secretConfigured,
+          props.target.trim().length > 0,
+          props.test?.tone === "ok"
+        ];
+        const firstTodo = done.findIndex((item) => !item);
+        const [openStep, setOpenStep] = import_react4.default.useState(firstTodo === -1 ? 1 : firstTodo + 1);
+        const toggle = (step) => {
+          setOpenStep(openStep === step ? 0 : step);
+        };
+        const stepHead = (step, title) => /* @__PURE__ */ import_react4.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "tln-step-head",
+            "data-open": openStep === step ? "true" : "false",
+            onClick: () => toggle(step)
+          },
+          /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-step-index" }, t("stepLabel", { n: step })),
+          /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-step-title" }, title),
+          /* @__PURE__ */ import_react4.default.createElement("span", { className: done[step - 1] ? "tln-note tln-note-ok" : "tln-hint" }, done[step - 1] ? t("stepDone") : t("stepTodo")),
+          /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }),
+          /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-caret" }, openStep === step ? "\u25BE" : "\u25B8")
+        );
+        const body = (step, children) => openStep === step ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step-body" }, children, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", onClick: () => setOpenStep(step === 4 ? 0 : step + 1) }, t("stepSkip")))) : null;
+        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-wizard" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-section-head" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-section-title" }, t("wizard")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("wizardHint"))), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step" }, stepHead(1, t("step1")), body(
+          1,
+          draft.type === "qq" ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("step1Qq")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "primary", disabled: props.busy, onClick: () => props.onProvision(draft.id) }, t("scanAdd")), /* @__PURE__ */ import_react4.default.createElement("a", { className: "tln-link", href: "https://q.qq.com/qqbot/openclaw", target: "_blank", rel: "noreferrer" }, t("openQqPlatform")))) : /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("step1Feishu")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement("a", { className: "tln-link", href: "https://open.feishu.cn/app", target: "_blank", rel: "noreferrer" }, t("openFeishuPlatform"))))
+        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step" }, stepHead(2, t("step2")), body(
+          2,
+          /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("appId"), hint: t("step2Hint") }, /* @__PURE__ */ import_react4.default.createElement(
             TextInput,
             {
-              value: draft.id,
+              value: props.appId,
               disabled: props.busy,
-              onCommit: (value) => {
-                const trimmed = value.trim();
-                if (trimmed.length === 0 || taken.includes(trimmed)) return;
-                props.onChange(replaceAt(drafts, index, { id: trimmed }));
-              }
-            }
-          )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("channelType") }, /* @__PURE__ */ import_react4.default.createElement(
-            Seg,
-            {
-              value: draft.type,
-              disabled: props.busy,
-              ariaLabel: t("channelType"),
-              options: [
-                { value: "qq", label: "QQ" },
-                { value: "feishu", label: "\u98DE\u4E66" }
-              ],
-              onChange: (value) => (
-                // 切换类型时不动 `feishuReceiveIdType`：它只对飞书有意义，保留原值
-                // 让用户在两种类型间来回切时不会丢掉已选的接收者类型。
-                props.onChange(replaceAt(drafts, index, { type: value }))
-              )
-            }
-          )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("channelEnabled") }, /* @__PURE__ */ import_react4.default.createElement(
-            Check,
-            {
-              checked: draft.enabled,
-              disabled: props.busy,
-              label: draft.enabled ? t("on") : t("off"),
-              onChange: (next) => props.onChange(replaceAt(drafts, index, { enabled: next }))
-            }
-          )), draft.type === "qq" ? /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("appId") }, /* @__PURE__ */ import_react4.default.createElement(
-            TextInput,
-            {
-              value: draft.appId,
-              disabled: props.busy,
-              placeholder: "102xxxxxx",
-              onCommit: (value) => props.onChange(replaceAt(drafts, index, { appId: value }))
-            }
-          )) : /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("appId") }, /* @__PURE__ */ import_react4.default.createElement(
-            TextInput,
-            {
-              value: draft.feishuAppId,
-              disabled: props.busy,
-              placeholder: "cli_xxxxxxxxxxxx",
-              onCommit: (value) => props.onChange(replaceAt(drafts, index, { feishuAppId: value }))
+              placeholder: draft.type === "qq" ? "102xxxxxx" : "cli_xxxxxxxxxxxx",
+              onCommit: (value) => props.onChange(draft.type === "qq" ? { appId: value } : { feishuAppId: value })
             }
           )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-row" }, /* @__PURE__ */ import_react4.default.createElement(
             SecretField,
             {
               key: `${draft.id}:${draft.type}:${props.secretEpoch}`,
               label: t("appSecret"),
-              configured: draft.type === "qq" ? view?.appSecret.configured === true : view?.feishuAppSecret.configured === true,
-              hint: draft.type === "qq" ? view?.appSecret.hint ?? "" : view?.feishuAppSecret.hint ?? "",
+              configured: props.secretConfigured,
+              hint: draft.type === "qq" ? props.view?.appSecret.hint ?? "" : props.view?.feishuAppSecret.hint ?? "",
               disabled: props.busy,
               t,
               onCommit: (value) => props.onSecret(draft.id, draft.type === "qq" ? "appSecret" : "feishuAppSecret", value)
@@ -2591,63 +2737,205 @@ window.__ModuleLoader__.load({
               value: draft.feishuReceiveIdType,
               disabled: props.busy,
               options: FEISHU_RECEIVE_ID_TYPES.map((item) => ({ value: item, label: item })),
-              onChange: (value) => props.onChange(
-                replaceAt(drafts, index, { feishuReceiveIdType: value })
-              )
+              onChange: (value) => props.onChange({ feishuReceiveIdType: value })
             }
-          )) : null, /* @__PURE__ */ import_react4.default.createElement(
-            Row,
-            {
-              label: t("targetId"),
-              hint: draft.type === "qq" ? t("targetIdHintQq") : t("targetIdHintFeishu")
-            },
-            /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-inline" }, draft.type === "qq" ? /* @__PURE__ */ import_react4.default.createElement(
-              TextInput,
-              {
-                className: "tln-grow",
-                value: draft.targetChatId,
-                disabled: props.busy,
-                onCommit: (value) => props.onChange(replaceAt(drafts, index, { targetChatId: value }))
-              }
-            ) : /* @__PURE__ */ import_react4.default.createElement(
-              TextInput,
-              {
-                className: "tln-grow",
-                value: draft.feishuReceiveId,
-                disabled: props.busy,
-                onCommit: (value) => props.onChange(replaceAt(drafts, index, { feishuReceiveId: value }))
-              }
-            ), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onQr(draft.id) }, t("qrBind")))
-          ), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("pushMode"), hint: t("pushModeHint") }, /* @__PURE__ */ import_react4.default.createElement(
-            Seg,
-            {
-              value: draft.mode,
-              disabled: props.busy,
-              ariaLabel: t("pushMode"),
-              options: [
-                { value: "active", label: t("pushActive") },
-                { value: "passive", label: t("pushPassive") }
-              ],
-              onChange: (value) => props.onChange(replaceAt(drafts, index, { mode: value }))
-            }
-          )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("bindLink"), hint: t("bindLinkHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          )) : null)
+        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step" }, stepHead(3, t("step3")), body(
+          3,
+          /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, draft.type === "qq" ? t("step3Qq") : t("step3Feishu")), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("targetId") }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-inline" }, /* @__PURE__ */ import_react4.default.createElement(
             TextInput,
             {
-              value: draft.bindUrl,
+              className: "tln-grow",
+              value: props.target,
               disabled: props.busy,
-              placeholder: "https://\u2026",
-              onCommit: (value) => props.onChange(replaceAt(drafts, index, { bindUrl: value }))
+              onCommit: (value) => props.onChange(draft.type === "qq" ? { targetChatId: value } : { feishuReceiveId: value })
             }
-          )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("sessionFilter"), hint: t("sessionFilterHint") }, /* @__PURE__ */ import_react4.default.createElement(
-            TextArea,
-            {
-              value: draft.sessionFilter,
-              disabled: props.busy,
-              rows: 2,
-              onCommit: (value) => props.onChange(replaceAt(drafts, index, { sessionFilter: value }))
-            }
-          )), channelQr ? /* @__PURE__ */ import_react4.default.createElement(QrBlock, { t, qr: channelQr, onClose: props.onQrClose }) : null, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onTest(draft.id) }, props.busy ? t("testing") : t("test")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, t("testHint"))), channelTest ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: channelTest.tone === "ok" ? "ok" : "error" }, channelTest.text) : null);
-        }), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onAdd("qq") }, t("addQq")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onAdd("feishu") }, t("addFeishu"))));
+          ), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onQr(draft.id) }, t("qrBind")))))
+        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step" }, stepHead(4, t("step4")), body(
+          4,
+          /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onTest(draft.id) }, props.busy ? t("testing") : t("test")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, t("testHint")))
+        )));
+      }
+      function BotSettingsPage(props) {
+        const { t, draft } = props;
+        const tabs = [
+          { value: "rules", label: t("tabRules") },
+          { value: "sessions", label: t("tabSessions") },
+          { value: "advanced", label: t("tabAdvanced") }
+        ];
+        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-subpage" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-subpage-head" }, /* @__PURE__ */ import_react4.default.createElement("button", { type: "button", className: "tln-link", onClick: props.onBack }, t("backToList")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-botCard-name" }, draftTitle(draft)), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono tln-botCard-id" }, draft.id)), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-tabs", role: "tablist" }, tabs.map((item) => /* @__PURE__ */ import_react4.default.createElement(
+          "button",
+          {
+            key: item.value,
+            type: "button",
+            role: "tab",
+            "aria-selected": props.tab === item.value,
+            className: "tln-tab",
+            "data-active": props.tab === item.value ? "true" : "false",
+            onClick: () => props.onTab(item.value)
+          },
+          item.label
+        ))), props.tab === "rules" ? /* @__PURE__ */ import_react4.default.createElement(RulesTab, { ...props }) : null, props.tab === "sessions" ? /* @__PURE__ */ import_react4.default.createElement(SessionsTab, { ...props }) : null, props.tab === "advanced" ? /* @__PURE__ */ import_react4.default.createElement(AdvancedTab, { ...props }) : null);
+      }
+      function RulesTab(props) {
+        const { t, draft } = props;
+        return /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("events"), hint: draft.overrideEvents ? t("customHint") : t("followGlobalHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Seg,
+          {
+            value: draft.overrideEvents ? "custom" : "global",
+            disabled: props.busy,
+            ariaLabel: t("events"),
+            options: [
+              { value: "global", label: t("followGlobal") },
+              { value: "custom", label: t("custom") }
+            ],
+            onChange: (value) => props.onChange({ overrideEvents: value === "custom" })
+          }
+        )), draft.overrideEvents ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, [
+          ["onTurnEnd", t("evTurnEnd")],
+          ["onError", t("evError")],
+          ["onAborted", t("evAborted")],
+          ["onPending", t("evPending")],
+          ["onMaxTokens", t("evMaxTokens")],
+          ["includeSubagent", t("evIncludeSubagent")]
+        ].map(([key, label]) => /* @__PURE__ */ import_react4.default.createElement(Row, { key, label }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.events[key],
+            disabled: props.busy,
+            label: draft.events[key] ? t("on") : t("off"),
+            onChange: (next) => props.onChange({ events: { ...draft.events, [key]: next } })
+          }
+        )))) : null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("content"), hint: draft.overrideContent ? t("customHint") : t("followGlobalHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Seg,
+          {
+            value: draft.overrideContent ? "custom" : "global",
+            disabled: props.busy,
+            ariaLabel: t("content"),
+            options: [
+              { value: "global", label: t("followGlobal") },
+              { value: "custom", label: t("custom") }
+            ],
+            onChange: (value) => props.onChange({ overrideContent: value === "custom" })
+          }
+        )), draft.overrideContent ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("ctIncludeMetadata") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.content.includeMetadata,
+            disabled: props.busy,
+            label: draft.content.includeMetadata ? t("on") : t("off"),
+            onChange: (next) => props.onChange({ content: { ...draft.content, includeMetadata: next } })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("ctIncludeUserPrompt") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.content.includeUserPrompt,
+            disabled: props.busy,
+            label: draft.content.includeUserPrompt ? t("on") : t("off"),
+            onChange: (next) => props.onChange({ content: { ...draft.content, includeUserPrompt: next } })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("ctMaxBodyChars"), hint: t("ctMaxBodyCharsHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          NumInput,
+          {
+            value: draft.content.maxBodyChars,
+            min: 200,
+            max: 2e4,
+            disabled: props.busy,
+            onCommit: (value) => props.onChange({ content: { ...draft.content, maxBodyChars: value } })
+          }
+        ))) : null);
+      }
+      function SessionsTab(props) {
+        const { t, draft } = props;
+        return /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("tabSessions"), hint: t("scopeHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Seg,
+          {
+            value: draft.sessionScope,
+            disabled: props.busy,
+            ariaLabel: t("tabSessions"),
+            options: [
+              { value: "all", label: t("scopeAll") },
+              { value: "filter", label: t("scopeFilter") }
+            ],
+            onChange: (value) => props.onChange({ sessionScope: value })
+          }
+        )), draft.sessionScope === "filter" ? /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("sessionFilter"), hint: t("sessionFilterHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextArea,
+          {
+            value: draft.sessionFilter,
+            disabled: props.busy,
+            rows: 4,
+            onCommit: (value) => props.onChange({ sessionFilter: value })
+          }
+        )) : null);
+      }
+      function AdvancedTab(props) {
+        const { t, draft } = props;
+        return /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("pushMode"), hint: t("pushModeHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Seg,
+          {
+            value: draft.mode,
+            disabled: props.busy,
+            ariaLabel: t("pushMode"),
+            options: [
+              { value: "active", label: t("pushActive") },
+              { value: "passive", label: t("pushPassive") }
+            ],
+            onChange: (value) => props.onChange({ mode: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("bindLink"), hint: t("bindLinkHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.bindUrl,
+            disabled: props.busy,
+            placeholder: "https://\u2026",
+            onCommit: (value) => props.onChange({ bindUrl: value })
+          }
+        )), draft.type === "feishu" ? /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("receiveIdType") }, /* @__PURE__ */ import_react4.default.createElement(
+          Select,
+          {
+            value: draft.feishuReceiveIdType,
+            disabled: props.busy,
+            options: FEISHU_RECEIVE_ID_TYPES.map((item) => ({ value: item, label: item })),
+            onChange: (value) => props.onChange({ feishuReceiveIdType: value })
+          }
+        )) : null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("groupChatId"), hint: t("groupChatIdHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.groupChatId,
+            disabled: props.busy,
+            onCommit: (value) => props.onChange({ groupChatId: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy || props.isDefault, onClick: () => props.onDefault(draft.id) }, t("setDefault")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "danger", disabled: props.busy, onClick: props.onRemove }, t("remove"))));
+      }
+      function ProvisionBlock(props) {
+        const { t, state } = props;
+        const snapshot = state.snapshot;
+        const phase = snapshot?.state ?? "starting";
+        const footer = (retry) => /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, retry ? /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "primary", disabled: props.busy, onClick: props.onRetry }, t("provisionRetry")) : null, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", onClick: props.onClose }, t("qrClose")));
+        if (!snapshot) {
+          return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card-head" }, t("provisionTitle")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, state.message ?? t("provisionStarting")), footer(false));
+        }
+        if (phase === "done") {
+          return /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "ok" }, t("provisionDone"), footer(false));
+        }
+        if (phase === "failed" || phase === "expired" || phase === "cancelled") {
+          const text = phase === "failed" ? `${t("provisionFailed")}\uFF1A${snapshot.error ?? state.message ?? ""}` : phase === "expired" ? t("provisionExpired") : t("provisionCancelled");
+          return /* @__PURE__ */ import_react4.default.createElement(Note, { tone: phase === "failed" ? "error" : "warn" }, text, footer(phase !== "cancelled"));
+        }
+        const qrText = snapshot.qrText;
+        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card-head" }, t("provisionTitle"), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), snapshot.expiresAt ? /* @__PURE__ */ import_react4.default.createElement(Countdown, { t, until: snapshot.expiresAt }) : null), phase === "connecting" ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionConnecting")) : phase === "scanned" ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionScanned")) : qrText ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-layout" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-img" }, /* @__PURE__ */ import_react4.default.createElement(QrCode, { text: qrText })), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-side" }, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("provisionHint")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, props.draft.type === "qq" ? "" : t("provisionFeishu")))) : /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionStarting")), footer(true));
+      }
+      function Countdown(props) {
+        const [left, setLeft] = import_react4.default.useState(Math.max(0, props.until - Date.now()));
+        import_react4.default.useEffect(() => {
+          const timer = window.setInterval(() => setLeft(Math.max(0, props.until - Date.now())), 1e3);
+          return () => window.clearInterval(timer);
+        }, [props.until]);
+        const seconds = Math.ceil(left / 1e3);
+        const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
+        const ss = String(seconds % 60).padStart(2, "0");
+        return /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono" }, `${mm}:${ss}`);
       }
       function QrBlock(props) {
         const { t, qr } = props;
@@ -2661,7 +2949,7 @@ window.__ModuleLoader__.load({
           return /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "ok" }, t("qrDone"), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", onClick: props.onClose }, t("qrClose"))));
         }
         const text = qr.payload?.qrText;
-        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card-head" }, t("qrTitle")), qr.phase === "loading" || !text ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("qrWorking")) : /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(QrCode, { text }), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("qrWaiting")), qr.payload && qr.payload.derived === false ? /* @__PURE__ */ import_react4.default.createElement("div", null, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("qrFallback")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-mono", style: { wordBreak: "break-all" } }, text)) : null, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-kv" }, /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, t("qrBind")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono" }, qr.payload?.token))), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", onClick: props.onClose }, t("qrClose"))));
+        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card-head" }, t("qrTitle")), qr.phase === "loading" || !text ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("qrWorking")) : /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-layout" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-img" }, /* @__PURE__ */ import_react4.default.createElement(QrCode, { text })), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-side" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("qrWaiting")), qr.payload && qr.payload.derived === false ? /* @__PURE__ */ import_react4.default.createElement("div", null, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("qrFallback")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-mono", style: { wordBreak: "break-all" } }, text)) : null, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-kv" }, /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, t("qrBind")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono" }, qr.payload?.token)))), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", onClick: props.onClose }, t("qrClose"))));
       }
     
       // src/protocol.ts
@@ -2673,7 +2961,10 @@ window.__ModuleLoader__.load({
         "patch",
         "test",
         "qr",
-        "bind"
+        "bind",
+        "provision.begin",
+        "provision.poll",
+        "provision.cancel"
       ]);
       function rpcEndpoint(method) {
         return `${RPC_ENDPOINT_PREFIX}/${method}`;
@@ -2771,24 +3062,30 @@ window.__ModuleLoader__.load({
         const [flash, setFlash] = import_react5.default.useState(void 0);
         const [qr, setQr] = import_react5.default.useState(void 0);
         const [test, setTest] = import_react5.default.useState(void 0);
+        const [provision, setProvision] = import_react5.default.useState(void 0);
         const [secretEpoch, setSecretEpoch] = import_react5.default.useState(0);
-        const applyState = import_react5.default.useCallback((next) => {
+        const applyState = import_react5.default.useCallback((next, force = false) => {
           setState(next);
-          setDrafts((previous) => sameChannelIds(previous, next.config.channels) ? previous : toDrafts(next.config));
+          setDrafts(
+            (previous) => !force && sameChannelIds(previous, next.config.channels) ? previous : toDrafts(next.config)
+          );
         }, []);
-        const reload = import_react5.default.useCallback(async () => {
-          try {
-            const result = await rpc.call("state");
-            if (!result.ok) {
-              setError(result.error.message);
-              return;
+        const reload = import_react5.default.useCallback(
+          async (force = false) => {
+            try {
+              const result = await rpc.call("state");
+              if (!result.ok) {
+                setError(result.error.message);
+                return;
+              }
+              setError(void 0);
+              applyState(result.value, force);
+            } catch (error2) {
+              setError(error2 instanceof Error ? error2.message : String(error2));
             }
-            setError(void 0);
-            applyState(result.value);
-          } catch (error2) {
-            setError(error2 instanceof Error ? error2.message : String(error2));
-          }
-        }, [rpc, applyState]);
+          },
+          [rpc, applyState]
+        );
         import_react5.default.useEffect(() => {
           void reload();
         }, [reload]);
@@ -2826,13 +3123,76 @@ window.__ModuleLoader__.load({
           },
           [patch]
         );
-        const addChannel = import_react5.default.useCallback(
-          (type) => {
-            const next = [...drafts, createDraft(type, drafts.map((draft) => draft.id))];
-            commitChannels(next);
+        const beginProvision = import_react5.default.useCallback(
+          async (channelId) => {
+            setProvision({ channelId });
+            const result = await rpc.call("provision.begin", { channelId });
+            if (!result.ok) {
+              setProvision({ channelId, message: result.error.message });
+              return;
+            }
+            setProvision({ channelId, snapshot: result.value });
           },
-          [drafts, commitChannels]
+          [rpc]
         );
+        const closeProvision = import_react5.default.useCallback(() => {
+          const current = provision;
+          setProvision(void 0);
+          const snapshot = current?.snapshot;
+          if (!current || !snapshot) return;
+          if (snapshot.state === "done" || snapshot.state === "failed" || snapshot.state === "cancelled") return;
+          void rpc.call("provision.cancel", {
+            channelId: current.channelId,
+            attemptId: snapshot.attemptId
+          });
+        }, [provision, rpc]);
+        const addChannel = import_react5.default.useCallback(
+          (type, startProvision = false) => {
+            if (!state) return;
+            const draft = createDraft(type, drafts.map((item) => item.id), {
+              events: state.config.events,
+              content: state.config.content
+            });
+            const next = [...drafts, draft];
+            setDrafts(next);
+            void (async () => {
+              const saved = await patch({ channels: toChannelPatches(next) });
+              if (saved && startProvision) void beginProvision(draft.id);
+            })();
+          },
+          [state, drafts, patch, beginProvision]
+        );
+        const provisionChannelId = provision?.channelId;
+        const provisionAttemptId = provision?.snapshot?.attemptId;
+        const provisionState = provision?.snapshot?.state;
+        const provisionInterval = provision?.snapshot?.pollIntervalMs;
+        import_react5.default.useEffect(() => {
+          if (!provisionChannelId || !provisionAttemptId) return void 0;
+          if (provisionState !== "starting" && provisionState !== "waiting" && provisionState !== "scanned" && provisionState !== "connecting") {
+            return void 0;
+          }
+          let cancelled = false;
+          const tick = async () => {
+            const result = await rpc.call("provision.poll", {
+              channelId: provisionChannelId,
+              attemptId: provisionAttemptId
+            });
+            if (cancelled) return;
+            if (!result.ok) {
+              setProvision({ channelId: provisionChannelId, message: result.error.message });
+              return;
+            }
+            setProvision({ channelId: provisionChannelId, snapshot: result.value });
+            if (result.value.state === "done") await reload(true);
+          };
+          const timer = window.setInterval(() => {
+            void tick();
+          }, Math.max(500, provisionInterval ?? 1e3));
+          return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+          };
+        }, [provisionChannelId, provisionAttemptId, provisionState, provisionInterval, rpc, reload]);
         const saveSecret = import_react5.default.useCallback(
           (id, field, value) => {
             const next = drafts.map((draft) => {
@@ -2950,18 +3310,22 @@ window.__ModuleLoader__.load({
             t,
             drafts,
             views: config.channels,
+            global: { events: config.events, content: config.content },
             defaultChannelId: config.defaultChannelId,
             busy,
             secretEpoch,
             qr,
             test,
+            provision,
             onChange: (next) => commitChannels(next),
             onAdd: addChannel,
             onSecret: saveSecret,
             onDefault: (id) => void patch({ defaultChannelId: id }),
             onTest: (id) => void runTest(id),
             onQr: (id) => void openQr(id),
-            onQrClose: () => setQr(void 0)
+            onQrClose: () => setQr(void 0),
+            onProvision: (id) => void beginProvision(id),
+            onProvisionClose: closeProvision
           }
         ), /* @__PURE__ */ import_react5.default.createElement(Section, { title: t("events"), hint: t("eventsHint") }, /* @__PURE__ */ import_react5.default.createElement(Row, { label: t("evTurnEnd") }, /* @__PURE__ */ import_react5.default.createElement(
           Check,
@@ -3245,6 +3609,60 @@ window.__ModuleLoader__.load({
         statusPushed: "\u5DF2\u63A8\u9001 {n} \u6761",
         statusChannels: "\u901A\u9053 {ok}/{total} \u53EF\u7528",
         statusSince: "\u672C\u6B21\u542F\u52A8\u4E8E {time}",
+        railQq: "QQ \u673A\u5668\u4EBA",
+        railFeishu: "\u98DE\u4E66\u673A\u5668\u4EBA",
+        scanAdd: "\u626B\u7801\u63A5\u5165\u673A\u5668\u4EBA",
+        manualAdd: "\u624B\u52A8\u6DFB\u52A0",
+        botEmpty: "\u8FD9\u4E2A\u7C7B\u578B\u4E0B\u8FD8\u6CA1\u6709\u673A\u5668\u4EBA\uFF0C\u70B9\u4E0A\u9762\u7684\u6309\u94AE\u52A0\u4E00\u4E2A\u3002",
+        botCount: "{n} \u4E2A",
+        botName: "\u540D\u79F0",
+        botNameHint: "\u53EA\u5F71\u54CD\u8FD9\u4E00\u9875\u7684\u663E\u793A\uFF1B\u7559\u7A7A\u5C31\u7528\u6807\u8BC6\u3002",
+        more: "\u66F4\u591A\u8BBE\u7F6E",
+        backToList: "\u2190 \u8FD4\u56DE\u673A\u5668\u4EBA\u5217\u8868",
+        summaryOff: "\u672A\u542F\u7528",
+        summaryNoTarget: "\u672A\u7ED1\u5B9A\u76EE\u6807",
+        tabRules: "\u901A\u77E5\u89C4\u5219",
+        tabSessions: "\u4F1A\u8BDD\u8FC7\u6EE4",
+        tabAdvanced: "\u9AD8\u7EA7",
+        followGlobal: "\u8DDF\u968F\u5168\u5C40",
+        custom: "\u81EA\u5B9A\u4E49",
+        followGlobalHint: "\u7528\u5168\u5C40\u7684\u300C\u63A8\u54EA\u4E9B\u4E8B\u4EF6\u300D\u4E0E\u300C\u6B63\u6587\u5185\u5BB9\u300D\u3002",
+        customHint: "\u8FD9\u4E00\u4E2A\u673A\u5668\u4EBA\u5355\u72EC\u8BBE\u7F6E\uFF0C\u4E0B\u9762\u7684\u5F00\u5173\u53EA\u5F71\u54CD\u5B83\u3002",
+        scopeAll: "\u5173\u5FC3\u5168\u90E8\u4F1A\u8BDD",
+        scopeFilter: "\u53EA\u5173\u5FC3\u5217\u8868\u91CC\u7684\u4F1A\u8BDD",
+        scopeHint: "\u300C\u5173\u5FC3\u5168\u90E8\u4F1A\u8BDD\u300D\uFF1D\u6240\u6709\u4F1A\u8BDD\u7684\u4E8B\u4EF6\u90FD\u63A8\u7ED9\u5B83\uFF1B\u300C\u53EA\u5173\u5FC3\u5217\u8868\u300D\uFF1D\u53EA\u63A8\u4E0B\u9762\u5217\u51FA\u7684\u4F1A\u8BDD\u3002",
+        groupChatId: "\u7FA4 ID",
+        groupChatIdHint: "\u53EF\u9009\u3002\u586B\u4E86\u4E4B\u540E\u8FD9\u4E2A\u7FA4\u4E5F\u4F1A\u6536\u5230\u901A\u77E5\uFF08\u98DE\u4E66\u7528 chat_id\uFF0CQQ \u7528\u7FA4 openid\uFF09\u3002",
+        wizard: "\u63A5\u5165\u5411\u5BFC",
+        wizardHint: "\u56DB\u6B65\u8D70\u5B8C\u5C31\u80FD\u7528\u3002\u6BCF\u4E00\u6B65\u90FD\u53EF\u4EE5\u8DF3\u8FC7\u2014\u2014\u8DF3\u8FC7\u4E0D\u4F1A\u4E22\u6389\u5DF2\u7ECF\u4FDD\u5B58\u7684\u4E1C\u897F\u3002",
+        stepLabel: "\u7B2C {n} \u6B65",
+        step1: "\u521B\u5EFA\u673A\u5668\u4EBA",
+        step2: "\u586B\u51ED\u636E",
+        step3: "\u7ED1\u5B9A\u76EE\u6807",
+        step4: "\u6D4B\u8BD5\u8FDE\u63A5",
+        stepDone: "\u5DF2\u5B8C\u6210",
+        stepTodo: "\u5F85\u5B8C\u6210",
+        stepSkip: "\u8DF3\u8FC7",
+        stepOpen: "\u5C55\u5F00",
+        stepCollapse: "\u6536\u8D77",
+        step1Qq: "\u70B9\u53F3\u4E0A\u89D2\u7684\u300C\u626B\u7801\u63A5\u5165\u673A\u5668\u4EBA\u300D\uFF0C\u7528\u624B\u673A QQ \u626B\u7801\u5E76\u6309\u63D0\u793A\u521B\u5EFA\u673A\u5668\u4EBA\uFF1A\u51ED\u636E\u4F1A\u81EA\u52A8\u586B\u597D\uFF0C\u4E0D\u7528\u624B\u6284\u3002\u4E5F\u53EF\u4EE5\u81EA\u5DF1\u5230 QQ \u5F00\u653E\u5E73\u53F0\u5EFA\u597D\uFF0C\u518D\u628A AppID / AppSecret \u586B\u5230\u7B2C 2 \u6B65\u3002",
+        step1Feishu: "\u5230\u98DE\u4E66\u5F00\u653E\u5E73\u53F0\u5EFA\u4E00\u4E2A\u300C\u4F01\u4E1A\u81EA\u5EFA\u5E94\u7528\u300D\uFF0C\u5F00\u901A\u673A\u5668\u4EBA\u80FD\u529B\uFF0C\u518D\u628A\u5B83\u62C9\u8FDB\u4F60\u8981\u6536\u901A\u77E5\u7684\u4F1A\u8BDD\uFF08\u6216\u8005\u76F4\u63A5\u548C\u5B83\u5355\u804A\uFF09\u3002\u7136\u540E\u628A AppID / AppSecret \u586B\u5230\u7B2C 2 \u6B65\u3002",
+        openQqPlatform: "\u6253\u5F00 QQ \u5F00\u653E\u5E73\u53F0",
+        openFeishuPlatform: "\u6253\u5F00\u98DE\u4E66\u5F00\u653E\u5E73\u53F0",
+        step2Hint: "AppID \u4E0D\u662F\u5BC6\u94A5\uFF0C\u968F\u65F6\u80FD\u6539\uFF1BAppSecret \u53EA\u5728\u4E0A\u884C\u65F6\u53D1\u4E00\u6B21\uFF0C\u4E4B\u540E\u4E0D\u518D\u56DE\u663E\u3002",
+        step3Qq: "\u5148\u628A\u673A\u5668\u4EBA\u52A0\u4E3A\u597D\u53CB\uFF08\u6216\u626B\u673A\u5668\u4EBA\u81EA\u5DF1\u7684\u7801\u6253\u5F00\u5B83\uFF09\uFF0C\u7136\u540E\u70B9\u300C\u626B\u7801\u7ED1\u5B9A\u300D\uFF0C\u7ED9\u673A\u5668\u4EBA\u968F\u4FBF\u53D1\u4E00\u6761\u6D88\u606F\u2014\u2014\u76EE\u6807 ID \u4F1A\u81EA\u52A8\u586B\u4E0A\u3002",
+        step3Feishu: "\u70B9\u300C\u626B\u7801\u7ED1\u5B9A\u300D\u751F\u6210\u4E8C\u7EF4\u7801\uFF0C\u7528\u98DE\u4E66\u626B\u5B83\u6253\u5F00\u8DDF\u673A\u5668\u4EBA\u7684\u4F1A\u8BDD\uFF0C\u968F\u4FBF\u53D1\u4E00\u6761\u6D88\u606F\u2014\u2014\u63A5\u6536\u8005 ID \u4F1A\u81EA\u52A8\u586B\u4E0A\u3002",
+        provisionTitle: "\u7528\u624B\u673A QQ \u626B\u7801\u521B\u5EFA\u673A\u5668\u4EBA",
+        provisionHint: "\u626B\u5B8C\u7801\u6309\u624B\u673A\u4E0A\u7684\u63D0\u793A\u8D70\uFF1A\u767B\u5F55 QQ \u2192 \u521B\u5EFA\u673A\u5668\u4EBA \u2192 \u786E\u8BA4\u6388\u6743\u3002\u8FD9\u4E2A\u7A97\u53E3\u4F1A\u4E00\u76F4\u7B49\u4F60\u3002",
+        provisionStarting: "\u6B63\u5728\u5411 QQ \u7533\u8BF7\u4E8C\u7EF4\u7801\u2026",
+        provisionScanned: "\u5DF2\u626B\u7801\uFF0C\u6B63\u5728\u7B49\u4F60\u5728\u624B\u673A\u4E0A\u786E\u8BA4\u2026",
+        provisionConnecting: "\u62FF\u5230\u51ED\u636E\u4E86\uFF0C\u6B63\u5728\u5199\u5165\u914D\u7F6E\u2026",
+        provisionDone: "\u63A5\u5165\u6210\u529F\uFF1AAppID\u3001AppSecret \u548C\u76EE\u6807 ID \u90FD\u5DF2\u81EA\u52A8\u586B\u597D\u3002",
+        provisionExpired: "\u4E8C\u7EF4\u7801\u8FC7\u671F\u4E86\uFF0C\u91CD\u65B0\u751F\u6210\u4E00\u4E2A\u3002",
+        provisionCancelled: "\u5DF2\u53D6\u6D88\u3002",
+        provisionFailed: "\u626B\u7801\u63A5\u5165\u5931\u8D25",
+        provisionRetry: "\u91CD\u65B0\u751F\u6210\u4E8C\u7EF4\u7801",
+        provisionFeishu: "\u98DE\u4E66\u4E0D\u7528\u626B\u7801\u521B\u5EFA\uFF0C\u6309\u7B2C 1 \u6B65\u5728\u5F00\u653E\u5E73\u53F0\u5EFA\u597D\u5E94\u7528\u5373\u53EF\uFF1B\u300C\u626B\u7801\u7ED1\u5B9A\u300D\u5728\u7B2C 3 \u6B65\u3002",
         on: "\u5F00",
         off: "\u5173",
         yes: "\u662F",
@@ -3363,6 +3781,60 @@ window.__ModuleLoader__.load({
         statusPushed: "{n} pushed",
         statusChannels: "{ok}/{total} channels up",
         statusSince: "Started at {time}",
+        railQq: "QQ bots",
+        railFeishu: "Feishu bots",
+        scanAdd: "Add a bot by scanning",
+        manualAdd: "Add manually",
+        botEmpty: "No bots of this type yet \u2014 use the buttons above.",
+        botCount: "{n}",
+        botName: "Name",
+        botNameHint: "Display name only; leave it empty to use the id.",
+        more: "More settings",
+        backToList: "\u2190 Back to the bot list",
+        summaryOff: "disabled",
+        summaryNoTarget: "no target bound",
+        tabRules: "Notify rules",
+        tabSessions: "Sessions",
+        tabAdvanced: "Advanced",
+        followGlobal: "Follow global",
+        custom: "Custom",
+        followGlobalHint: "Use the global \u201Cwhich events\u201D and \u201Cmessage body\u201D settings.",
+        customHint: "Configured for this bot alone; the switches below affect nothing else.",
+        scopeAll: "All sessions",
+        scopeFilter: "Only the listed sessions",
+        scopeHint: "\u201CAll sessions\u201D pushes every session to this bot; \u201COnly the listed sessions\u201D pushes just the ids below.",
+        groupChatId: "Group id",
+        groupChatIdHint: "Optional. When set, that group is notified too (chat_id on Feishu, group openid on QQ).",
+        wizard: "Setup guide",
+        wizardHint: "Four steps and you are done. Every step can be skipped \u2014 skipping never discards what is saved.",
+        stepLabel: "Step {n}",
+        step1: "Create the bot",
+        step2: "Enter credentials",
+        step3: "Bind a target",
+        step4: "Test the connection",
+        stepDone: "Done",
+        stepTodo: "To do",
+        stepSkip: "Skip",
+        stepOpen: "Open",
+        stepCollapse: "Close",
+        step1Qq: "Click \u201CAdd a bot by scanning\u201D, scan with QQ, and create the bot in the flow: the credentials are filled in for you. You can also build the bot on the QQ open platform yourself and put the AppID / AppSecret into step 2.",
+        step1Feishu: "Create an enterprise self-built app on the Feishu open platform, enable its bot capability, and add it to the chat you want notifications in (or just DM it). Then put the AppID / AppSecret into step 2.",
+        openQqPlatform: "Open the QQ open platform",
+        openFeishuPlatform: "Open the Feishu open platform",
+        step2Hint: "The AppID is not a secret and can be changed any time; the AppSecret is sent once and never echoed back.",
+        step3Qq: "Add the bot as a friend first (or scan the bot\u2019s own code to open it), then click \u201CScan to bind\u201D and send the bot any message \u2014 the target id is filled in automatically.",
+        step3Feishu: "Click \u201CScan to bind\u201D, scan the code with Feishu to open the chat with the bot, and send it any message \u2014 the receiver id is filled in automatically.",
+        provisionTitle: "Scan with mobile QQ to create the bot",
+        provisionHint: "After scanning, follow the prompts on your phone: sign in to QQ \u2192 create the bot \u2192 confirm. This window keeps waiting for you.",
+        provisionStarting: "Asking QQ for a QR code\u2026",
+        provisionScanned: "Scanned \u2014 confirm on your phone\u2026",
+        provisionConnecting: "Credentials received, writing the configuration\u2026",
+        provisionDone: "Connected: the AppID, AppSecret and target id are all filled in.",
+        provisionExpired: "The QR code expired \u2014 generate a new one.",
+        provisionCancelled: "Cancelled.",
+        provisionFailed: "Scan-based onboarding failed",
+        provisionRetry: "New QR code",
+        provisionFeishu: "Feishu does not use scan-based creation: build the app on the open platform as in step 1. \u201CScan to bind\u201D is step 3.",
         on: "on",
         off: "off",
         yes: "yes",
@@ -3574,6 +4046,152 @@ window.__ModuleLoader__.load({
     
     .tln-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
     .tln-spacer { flex: 1 1 auto; }
+    
+    /* \u2500\u2500 \u6BCF\u673A\u5668\u4EBA\u8BBE\u7F6E\uFF1A\u901A\u9053\u680F + \u673A\u5668\u4EBA\u5361\u7247 + \u5B50\u9875 + \u63A5\u5165\u5411\u5BFC \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+    
+    .tln-rail {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+    }
+    .tln-rail-tab {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 5px 12px;
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .tln-rail-tab:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); }
+    .tln-rail-tab[data-active='true'] {
+      color: #fff;
+      background: var(--dsw-alias-state-business-primary, #2f7d32);
+    }
+    .tln-rail-name { font-weight: 600; }
+    .tln-rail-count { font-size: 12px; opacity: .8; }
+    
+    .tln-bots { display: flex; flex-direction: column; gap: 10px; }
+    .tln-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    
+    .tln-botCard {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .tln-botCard[data-open='true'] { border-color: var(--dsw-alias-state-business-primary, #2f7d32); }
+    .tln-botCard-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+    }
+    .tln-botCard-toggle {
+      display: flex;
+      flex: 1 1 auto;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      padding: 0;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+    }
+    .tln-botCard-name { font-weight: 600; }
+    .tln-botCard-id { flex: none; }
+    .tln-botCard-body {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 0 12px 12px;
+    }
+    .tln-caret { flex: none; color: var(--dsw-alias-label-tertiary, #8a8a8a); font-size: 12px; }
+    
+    .tln-subpage { display: flex; flex-direction: column; gap: 12px; }
+    .tln-subpage-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    .tln-tabs { display: inline-flex; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.32)); border-radius: 8px; overflow: hidden; }
+    .tln-tab {
+      padding: 5px 14px;
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: none;
+      border-right: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+      cursor: pointer;
+    }
+    .tln-tab:last-child { border-right: none; }
+    .tln-tab[data-active='true'] {
+      color: #fff;
+      background: var(--dsw-alias-state-business-primary, #2f7d32);
+    }
+    
+    .tln-wizard {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      border: 1px dashed var(--dsw-alias-border-l3, rgba(127,127,127,.32));
+      border-radius: 10px;
+    }
+    .tln-step {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+      border-radius: 8px;
+    }
+    .tln-step-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+    }
+    .tln-step-head:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); }
+    .tln-step-index { flex: none; color: var(--dsw-alias-label-secondary, #666); font-size: 12px; }
+    .tln-step-title { font-weight: 600; }
+    .tln-step-body {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 0 10px 10px;
+    }
+    
+    .tln-qr-layout { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+    .tln-qr-img {
+      padding: 10px;
+      background: #fff;
+      border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+      border-radius: 10px;
+      line-height: 0;
+    }
+    .tln-qr-side { display: flex; flex: 1 1 220px; flex-direction: column; gap: 6px; min-width: 0; }
+    
+    .tln-link {
+      padding: 0;
+      font: inherit;
+      color: var(--dsw-alias-state-business-primary, #2f7d32);
+      text-align: left;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+    }
     
     .tln-busy { color: var(--dsw-alias-label-tertiary, #8a8a8a); font-size: 12px; }
     

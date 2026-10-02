@@ -44,6 +44,8 @@
  * `rpcId` 可以回显）。
  */
 
+import type { ContentConfig, EventsConfig } from './types.js'
+
 /**
  * 浏览器 `rpc.call(channel, …)` 的 channel：Connection 自己挂在 `/api` 上的
  * 浏览器传输（`@deepseek-ai/dsh-client-connection/lib/index.js:820-844`）。
@@ -57,7 +59,16 @@ export const RPC_ENDPOINT_PREFIX = 'tlnotify'
 export const RPC_ROUTE_PREFIX = `${RPC_API_CHANNEL}/${RPC_ENDPOINT_PREFIX}`
 
 /** 支持的 RPC 方法。 */
-export type RpcMethod = 'state' | 'patch' | 'test' | 'qr' | 'bind'
+export type RpcMethod =
+  | 'state'
+  | 'patch'
+  | 'test'
+  | 'qr'
+  | 'bind'
+  // 扫码创建机器人：厂商 SDK 的长轮询在宿主里跑，这三个端点只是遥控器。
+  | 'provision.begin'
+  | 'provision.poll'
+  | 'provision.cancel'
 
 /** 方法清单，宿主用它做白名单（未知方法直接拒绝，不进业务分支）。 */
 export const RPC_METHODS: readonly RpcMethod[] = Object.freeze([
@@ -66,6 +77,9 @@ export const RPC_METHODS: readonly RpcMethod[] = Object.freeze([
   'test',
   'qr',
   'bind',
+  'provision.begin',
+  'provision.poll',
+  'provision.cancel',
 ] as const)
 
 /**
@@ -129,7 +143,22 @@ export interface RedactedChannel {
   id: string
   type: 'qq' | 'feishu'
   enabled: boolean
+  /** 别名；空串表示界面回退到 `id`。 */
+  label: string
+  /** 关心全部会话 / 只关心 `sessionFilter` 列表。 */
+  sessionScope: 'all' | 'filter'
   sessionFilter: string[]
+  /**
+   * 事件开关是否覆盖全局。
+   *
+   * 下面两个字段**始终是「当前生效值」**：不覆盖时它们就是全局值的快照。
+   * 设置页因此可以直接照着渲染开关，不必自己再合并一次——但保存时只有
+   * `override* === true` 的那一份会被写进通道配置。
+   */
+  overrideEvents: boolean
+  events: EventsConfig
+  overrideContent: boolean
+  content: ContentConfig
   appId?: string
   targetChatId?: string
   groupChatId?: string
@@ -236,7 +265,15 @@ export interface ChannelPatch {
   id: string
   type?: 'qq' | 'feishu'
   enabled?: boolean
+  label?: string | null
+  sessionScope?: 'all' | 'filter'
   sessionFilter?: string[]
+  overrideEvents?: boolean
+  /** `null` = 丢掉这份覆盖（同时把 `overrideEvents` 复位成 false）。 */
+  events?: EventsConfig | null
+  overrideContent?: boolean
+  /** `null` = 丢掉这份覆盖（同时把 `overrideContent` 复位成 false）。 */
+  content?: ContentConfig | null
   appId?: string | null
   appSecret?: string | null
   targetChatId?: string | null
@@ -377,6 +414,63 @@ export interface BindPayload {
 }
 
 // ---------------------------------------------------------------------------
+// 扫码创建机器人（《每机器人设置方案》§4）
+// ---------------------------------------------------------------------------
+
+/**
+ * 扫码创建机器人的阶段。
+ *
+ * `starting` = 已发起、二维码还没出来；`waiting` = 二维码在等扫；
+ * `scanned` = 扫到了、平台在处理（飞书有这一步）；`connecting` = 凭据已到手、
+ * 正在建连；`done` = 完成（设置页这时重新拉一次 `state` 即能看到新机器人）；
+ * `expired` = 码过期（重新 begin 即可）；`cancelled` = 用户自己取消；
+ * `failed` = 失败，看 `error`。
+ */
+export type ProvisionState =
+  | 'starting'
+  | 'waiting'
+  | 'scanned'
+  | 'connecting'
+  | 'done'
+  | 'expired'
+  | 'cancelled'
+  | 'failed'
+
+/**
+ * 一次扫码创建流程的快照。
+ *
+ * **只回二维码的 data URL，不回厂商原始链接**——厂商链接里可能带一次性凭据，
+ * 而 `dsh-im` 的硬契约也是这么做的（`FORBIDDEN_PUBLIC_KEYS.verificationUrl`）。
+ */
+export interface ProvisionSnapshot {
+  attemptId: string
+  channelId: string
+  type: 'qq' | 'feishu'
+  state: ProvisionState
+  /** 二维码图片（`data:image/png;base64,…`）。 */
+  qrDataUrl?: string
+  /** 退化路径：厂商只给链接时，交给设置页用内置 qrcode 渲染。 */
+  qrText?: string
+  /** 过期时间戳（毫秒）。 */
+  expiresAt?: number
+  /** 建议轮询间隔（毫秒，500..10000）。 */
+  pollIntervalMs: number
+  /** 完成时写入了哪个字段。 */
+  filledField?: 'appId' | 'feishuAppId'
+  /** 完成时顺手带上的投递目标（QQ 扫码会连 userOpenid 一起给）。 */
+  filledTargetId?: string
+  error?: string
+}
+
+export interface ProvisionRequest {
+  channelId: string
+}
+
+export interface ProvisionPollRequest extends ProvisionRequest {
+  attemptId: string
+}
+
+// ---------------------------------------------------------------------------
 // 方法 → 请求/响应 的映射
 // ---------------------------------------------------------------------------
 
@@ -386,4 +480,7 @@ export interface RpcContract {
   test: { request: TestRequest; response: TestPayload }
   qr: { request: QrRequest; response: QrPayload }
   bind: { request: BindRequest; response: BindPayload }
+  'provision.begin': { request: ProvisionRequest; response: ProvisionSnapshot }
+  'provision.poll': { request: ProvisionPollRequest; response: ProvisionSnapshot }
+  'provision.cancel': { request: ProvisionPollRequest; response: ProvisionSnapshot }
 }

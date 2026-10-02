@@ -190,6 +190,152 @@ export const CLIENT_CSS = `
 .tln-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tln-spacer { flex: 1 1 auto; }
 
+/* ── 每机器人设置：通道栏 + 机器人卡片 + 子页 + 接入向导 ─────────────────── */
+
+.tln-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+}
+.tln-rail-tab {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 12px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.tln-rail-tab:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); }
+.tln-rail-tab[data-active='true'] {
+  color: #fff;
+  background: var(--dsw-alias-state-business-primary, #2f7d32);
+}
+.tln-rail-name { font-weight: 600; }
+.tln-rail-count { font-size: 12px; opacity: .8; }
+
+.tln-bots { display: flex; flex-direction: column; gap: 10px; }
+.tln-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.tln-botCard {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+  border-radius: 10px;
+  overflow: hidden;
+}
+.tln-botCard[data-open='true'] { border-color: var(--dsw-alias-state-business-primary, #2f7d32); }
+.tln-botCard-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+.tln-botCard-toggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.tln-botCard-name { font-weight: 600; }
+.tln-botCard-id { flex: none; }
+.tln-botCard-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+.tln-caret { flex: none; color: var(--dsw-alias-label-tertiary, #8a8a8a); font-size: 12px; }
+
+.tln-subpage { display: flex; flex-direction: column; gap: 12px; }
+.tln-subpage-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.tln-tabs { display: inline-flex; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.32)); border-radius: 8px; overflow: hidden; }
+.tln-tab {
+  padding: 5px 14px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+  cursor: pointer;
+}
+.tln-tab:last-child { border-right: none; }
+.tln-tab[data-active='true'] {
+  color: #fff;
+  background: var(--dsw-alias-state-business-primary, #2f7d32);
+}
+
+.tln-wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px dashed var(--dsw-alias-border-l3, rgba(127,127,127,.32));
+  border-radius: 10px;
+}
+.tln-step {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+  border-radius: 8px;
+}
+.tln-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.tln-step-head:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); }
+.tln-step-index { flex: none; color: var(--dsw-alias-label-secondary, #666); font-size: 12px; }
+.tln-step-title { font-weight: 600; }
+.tln-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.tln-qr-layout { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.tln-qr-img {
+  padding: 10px;
+  background: #fff;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+  border-radius: 10px;
+  line-height: 0;
+}
+.tln-qr-side { display: flex; flex: 1 1 220px; flex-direction: column; gap: 6px; min-width: 0; }
+
+.tln-link {
+  padding: 0;
+  font: inherit;
+  color: var(--dsw-alias-state-business-primary, #2f7d32);
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
 .tln-busy { color: var(--dsw-alias-label-tertiary, #8a8a8a); font-size: 12px; }
 
 .tln-kv { display: grid; grid-template-columns: minmax(80px, 140px) minmax(0, 1fr); gap: 4px 12px; font-size: 12px; }

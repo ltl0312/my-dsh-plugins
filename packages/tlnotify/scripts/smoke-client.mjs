@@ -124,6 +124,8 @@ function stateValue() {
           id: 'qq-main',
           type: 'qq',
           enabled: true,
+          label: '主机器人',
+          sessionScope: 'filter',
           sessionFilter: ['abcdef12'],
           appId: '102000000',
           targetChatId: 'OPENID_XYZ',
@@ -132,6 +134,17 @@ function stateValue() {
           feishuAppId: '',
           feishuReceiveId: '',
           feishuReceiveIdType: 'open_id',
+          overrideEvents: true,
+          events: {
+            onTurnEnd: true,
+            onError: true,
+            onAborted: true,
+            onPending: true,
+            onMaxTokens: true,
+            includeSubagent: false,
+          },
+          overrideContent: true,
+          content: { includeMetadata: true, includeUserPrompt: false, maxBodyChars: 2000 },
           appSecret: { configured: true, hint: '••••abcd' },
           feishuAppSecret: { configured: false, hint: '' },
         },
@@ -187,6 +200,27 @@ const fakeRpc = {
     if (method === 'state') return { ok: true, value: stateValue() }
     if (method === 'patch') {
       return { ok: true, value: { applied: 'hot', changed: ['enabled'], config: stateValue().config } }
+    }
+    // 「扫码创建机器人」：`begin` 会一直挂到第一张码就绪才返回，这里直接给一张。
+    if (method === 'provision.begin' || method === 'provision.poll') {
+      return {
+        ok: true,
+        value: {
+          attemptId: 'attempt-1',
+          channelId: payload.channelId,
+          type: 'qq',
+          state: 'waiting',
+          qrText: 'https://q.qq.com/qqbot/openclaw/connect.html?task_id=demo',
+          expiresAt: Date.now() + 300_000,
+          pollIntervalMs: 1000,
+        },
+      }
+    }
+    if (method === 'provision.cancel') {
+      return {
+        ok: true,
+        value: { attemptId: payload.attemptId, channelId: payload.channelId, type: 'qq', state: 'cancelled', pollIntervalMs: 1000 },
+      }
     }
     return { ok: false, error: { code: 'not-stubbed', message: `未打桩的端点: ${endpoint}`, details: {} } }
   },
@@ -266,6 +300,23 @@ await renderInto(root, Section)
 
 const text = () => container.textContent ?? ''
 
+/** 点一下并等 React 把状态刷完；没装 `act` 的环境退回裸派发。 */
+const clickOnce = async (element) => {
+  if (!element) return
+  const dispatch = () => element.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+  if (act) {
+    await act(async () => {
+      dispatch()
+    })
+    await act(async () => {
+      await flush()
+    })
+    return
+  }
+  dispatch()
+  await flush()
+}
+
 check('初始加载会调用 state 端点', () => {
   assert.ok(
     rpcCalls.some((call) => call.channel === '/api' && call.method === 'state'),
@@ -274,7 +325,7 @@ check('初始加载会调用 state 端点', () => {
 })
 
 check('渲染出标题、状态栏与真实数据', () => {
-  for (const needle of ['通知助手', '运行中', 'qq-main', '启用通知', '••••abcd', '519cc141']) {
+  for (const needle of ['通知助手', '运行中', '主机器人', 'qq-main', '启用通知', '519cc141']) {
     assert.ok(text().includes(needle), `页面里没有出现「${needle}」`)
   }
 })
@@ -285,7 +336,6 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
   for (const leak of ['configured', 'appSecret', 'feishuAppSecret', '[object Object]']) {
     assert.ok(!text().includes(leak), `页面里泄漏了协议字段「${leak}」`)
   }
-  assert.ok(text().includes('••••abcd'), '密钥的 hint 应当显示出来')
 })
 
 {
@@ -336,7 +386,61 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
   }
 }
 
-// ── 5. 拿不到 connection 时也必须给出结论，而不是永远转圈 ────────────────────
+// ── 5. 每机器人设置：卡片折叠、接入向导、扫码接入 ────────────────────────────
+{
+  const card = container.querySelector('.tln-botCard')
+  const toggle = card?.querySelector('.tln-botCard-toggle')
+  check('机器人以卡片形式列出来', () => assert.ok(toggle, '通道栏里没有机器人卡片'))
+  await clickOnce(toggle)
+
+  const wizardBtn = [...(card?.querySelectorAll('button') ?? [])].find((b) => b.textContent === '接入向导')
+  check('卡片里能找到「接入向导」', () => assert.ok(wizardBtn, '卡片里没有接入手册按钮'))
+  await clickOnce(wizardBtn)
+
+  const stepHeads = [...(card?.querySelectorAll('.tln-step-head') ?? [])]
+  check('向导渲染出四步', () => {
+    assert.equal(card.querySelectorAll('.tln-step').length, 4, '向导步数不对')
+    const joined = stepHeads.map((el) => el.textContent ?? '').join(' | ')
+    for (const label of ['第 1 步', '第 2 步', '第 3 步', '第 4 步']) {
+      assert.ok(joined.includes(label), `向导里缺少「${label}」：${joined}`)
+    }
+  })
+
+  // 初始打开的是「第一个没做完的步骤」，密钥掩码在第 2 步里，得自己点开。
+  await clickOnce(stepHeads[1])
+  check('第 2 步展开后能看到密钥掩码', () => {
+    assert.ok(card.textContent.includes('••••abcd'), `第 2 步里没有掩码：${(card.textContent ?? '').slice(0, 200)}`)
+  })
+}
+
+{
+  const scanBtn = [...container.querySelectorAll('.tln-panel-head button')].find(
+    (b) => b.textContent === '扫码接入机器人',
+  )
+  check('通道栏里有「扫码接入机器人」入口', () => assert.ok(scanBtn, '没有扫码创建的按钮'))
+  await clickOnce(scanBtn)
+  await flush(20)
+
+  const beginCalls = rpcCalls.filter((call) => call.method === 'provision.begin')
+  check('扫码入口先保存通道、再向宿主申请二维码', () => {
+    const table = rpcCalls.filter((call) => call.method === 'patch').pop()
+    assert.ok(table, '没有发出 patch')
+    assert.ok((table.payload.patch.channels ?? []).length >= 2, 'patch 里没有带上新通道')
+    assert.equal(beginCalls.length, 1, '没有调用 provision.begin')
+    assert.equal(beginCalls[0].payload.channelId, 'qq-1')
+  })
+
+  // 新卡片默认是折叠的：二维码在展开后的卡片体内。
+  const newCard = container.querySelector('[data-bot-id="qq-1"]')
+  check('新机器人出现在列表里', () => assert.ok(newCard, '列表里没有新通道'))
+  await clickOnce(newCard?.querySelector('.tln-botCard-toggle'))
+  check('宿主给的 qrText 被画成二维码', () => {
+    assert.ok(newCard?.querySelector('.tln-qr-img svg'), '没有渲染二维码')
+    assert.ok(newCard.textContent.includes('用手机 QQ 扫码创建机器人'), '没有显示扫码标题')
+  })
+}
+
+// ── 6. 拿不到 connection 时也必须给出结论，而不是永远转圈 ────────────────────
 {
   const registrations2 = []
   const offlineCtx = {

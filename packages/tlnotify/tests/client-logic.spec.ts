@@ -38,6 +38,37 @@ const FULL_VIEW: ChannelView = {
   bindUrl: 'https://example.com/bot',
   appSecret: { configured: true, hint: '••••abcd' },
   feishuAppSecret: { configured: false, hint: '' },
+  label: '主机器人',
+  sessionScope: 'filter',
+  overrideEvents: false,
+  events: {
+    onTurnEnd: true,
+    onError: true,
+    onAborted: true,
+    onPending: true,
+    onMaxTokens: true,
+    includeSubagent: false,
+  },
+  overrideContent: false,
+  content: { includeMetadata: true, includeUserPrompt: true, maxBodyChars: 1800 },
+}
+
+/**
+ * `createDraft` 的第三个参数：全局生效的 events / content。
+ *
+ * 新机器人的默认姿态是**跟随全局**（`overrideEvents:false`），所以创建时必须把全局那
+ * 一份拷进草稿里 —— 否则用户在向导里点开「自定义」会看到一个空表单。
+ */
+const GLOBAL = {
+  events: {
+    onTurnEnd: true,
+    onError: true,
+    onAborted: true,
+    onPending: true,
+    onMaxTokens: true,
+    includeSubagent: false,
+  },
+  content: { includeMetadata: true, includeUserPrompt: false, maxBodyChars: 1800 },
 }
 
 describe('toDraft', () => {
@@ -108,7 +139,7 @@ describe('toPatch', () => {
   })
 
   it('toChannelPatches 与草稿等长同序', () => {
-    const patches = toChannelPatches([toDraft(FULL_VIEW), createDraft('feishu', ['qq-main'])])
+    const patches = toChannelPatches([toDraft(FULL_VIEW), createDraft('feishu', ['qq-main'], GLOBAL)])
     expect(patches.map((p) => p.id)).toEqual(['qq-main', 'feishu-1'])
   })
 })
@@ -133,28 +164,42 @@ describe('parseSessionFilter', () => {
 
 describe('createDraft', () => {
   it('默认不启用：新通道还没凭据，立刻建连只会在状态栏留一串失败', () => {
-    expect(createDraft('qq', []).enabled).toBe(false)
-    expect(createDraft('feishu', []).enabled).toBe(false)
+    expect(createDraft('qq', [], GLOBAL).enabled).toBe(false)
+    expect(createDraft('feishu', [], GLOBAL).enabled).toBe(false)
   })
 
   it('id 按类型连续编号，并跳过已占用的', () => {
-    expect(createDraft('qq', []).id).toBe('qq-1')
-    expect(createDraft('qq', ['qq-1']).id).toBe('qq-2')
-    expect(createDraft('qq', ['qq-1', 'qq-2', 'feishu-1']).id).toBe('qq-3')
-    expect(createDraft('feishu', ['qq-1']).id).toBe('feishu-1')
+    expect(createDraft('qq', [], GLOBAL).id).toBe('qq-1')
+    expect(createDraft('qq', ['qq-1'], GLOBAL).id).toBe('qq-2')
+    expect(createDraft('qq', ['qq-1', 'qq-2', 'feishu-1'], GLOBAL).id).toBe('qq-3')
+    expect(createDraft('feishu', ['qq-1'], GLOBAL).id).toBe('feishu-1')
   })
 
   it('新草稿的默认值是可提交的（能被宿主校验通过）', () => {
-    const draft = createDraft('feishu', [])
+    const draft = createDraft('feishu', [], GLOBAL)
     expect(FEISHU_RECEIVE_ID_TYPES).toContain(draft.feishuReceiveIdType)
     expect(draft.mode).toBe('active')
     expect(toPatch(draft).sessionFilter).toEqual([])
   })
+
+  it('新机器人默认「关心全局」：sessionScope=all，且通知规则跟随全局（不发覆盖对象）', () => {
+    const patch = toPatch(createDraft('qq', [], GLOBAL))
+    expect(patch.sessionScope).toBe('all')
+    // 跟随全局 = 草稿里有副本、但 patch 里明确发 null（协议里 null 才是「回到全局」）。
+    expect(patch.overrideEvents).toBe(false)
+    expect(patch.events).toBeNull()
+    expect(patch.overrideContent).toBe(false)
+    expect(patch.content).toBeNull()
+  })
 })
 
 describe('draftTitle', () => {
-  it('就是配置里的键本身', () => {
-    expect(draftTitle(createDraft('qq', []))).toBe('qq-1')
+  it('没起名字时就是配置里的键本身', () => {
+    expect(draftTitle(createDraft('qq', [], GLOBAL))).toBe('qq-1')
+  })
+
+  it('起了名字就用名字（名字只影响显示，配置里的键仍是 id）', () => {
+    expect(draftTitle({ ...createDraft('qq', [], GLOBAL), label: '  客服机器人  ' })).toBe('客服机器人')
   })
 })
 
