@@ -78,14 +78,8 @@ const ZH = {
   testOk: '测试消息已发出',
   testHint: '会真发一条消息。收到就说明凭据和目标 ID 都对。',
 
-  runMode: '运行模式',
-  modeGlobal: '全局',
-  modeSession: '单会话',
-  modeGlobalHint: '所有主会话的事件都推，正文精简，回复走三层路由。',
-  modeSessionHint: '只推绑定的那一个会话，正文给全上下文，回复零歧义。',
-  boundSession: '绑定会话',
-  noBoundSession: '还没绑定会话。在 IM 里发「/mode session <短id>」就能绑定。',
   detailSessions: '额外升级为详细模式的会话',
+  detailSessionsHint: '在 IM 里对某个会话回复「detail」就会出现在这里，「/undetail」取消。',
   detailNone: '（无）',
 
   events: '推哪些事件',
@@ -288,14 +282,8 @@ const EN: Dict = {
   testOk: 'Test message sent',
   testHint: 'This really sends a message. If it arrives, the credentials and target id are correct.',
 
-  runMode: 'Run mode',
-  modeGlobal: 'Global',
-  modeSession: 'Single session',
-  modeGlobalHint: 'Every main session is pushed, briefly; replies go through three-layer routing.',
-  modeSessionHint: 'Only the bound session is pushed, with full context; replies are unambiguous.',
-  boundSession: 'Bound session',
-  noBoundSession: 'No session bound yet. Send "/mode session <short-id>" in IM to bind one.',
   detailSessions: 'Sessions upgraded to detailed',
+  detailSessionsHint: 'Reply "detail" to a notification in IM to add a session here; "/undetail" removes it.',
   detailNone: '(none)',
 
   events: 'Which events',

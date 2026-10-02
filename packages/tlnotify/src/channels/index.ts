@@ -5,9 +5,9 @@
 //
 // 设计上的两个取舍：
 //
-// 1. **故障转移**。设计方案 §7 把「单通道单点」列为风险。这里不是选一个通道
-//    就完事，而是按 `defaultChannelId` 优先、其余按配置顺序依次尝试，只要有一个
-//    成功就停。全部失败才记错误——通知丢了要能在日志里查得到。
+// 1. **投递按订阅走**。每台机器人有自己的会话范围与事件开关，`sendEach()` 给
+//    「关心的那几台」**各发一份**（谁勾了谁收到）。`send()` 保留旧的故障转移语义
+//    （默认通道优先、一台成功就停），只有回执以外的老路径会用到它。
 // 2. **分片在这里做**。每个通道自己声明 `maxChars`（QQ 比飞书短得多），
 //    平台限制属于通道的知识，不该泄漏到 render 层。
 
@@ -193,30 +193,53 @@ export class ChannelManager {
   }
 
   /**
-   * 按调用方给的「选片函数」发送（《每机器人设置方案》§3）。
+   * 逐台发送：**每台机器人各自的订阅**（《每机器人设置方案》§3）。
    *
-   * 与 `send()` 的区别只有一个：正文由调用方**逐通道**渲染，因为事件开关与正文
-   * 细节现在都是每台机器人各自的。`select` 返回 undefined 就表示「这台不关心
-   * 这个事件」，跳过且不计失败。
+   * 与 `send()` 的区别有两处：
    *
-   * 故障转移语义不变：同一事件**只有一个**机器人真正发包（默认通道优先，
-   * 失败才轮到下一台）——否则三台机器人都开着就变成三条重复通知。
+   * 1. 正文由调用方**逐通道**渲染——事件开关与正文细节现在是每台机器人各自的。
+   * 2. **不做「一台成功就停」的短路**：`select` 返回 undefined 表示「这台不关心」，
+   *    返回一条就给这台发一份。谁勾了谁收到；两台都勾同一会话＝两台都收到，这是
+   *    有意为之（用户画的是订阅，不是故障转移）。某台失败只记它自己的计数与日志，
+   *    不影响其它机器人。
    */
-  async sendSelected(
+  async sendEach(
     select: (channelId: string, config: ChannelConfig) => Notification | undefined,
-  ): Promise<SendResult | undefined> {
-    return this.#fanout((channel) => {
+  ): Promise<SendResult[]> {
+    if (this.#stopped) return []
+    const results: SendResult[] = []
+    for (const channel of this.#ordered()) {
       const config = this.#configs.get(channel.id)
-      return config ? select(channel.id, config) : undefined
-    }, { warnWhenSkipped: false })
+      if (!config) continue
+      const notification = select(channel.id, config)
+      if (!notification) continue
+      const status = this.#status.get(channel.id)
+      try {
+        const result = await this.#sendSharded(channel, notification)
+        if (status) {
+          status.sent += 1
+          status.connected = true
+          delete status.lastError
+        }
+        results.push(result)
+      } catch (error) {
+        const text = messageOf(error)
+        if (status) {
+          status.failed += 1
+          status.lastError = text
+        }
+        this.#log.error(`通道「${channel.id}」发送失败：${text}`)
+      }
+    }
+    return results
   }
 
   /**
    * 默认通道优先 → 依次尝试 → 第一台成功即停。
    *
    * `warnWhenSkipped` 区分两种「一个都没发」：`send()` 是「没有通道接这条会话」
-   * （该报），`sendSelected()` 是「调用方自己判断没人关心」（跳过是正常的，
-   * 报出来只会把日志刷满）。
+   * （该报），`sendEach()` 是「调用方自己判断没人关心」（跳过是正常的，报出来只会
+   * 把日志刷满）。
    */
   async #fanout(
     pick: (channel: Channel) => Notification | undefined,
@@ -309,8 +332,8 @@ export class ChannelManager {
   /**
    * 默认通道优先，然后按配置顺序。
    *
-   * 会话过滤不在这里做：`send()` 走 `channelCaresAboutSession()`，`sendSelected()`
-   * 走调用方自己的选片函数——两台机器人的「关心什么」现在可以完全不同。
+   * 会话过滤不在这里做：`send()` 走 `channelCaresAboutSession()`，`sendEach()`
+   * 走调用方自己的选片函数——每台机器人的「关心什么」现在可以完全不同。
    */
   #ordered(): Channel[] {
     const all = [...this.#channels.values()]

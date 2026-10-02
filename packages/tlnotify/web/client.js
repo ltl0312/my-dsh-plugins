@@ -3401,19 +3401,7 @@ window.__ModuleLoader__.load({
             ],
             onChange: (value) => void patch({ defaultChannelId: value.length === 0 ? null : value })
           }
-        ))), /* @__PURE__ */ import_react5.default.createElement(Section, { title: t("runMode"), hint: config.mode === "global" ? t("modeGlobalHint") : t("modeSessionHint") }, /* @__PURE__ */ import_react5.default.createElement(Row, { label: t("runMode") }, /* @__PURE__ */ import_react5.default.createElement(
-          Seg,
-          {
-            value: config.mode,
-            disabled,
-            ariaLabel: t("runMode"),
-            options: [
-              { value: "global", label: t("modeGlobal") },
-              { value: "session", label: t("modeSession") }
-            ],
-            onChange: (value) => void patch({ mode: value })
-          }
-        )), /* @__PURE__ */ import_react5.default.createElement(Row, { label: t("boundSession"), hint: config.mode === "session" ? void 0 : t("modeGlobalHint") }, config.session.targetSessionId ? /* @__PURE__ */ import_react5.default.createElement("span", { className: "tln-mono" }, config.session.targetSessionId) : /* @__PURE__ */ import_react5.default.createElement("span", { className: "tln-hint" }, t("noBoundSession"))), /* @__PURE__ */ import_react5.default.createElement(Row, { label: t("detailSessions") }, /* @__PURE__ */ import_react5.default.createElement("span", { className: "tln-mono" }, status.detailSessions.length === 0 ? t("detailNone") : status.detailSessions.join(", ")))), /* @__PURE__ */ import_react5.default.createElement(
+        ))), /* @__PURE__ */ import_react5.default.createElement(
           ChannelPanel,
           {
             t,
@@ -3595,7 +3583,7 @@ window.__ModuleLoader__.load({
             disabled,
             onCommit: (value) => void patch({ routing: { ...config.routing, tableTtlDays: value } })
           }
-        ))), /* @__PURE__ */ import_react5.default.createElement(Section, { title: t("advanced") }, /* @__PURE__ */ import_react5.default.createElement(Row, { label: t("logLevel") }, /* @__PURE__ */ import_react5.default.createElement(
+        ))), /* @__PURE__ */ import_react5.default.createElement(Section, { title: t("advanced") }, /* @__PURE__ */ import_react5.default.createElement(Row, { label: t("detailSessions"), hint: t("detailSessionsHint") }, /* @__PURE__ */ import_react5.default.createElement("span", { className: "tln-mono" }, status.detailSessions.length === 0 ? t("detailNone") : status.detailSessions.join(", "))), /* @__PURE__ */ import_react5.default.createElement(Row, { label: t("logLevel") }, /* @__PURE__ */ import_react5.default.createElement(
           Select,
           {
             value: config.logLevel,
@@ -3674,14 +3662,8 @@ window.__ModuleLoader__.load({
         testing: "\u53D1\u9001\u4E2D\u2026",
         testOk: "\u6D4B\u8BD5\u6D88\u606F\u5DF2\u53D1\u51FA",
         testHint: "\u4F1A\u771F\u53D1\u4E00\u6761\u6D88\u606F\u3002\u6536\u5230\u5C31\u8BF4\u660E\u51ED\u636E\u548C\u76EE\u6807 ID \u90FD\u5BF9\u3002",
-        runMode: "\u8FD0\u884C\u6A21\u5F0F",
-        modeGlobal: "\u5168\u5C40",
-        modeSession: "\u5355\u4F1A\u8BDD",
-        modeGlobalHint: "\u6240\u6709\u4E3B\u4F1A\u8BDD\u7684\u4E8B\u4EF6\u90FD\u63A8\uFF0C\u6B63\u6587\u7CBE\u7B80\uFF0C\u56DE\u590D\u8D70\u4E09\u5C42\u8DEF\u7531\u3002",
-        modeSessionHint: "\u53EA\u63A8\u7ED1\u5B9A\u7684\u90A3\u4E00\u4E2A\u4F1A\u8BDD\uFF0C\u6B63\u6587\u7ED9\u5168\u4E0A\u4E0B\u6587\uFF0C\u56DE\u590D\u96F6\u6B67\u4E49\u3002",
-        boundSession: "\u7ED1\u5B9A\u4F1A\u8BDD",
-        noBoundSession: "\u8FD8\u6CA1\u7ED1\u5B9A\u4F1A\u8BDD\u3002\u5728 IM \u91CC\u53D1\u300C/mode session <\u77EDid>\u300D\u5C31\u80FD\u7ED1\u5B9A\u3002",
         detailSessions: "\u989D\u5916\u5347\u7EA7\u4E3A\u8BE6\u7EC6\u6A21\u5F0F\u7684\u4F1A\u8BDD",
+        detailSessionsHint: "\u5728 IM \u91CC\u5BF9\u67D0\u4E2A\u4F1A\u8BDD\u56DE\u590D\u300Cdetail\u300D\u5C31\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\uFF0C\u300C/undetail\u300D\u53D6\u6D88\u3002",
         detailNone: "\uFF08\u65E0\uFF09",
         events: "\u63A8\u54EA\u4E9B\u4E8B\u4EF6",
         eventsHint: "\u5173\u6389\u7684\u4E8B\u4EF6\u4E0D\u4F1A\u4EA7\u751F\u4EFB\u4F55\u901A\u77E5\u3002",
@@ -3862,14 +3844,8 @@ window.__ModuleLoader__.load({
         testing: "Sending\u2026",
         testOk: "Test message sent",
         testHint: "This really sends a message. If it arrives, the credentials and target id are correct.",
-        runMode: "Run mode",
-        modeGlobal: "Global",
-        modeSession: "Single session",
-        modeGlobalHint: "Every main session is pushed, briefly; replies go through three-layer routing.",
-        modeSessionHint: "Only the bound session is pushed, with full context; replies are unambiguous.",
-        boundSession: "Bound session",
-        noBoundSession: 'No session bound yet. Send "/mode session <short-id>" in IM to bind one.',
         detailSessions: "Sessions upgraded to detailed",
+        detailSessionsHint: 'Reply "detail" to a notification in IM to add a session here; "/undetail" removes it.',
         detailNone: "(none)",
         events: "Which events",
         eventsHint: "Disabled events produce no notification at all.",

@@ -11,7 +11,7 @@
 // 会被宿主拒绝并原样回传，界面立刻能看到。
 
 import React from 'react'
-import { Btn, Check, Dot, Note, NumInput, Row, Section, Seg, Select } from '../components/ui.js'
+import { Btn, Check, Dot, Note, NumInput, Row, Section, Select } from '../components/ui.js'
 import { ChannelPanel } from './ChannelPanel.js'
 import type { ProvisionState, QrState, SecretFieldName, TestState } from './ChannelPanel.js'
 import { createDraft, toChannelPatches, toDrafts } from '../draft.js'
@@ -433,33 +433,6 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
         </Row>
       </Section>
 
-      <Section title={t('runMode')} hint={config.mode === 'global' ? t('modeGlobalHint') : t('modeSessionHint')}>
-        <Row label={t('runMode')}>
-          <Seg
-            value={config.mode}
-            disabled={disabled}
-            ariaLabel={t('runMode')}
-            options={[
-              { value: 'global' as const, label: t('modeGlobal') },
-              { value: 'session' as const, label: t('modeSession') },
-            ]}
-            onChange={(value) => void patch({ mode: value })}
-          />
-        </Row>
-        <Row label={t('boundSession')} hint={config.mode === 'session' ? undefined : t('modeGlobalHint')}>
-          {config.session.targetSessionId ? (
-            <span className="tln-mono">{config.session.targetSessionId}</span>
-          ) : (
-            <span className="tln-hint">{t('noBoundSession')}</span>
-          )}
-        </Row>
-        <Row label={t('detailSessions')}>
-          <span className="tln-mono">
-            {status.detailSessions.length === 0 ? t('detailNone') : status.detailSessions.join(', ')}
-          </span>
-        </Row>
-      </Section>
-
       <ChannelPanel
         t={t}
         drafts={drafts}
@@ -665,6 +638,11 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
       </Section>
 
       <Section title={t('advanced')}>
+        <Row label={t('detailSessions')} hint={t('detailSessionsHint')}>
+          <span className="tln-mono">
+            {status.detailSessions.length === 0 ? t('detailNone') : status.detailSessions.join(', ')}
+          </span>
+        </Row>
         <Row label={t('logLevel')}>
           <Select
             value={config.logLevel}

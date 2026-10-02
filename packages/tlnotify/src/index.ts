@@ -60,10 +60,10 @@ import { CompletionGate } from './gate.js'
 import { Dedupe } from './dedupe.js'
 import { renderNotification, type RenderOptions } from './render.js'
 import { RouteTable, matchesShortId, type RouteResolution } from './route.js'
-import { describeMode, helpText, ModeState, parseCommand, type ModeCommand } from './mode.js'
+import { describeChannelScope, helpText, ModeState, parseCommand, type ModeCommand } from './mode.js'
 import { InteractionBridge, isInteractionAction, SessionInjector, type AgentLike } from './inject.js'
 import { ChannelManager } from './channels/index.js'
-import { channelCaresAboutSession } from './config.js'
+import { channelCaresAboutSession, channelSessionScope } from './config.js'
 import { ProvisionManager, type ProvisionCredentials } from './provision.js'
 import {
   applyPatch,
@@ -807,7 +807,7 @@ class Tlnotify {
 
     let channelsReloaded = false
     if (next.enabled !== previous.enabled) {
-      // 总开关翻转。关的时候只停通道、不摘事件源：`#shouldPush` 已经会拦住所有
+      // 总开关翻转。关的时候只停通道、不摘事件源：`#canPush` 已经会拦住所有
       // 推送，而重新挂 `InteractionBridge` 要动宿主 waterfall，能不动就不动。
       if (next.enabled && !this.#attached) {
         await this.#attachRuntime()
@@ -1240,7 +1240,7 @@ class Tlnotify {
   }
 
   #onTurnEnd(event: RawEvent): void {
-    if (!this.#shouldPush(event)) return
+    if (!this.#canPush()) return
     if (!this.#dedupe.accept(event.sessionId, event.seq)) {
       this.#log.debug(`跳过重复的结束事件 ${event.sessionId}:${event.seq}`)
       return
@@ -1260,7 +1260,7 @@ class Tlnotify {
     if (!raw) return
     const requestId = raw.detail.requestId
     if (requestId && this.#claimedRequests.has(requestId)) return
-    if (!this.#shouldPush(raw)) return
+    if (!this.#canPush()) return
     if (!this.#dedupe.accept(raw.sessionId, raw.seq)) return
     void this.#deliver(raw)
   }
@@ -1269,7 +1269,7 @@ class Tlnotify {
   #onPending(event: RawEvent): void | Promise<void> {
     const requestId = event.detail.requestId
     if (requestId) this.#claim(requestId)
-    if (!this.#shouldPush(event)) return
+    if (!this.#canPush()) return
     if (!this.#dedupe.accept(event.sessionId, event.seq)) return
     return this.#deliver(event)
   }
@@ -1282,14 +1282,17 @@ class Tlnotify {
     }
   }
 
-  #shouldPush(event: RawEvent): boolean {
-    if (this.#disposed || !this.#config.enabled) return false
-    // 单会话模式：只推绑定的那一个会话。
-    //
-    // 事件开关与「是否带上子 Agent」**不在这里**：它们已经是每台机器人各自的
-    // 配置（《每机器人设置方案》§3），只能在知道「发给哪台」之后判断，见
-    // `#wants()`。这里只做全局性、与接收方无关的过滤。
-    return this.#mode.shouldPush(event.sessionId)
+  /**
+   * 与接收方无关的总闸门：插件是否可用。
+   *
+   * **这里不再看会话**。「推哪些会话」是每台机器人各自的 `sessionScope`，在
+   * `#wants()` 里判。历史上这里还有一道全局单会话开关（`#mode.shouldPush`），
+   * 结果是「一台机器人被设成单会话，其它勾了『关心全部』的机器人也全哑」——
+   * 用户要的是「不同的机器人可以关心单一 / 多个 / 全局」，所以那道闸门已删除。
+   * `config.mode` / `config.session.targetSessionId` 只剩兼容读写。
+   */
+  #canPush(): boolean {
+    return !this.#disposed && this.#config.enabled
   }
 
   /**
@@ -1324,29 +1327,35 @@ class Tlnotify {
       this.#log.debug(`没有机器人关心这条事件（${event.kind}），跳过`)
       return
     }
-    // 正文是**逐通道**渲染的：正文细节（元信息 / 提问 / 上限）也是每台机器人各自
-    // 的配置。`sendSelected` 在第一台发包成功后就停，所以这里记下每一台的渲染
-    // 结果，最后用真正发包那台的那一份去写路由表。
+    // 正文是**逐通道**渲染的：事件开关、正文细节、历史轮数都是每台机器人各自的
+    // 配置。投递也是逐台的（`sendEach`）：谁勾了谁收到，两台都勾同一会话就各收
+    // 一条——用户画的是一台一台的订阅，不是「一台成功就停」的故障转移。
     const rendered = new Map<string, Notification>()
-    const result = await this.#channels.sendSelected((channelId, config) => {
+    const results = await this.#channels.sendEach((channelId, config) => {
       if (!targets.has(channelId)) return undefined
       const notification = this.#render(event, config)
       rendered.set(channelId, notification)
       return notification
     })
-    if (!result) return
-    const notification = rendered.get(result.channelId)
-    if (!notification) return
-    this.#route.record({
-      messageId: result.messageId,
-      sessionId: event.sessionId,
-      text: `${notification.title}\n${notification.body}`,
-      ...(result.refIdx ? { refIdx: result.refIdx } : {}),
-      intervention: INTERVENTION_KINDS.has(event.kind),
-    })
+    if (results.length === 0) return
+    for (const result of results) {
+      const notification = rendered.get(result.channelId)
+      if (!notification) continue
+      this.#route.record({
+        messageId: result.messageId,
+        sessionId: event.sessionId,
+        text: `${notification.title}\n${notification.body}`,
+        ...(result.refIdx ? { refIdx: result.refIdx } : {}),
+        intervention: INTERVENTION_KINDS.has(event.kind),
+      })
+      this.#pushed += 1
+    }
+    const first = rendered.get(results[0]!.channelId)
+    this.#log.info(
+      `已通知：${first ? first.title : event.kind}` +
+        `（${results.length} 台：${results.map((result) => result.channelId).join('、')}）`,
+    )
     this.#scheduleSave()
-    this.#pushed += 1
-    this.#log.info(`已通知：${notification.title}（通道 ${result.channelId}，${result.shards} 片）`)
   }
 
   #render(event: RawEvent, config: ChannelConfig): Notification {
@@ -1372,7 +1381,12 @@ class Tlnotify {
       previousTurns = previousTurns.slice(0, -1)
     }
     return {
-      mode: this.#mode.mode,
+      // 「这台机器人只关心一个会话」＝正文带那个会话的上下文（用户要的「单会话
+      // 模式一定要显示上下文」）。关心多个 / 全部的机器人默认不带，想带就回一句
+      // `detail` 把那个会话升到详细模式。
+      //
+      // 注意这里读的是**收件方那台机器人自己的** `sessionScope`，不是全局开关。
+      mode: channelSessionScope(config) === 'single' ? 'session' : 'global',
       detailed: this.#mode.isDetailed(sessionId),
       // 正文细节是每台机器人各自的：没开自定义就是全局值。
       content: resolveChannelSettings(this.#config, config).content,
@@ -1451,13 +1465,20 @@ class Tlnotify {
   async #runCommand(channelId: string, command: ModeCommand): Promise<void> {
     switch (command.kind) {
       case 'show':
-        return this.#echo(channelId, describeMode(this.#mode.snapshot(), (id) => this.#label(id)))
+        return this.#echo(channelId, this.#describeScopeOf(channelId))
       case 'help':
         return this.#echo(channelId, helpText())
-      case 'set-global':
-        this.#mode.setMode('global')
-        this.#persistMode()
-        return this.#echo(channelId, '已切到全局模式：所有主会话的事件都会推送')
+      case 'set-global': {
+        // `/mode` 一律只改**发命令的这台机器人**：多台机器人各有各的会话范围，
+        // 一个全局开关会把「某台关心全部」悄悄压掉（用户报的就是这个）。
+        const ok = await this.#setChannelScope(channelId, 'all')
+        return this.#echo(
+          channelId,
+          ok
+            ? '这台机器人已改成关心全部会话（其它机器人不受影响）'
+            : '没找到这台机器人的配置，改不动——先在设置页保存一次',
+        )
+      }
       case 'set-session': {
         const target = command.shortId ? this.#findSession(command.shortId) : undefined
         if (!target) {
@@ -1466,13 +1487,72 @@ class Tlnotify {
             command.shortId ? `找不到会话 ${command.shortId}` : '用法：/mode session <短id>',
           )
         }
-        this.#mode.setMode('session', target)
-        this.#persistMode()
-        return this.#echo(channelId, `已绑定会话 ${this.#label(target)}，之后只推这一个会话`)
+        const ok = await this.#setChannelScope(channelId, 'single', target)
+        return this.#echo(
+          channelId,
+          ok
+            ? `这台机器人已绑定会话 ${this.#label(target)}，之后只推这一个会话`
+            : '没找到这台机器人的配置，改不动——先在设置页保存一次',
+        )
       }
       default:
         return
     }
+  }
+
+  /** `/mode` 的回显：只看**发命令那台机器人**自己的配置。 */
+  #describeScopeOf(channelId: string): string {
+    const config = this.#config.channels.find((channel) => channel.id === channelId)
+    if (!config) {
+      return '这台机器人还没写进配置里（可能刚加上还没保存），先在设置页保存一次再看。'
+    }
+    return describeChannelScope(channelSessionScope(config), {
+      ...(config.sessionId ? { sessionId: config.sessionId } : {}),
+      filterCount: config.sessionFilter?.length ?? 0,
+      labelOf: (id) => this.#label(id),
+    })
+  }
+
+  /**
+   * 改一台机器人的会话范围并落盘（IM 里的 `/mode` 走这里）。
+   *
+   * 与 `#applyProvisionCredentials()` 同一套路：**先落盘再改内存**，最后重建通道——
+   * 通道实例与 `ChannelManager` 手上的都是 `start()` 那一刻的快照，不重建的话新范围
+   * 要等下次重启才生效，用户会以为命令没起作用。
+   */
+  async #setChannelScope(
+    channelId: string,
+    scope: 'all' | 'single' | 'filter',
+    sessionId?: string,
+  ): Promise<boolean> {
+    const index = this.#config.channels.findIndex((channel) => channel.id === channelId)
+    if (index < 0) return false
+    const next = {
+      ...this.#config,
+      channels: this.#config.channels.map((channel, position) =>
+        // 切回「关心全部」时**不清空** `sessionId` / `sessionFilter`：用户可能只是临时
+        // 回到全局，回头还要切回原来那个会话（《每机器人设置方案》§6）。
+        position === index
+          ? { ...channel, sessionScope: scope, ...(sessionId !== undefined ? { sessionId } : {}) }
+          : channel,
+      ),
+    }
+    try {
+      saveConfigFile(this.#dataDir, next)
+    } catch (error) {
+      this.#log.error('保存会话范围失败', error)
+      return false
+    }
+    this.#config = next
+    if (this.#attached && this.#config.enabled) {
+      try {
+        await this.#channels.stop()
+        await this.#channels.start(this.#config.channels, this.#config.defaultChannelId)
+      } catch (error) {
+        this.#log.error('按新的会话范围重建通道失败', error)
+      }
+    }
+    return true
   }
 
   // ── 入站：按钮 ──────────────────────────────────────────────────────────
@@ -1579,25 +1659,6 @@ class Tlnotify {
     const ids = new Set<string>([...this.#sessions.keys(), ...this.#route.knownSessions])
     for (const id of ids) if (matchesShortId(id, needle)) return id
     return undefined
-  }
-
-  // ── 模式持久化 ──────────────────────────────────────────────────────────
-
-  #persistMode(): void {
-    const snapshot = this.#mode.snapshot()
-    const next: TlnotifyConfig = {
-      ...this.#config,
-      mode: snapshot.mode,
-      session: {
-        ...this.#config.session,
-        ...(snapshot.targetSessionId ? { targetSessionId: snapshot.targetSessionId } : {}),
-      },
-    }
-    this.#config = next
-    if (!saveConfigFile(this.#dataDir, next)) {
-      this.#log.warn('写入 config.json 失败，模式变更在重启后会丢失')
-    }
-    this.#scheduleSave()
   }
 
   // ── 回执 ────────────────────────────────────────────────────────────────

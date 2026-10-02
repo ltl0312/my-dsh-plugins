@@ -1,10 +1,14 @@
 // packages/tlnotify/tests/mode.spec.ts
 //
-// 运行模式与 IM 命令解析。命令解析的边界很重要：IM 里没有「命令模式」，
-// 误判的代价是把用户的话吃掉。
+// 每台机器人各自的会话范围 + IM 命令解析。命令解析的边界很重要：IM 里没有
+// 「命令模式」，误判的代价是把用户的话吃掉。
+//
+// 「投递按不按会话过滤」已经不在这个模块了：全局模式开关被删掉，改由每台机器人
+// 自己的 `sessionScope` 决定（见 tests/channel-settings.spec.ts 与 index.ts 的
+// `#canPush()`）。这里只留 detail 名单与遗留字段的兼容读写。
 
 import { describe, expect, it } from 'vitest'
-import { ModeState, describeMode, helpText, isDetailRequest, parseCommand } from '../src/mode.js'
+import { ModeState, describeChannelScope, helpText, isDetailRequest, parseCommand } from '../src/mode.js'
 
 describe('parseCommand', () => {
   it('`/mode`、`mode`、`模式` 都显示当前模式', () => {
@@ -74,35 +78,24 @@ describe('parseCommand', () => {
 })
 
 describe('ModeState', () => {
-  it('全局模式下所有会话都推，且默认都不详细', () => {
+  it('isDetailed 只看 detail 集合，不再跟遗留的全局模式挂钩', () => {
+    // 老配置里可能是 mode='session' + targetSessionId：投递已经不看它了，
+    // 「单会话带上下文」改由收件那台机器人自己的 sessionScope 决定。
+    const legacy = new ModeState({ mode: 'session', targetSessionId: 's1' })
+    expect(legacy.isDetailed('s1')).toBe(false)
+    legacy.setDetailed('s1', true)
+    expect(legacy.isDetailed('s1')).toBe(true)
+  })
+
+  it('遗留的 mode / targetSessionId 照样读得到、写得回（只为兼容老配置）', () => {
     const state = new ModeState({ mode: 'global' })
-    expect(state.shouldPush('s1')).toBe(true)
-    expect(state.shouldPush('s2')).toBe(true)
-    expect(state.isDetailed('s1')).toBe(false)
-  })
-
-  it('单会话模式只推绑定的那一个，且它天然是详细的', () => {
-    const state = new ModeState({ mode: 'session', targetSessionId: 's1' })
-    expect(state.shouldPush('s1')).toBe(true)
-    expect(state.shouldPush('s2')).toBe(false)
-    expect(state.isDetailed('s1')).toBe(true)
-    expect(state.isDetailed('s2')).toBe(false)
-  })
-
-  it('单会话模式未绑定时谁都不推', () => {
-    const state = new ModeState({ mode: 'session' })
-    expect(state.shouldPush('s1')).toBe(false)
+    expect(state.mode).toBe('global')
     expect(state.targetSessionId).toBeUndefined()
-  })
-
-  it('setMode 同时更新模式与绑定目标（不传目标即清空绑定）', () => {
-    const state = new ModeState({ mode: 'global' })
     state.setMode('session', 's1')
     expect(state.mode).toBe('session')
     expect(state.targetSessionId).toBe('s1')
     state.setMode('global')
     expect(state.targetSessionId).toBeUndefined()
-    expect(state.shouldPush('s1')).toBe(true)
   })
 
   it('detail 集合可增可删，重复设置返回 false', () => {
@@ -128,29 +121,36 @@ describe('ModeState', () => {
   })
 })
 
-describe('回显文案', () => {
-  it('describeMode 报出全局模式与详细名单', () => {
-    const text = describeMode({ mode: 'global', detailSessions: ['session-519cc141-x'] }, () => 'proj · 519cc141')
-    expect(text).toContain('全局模式')
-    expect(text).toContain('proj · 519cc141')
+describe('describeChannelScope（只讲发命令的那台机器人）', () => {
+  it('关心全部：一句话说清，并列出全部命令', () => {
+    const text = describeChannelScope('all')
+    expect(text).toContain('关心全部会话')
+    for (const token of ['/mode global', '/mode session', 'detail', '/undetail', '/stop']) {
+      expect(text).toContain(token)
+    }
   })
 
-  it('describeMode 在单会话未绑定时给出操作指引', () => {
-    const text = describeMode({ mode: 'session', detailSessions: [] })
-    expect(text).toContain('未绑定')
+  it('只关心一个且已绑定：回显绑定的会话', () => {
+    const text = describeChannelScope('single', { sessionId: 's1', labelOf: () => 'proj · aabbccdd' })
+    expect(text).toContain('proj · aabbccdd')
+  })
+
+  it('只关心一个但还没选：给操作指引，并说明谁都推不到', () => {
+    const text = describeChannelScope('single')
+    expect(text).toContain('还没选')
     expect(text).toContain('/mode session')
   })
 
-  it('describeMode 能回显绑定目标', () => {
-    const text = describeMode({ mode: 'session', targetSessionId: 's1', detailSessions: [] }, () => 'proj · aabbccdd')
-    expect(text).toContain('proj · aabbccdd')
-    expect(text).not.toContain('未绑定')
+  it('只关心名单：报出勾了几个；名单为空时明说等于不推', () => {
+    expect(describeChannelScope('filter', { filterCount: 3 })).toContain('3 个会话')
+    expect(describeChannelScope('filter', { filterCount: 0 })).toContain('空的')
   })
 
-  it('helpText 覆盖全部命令', () => {
+  it('helpText 覆盖全部命令，并写明只影响发命令的那台机器人', () => {
     const text = helpText()
     for (const token of ['/mode', '/mode global', '/mode session', 'detail', '/undetail', '/stop']) {
       expect(text).toContain(token)
     }
+    expect(text).toContain('发命令的这台机器人')
   })
 })

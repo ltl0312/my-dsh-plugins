@@ -1,20 +1,27 @@
 // packages/tlnotify/src/mode.ts
 //
-// 运行模式（设计方案 §4.7）与 IM 命令解析。
+// 每台机器人各自的会话范围（《每机器人设置方案》§3）与 IM 命令解析。
 //
-//   单会话模式（session）：只推绑定的那一个会话，正文给全上下文，回复零歧义。
-//   全局模式（global）  ：所有主会话都推，正文默认精简，回复要走 route.ts 的三层路由。
+//   关心全部（all）    ：所有主会话都推，正文默认精简，回复要走 route.ts 的三层路由。
+//   只关心一个（single）：只推 `sessionId` 绑定的那一个，正文给全上下文，回复零歧义。
+//   只关心多个（filter）：按 `sessionFilter` 白名单推，正文默认精简。
 //
-// 两者共用事件源、通道、路由表、按钮、门控与去重——差别只在「推哪些会话」和
+// 三者共用事件源、通道、路由表、按钮、门控与去重——差别只在「推哪些会话」和
 // 「正文多详细」。
 //
-// 切换有三条途径：
-//   ① 改 config.json 的 `mode` / `session.targetSessionId`
-//   ② IM 里发 `/mode session <短id>` / `/mode global` / `/mode`
-//   ③ 全局模式下回复 `detail`，把**单个**会话临时升到详细（存 state.json）
+// **这里没有全局模式了**：投递的唯一依据是每台机器人自己的 `sessionScope`。
+// 一台机器人选「关心全部」不会再被另一个全局开关压掉——那正是「所有机器人还是
+// 一个样」的根因（见 src/index.ts 的 `#canPush()`）。`RunMode` /
+// `config.mode` / `config.session.targetSessionId` 只剩兼容读写。
 //
-// 第 ③ 条是全局模式的减压阀：平时一行摘要，真关心某个会话时回一句 `detail`，
-// 之后就只对它给全上下文，直到 `/undetail`。
+// 调整有三条途径：
+//   ① 设置页里点选（写 config.json 的 `channels[].sessionScope`/`sessionId`/`sessionFilter`）
+//   ② IM 里发 `/mode` / `/mode global` / `/mode session <短id>`
+//      —— 作用对象是**收到这条命令的那台机器人**
+//   ③ 回复 `detail`，把**单个**会话临时升到详细（存 state.json）
+//
+// 第 ③ 条是「关心多个/全部」时的减压阀：平时一行摘要，真关心某个会话时回一句
+// `detail`，之后就只对它给全上下文，直到 `/undetail`。
 
 export type RunMode = 'global' | 'session'
 
@@ -93,9 +100,10 @@ export interface ModeStateOptions {
 }
 
 /**
- * 运行模式 + detail 集合的可变状态。
+ * 临时状态：被 `detail` 升级过的会话集合。
  *
- * `mode` 与 `targetSessionId` 的权威来源是 config.json（由调用方负责落盘）；
+ * `mode` 与 `targetSessionId` 是**遗留字段**（老配置文件里还有）：投递已经不看它们
+ * 了，只负责原样读进来、原样写回去，别把用户的老配置弄丢。
  * `detailSessions` 只进 state.json——它是临时的、会话级的、重启后保留但用户
  * 从不显式编辑的东西。
  */
@@ -110,28 +118,24 @@ export class ModeState {
     for (const id of options.detailSessions ?? []) this.#detail.add(id)
   }
 
+  /** @deprecated 遗留：不再参与投递判断，只为兼容老配置。 */
   get mode(): RunMode {
     return this.#mode
   }
 
+  /** @deprecated 遗留：不再参与投递判断，只为兼容老配置。 */
   get targetSessionId(): string | undefined {
     return this.#targetSessionId
   }
 
+  /** @deprecated 遗留：不再参与投递判断，只为兼容老配置。 */
   setMode(mode: RunMode, targetSessionId?: string): void {
     this.#mode = mode
     this.#targetSessionId = targetSessionId
   }
 
-  /** 单会话模式下是否该推送这个会话。 */
-  shouldPush(sessionId: string): boolean {
-    if (this.#mode === 'global') return true
-    return this.#targetSessionId === sessionId
-  }
-
-  /** 这个会话是否处于详细模式（单会话模式天然是）。 */
+  /** 这个会话是否被 `detail` 升级到详细模式。 */
   isDetailed(sessionId: string): boolean {
-    if (this.#mode === 'session') return this.#targetSessionId === sessionId
     return this.#detail.has(sessionId)
   }
 
@@ -161,31 +165,54 @@ export class ModeState {
 // 回显文案
 // ---------------------------------------------------------------------------
 
-export function describeMode(state: ModeSnapshot, labelOf?: (sessionId: string) => string): string {
+/**
+ * 「这台机器人关心哪些会话」的回显文案（`/mode` 不带参数时）。
+ *
+ * 作用对象是**收到命令的那台机器人**，不是全局——多台机器人可以各有各的答案。
+ */
+export function describeChannelScope(
+  scope: 'all' | 'single' | 'filter',
+  options: {
+    sessionId?: string
+    filterCount?: number
+    labelOf?: (sessionId: string) => string
+  } = {},
+): string {
   const lines: string[] = []
-  if (state.mode === 'session') {
-    const target = state.targetSessionId
-    const label = target ? (labelOf?.(target) ?? target) : '（未绑定）'
-    lines.push(`当前：单会话模式 → ${label}`)
-    if (!target) lines.push('还没绑定会话。用 `/mode session <短会话id>` 绑定，或 `/mode global` 回到全局。')
-  } else {
-    lines.push('当前：全局模式（所有主会话）')
-    if (state.detailSessions.length > 0) {
-      const names = state.detailSessions.map((id) => labelOf?.(id) ?? id).join('、')
-      lines.push(`详细模式：${names}`)
+  if (scope === 'single') {
+    const target = options.sessionId
+    if (target) {
+      lines.push(`这台机器人：只关心一个会话 → ${options.labelOf?.(target) ?? target}`)
+    } else {
+      lines.push('这台机器人：只关心一个会话，但还没选是哪一个')
+      lines.push('用 `/mode session <短会话id>` 选一个，或在设置页的「会话过滤」里点选——没选之前谁都推不到。')
     }
+  } else if (scope === 'filter') {
+    const count = options.filterCount ?? 0
+    lines.push(
+      count > 0
+        ? `这台机器人：只关心名单里的 ${count} 个会话`
+        : '这台机器人：只关心名单里的会话，但名单还是空的（等于不推）',
+    )
+    lines.push('名单在设置页的「会话过滤」里勾选。')
+  } else {
+    lines.push('这台机器人：关心全部会话')
   }
-  lines.push('', '`/mode global` 全局 · `/mode session <短id>` 单会话 · `detail` 升级当前会话 · `/undetail` 取消 · `/stop` 中止')
+  lines.push(
+    '',
+    '`/mode global` 这台改成关心全部 · `/mode session <短id>` 只关心一个 · `detail` 升级当前会话 · `/undetail` 取消 · `/stop` 中止',
+  )
   return lines.join('\n')
 }
 
+/** 命令清单。`/mode` 系列只影响发命令的那台机器人；`detail` 是会话级的。 */
 export function helpText(): string {
   return [
-    'tlnotify 命令：',
-    '· `/mode` —— 查看当前模式',
-    '· `/mode global` —— 所有主会话都推（默认）',
-    '· `/mode session <短会话id>` —— 只推绑定的那个会话',
-    '· `detail` —— 把当前会话升到详细模式（全局模式下）',
+    'tlnotify 命令（`/mode` 系列只改**发命令的这台机器人**）：',
+    '· `/mode` —— 查看这台机器人关心哪些会话',
+    '· `/mode global` —— 这台机器人改为关心全部会话（默认）',
+    '· `/mode session <短会话id>` —— 这台机器人只关心绑定的那一个会话',
+    '· `detail` —— 把当前会话升到详细模式（对所有机器人有效）',
     '· `/undetail` —— 取消详细模式',
     '· `/stop` —— 中止当前会话正在跑的任务',
     '',

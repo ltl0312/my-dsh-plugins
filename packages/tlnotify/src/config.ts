@@ -391,23 +391,40 @@ export function resolveChannelSettings(
 }
 
 /**
+ * 这台机器人最终生效的会话范围。
+ *
+ * `sessionScope` 缺省时按 `sessionId` / `sessionFilter` 是否有值推断，保证旧
+ * 配置「留空 = 全部、填了 = 白名单」继续按原意工作。
+ *
+ * 这是**投递的唯一依据**：全局的 `config.mode` 已经不再参与「推哪些会话」的判断
+ * （见 `src/index.ts` 的 `#canPush()`），否则一台机器人选的「关心全部」会被另一个
+ * 开关压掉。
+ */
+export function channelSessionScope(
+  channel: Pick<ChannelConfig, 'sessionScope' | 'sessionId' | 'sessionFilter'>,
+): 'all' | 'single' | 'filter' {
+  const filter = Array.isArray(channel.sessionFilter) ? channel.sessionFilter : []
+  const single = typeof channel.sessionId === 'string' ? channel.sessionId.trim() : ''
+  return channel.sessionScope ?? (single ? 'single' : filter.length > 0 ? 'filter' : 'all')
+}
+
+/**
  * 这台机器人是否关心该会话。
  *
  * 三态：`'all'` 关心全部；`'single'` 只关心 `sessionId` 绑定的那一个（还没选
  * 会话时谁都不关心，宁可安静也别突然刷屏）；`'filter'` 只关心
  * `sessionFilter` 列表里的。
- *
- * `sessionScope` 缺省时按 `sessionId` / `sessionFilter` 是否有值推断，保证旧
- * 配置「留空 = 全部、填了 = 白名单」继续按原意工作。
  */
 export function channelCaresAboutSession(
   channel: Pick<ChannelConfig, 'sessionScope' | 'sessionId' | 'sessionFilter'>,
   sessionId: string,
 ): boolean {
-  const filter = Array.isArray(channel.sessionFilter) ? channel.sessionFilter : []
-  const single = typeof channel.sessionId === 'string' ? channel.sessionId.trim() : ''
-  const scope = channel.sessionScope ?? (single ? 'single' : filter.length > 0 ? 'filter' : 'all')
+  const scope = channelSessionScope(channel)
   if (scope === 'all') return true
-  if (scope === 'single') return single.length > 0 && single === sessionId
+  if (scope === 'single') {
+    const single = typeof channel.sessionId === 'string' ? channel.sessionId.trim() : ''
+    return single.length > 0 && single === sessionId
+  }
+  const filter = Array.isArray(channel.sessionFilter) ? channel.sessionFilter : []
   return filter.includes(sessionId)
 }

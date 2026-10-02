@@ -1,14 +1,14 @@
 // packages/tlnotify/tests/channel-settings.spec.ts
 //
 // 「每台机器人各自一套设置」落地后的宿主侧逻辑：会话范围、事件开关、正文细节
-// 的合并与脱敏，以及通道选片 / 故障转移。
+// 的合并与脱敏，以及通道投递（每台机器人各收一份）。
 //
 // 这一层的失败模式和 rpc.spec.ts 描述的一样安静——都不会抛错，只会让用户觉得
 // 「设置没生效」：
 //   * 合并的底用错（该回落到**内置默认**却回落到全局值）→ 全局一改，通道跟着跑偏；
 //   * 显式 'all' 被 sessionFilter 列表压过 → 用户勾了「所有会话」却收不到；
 //   * 脱敏把密钥带出去 → 没人会发现；
-//   * sendSelected 的「没人关心」与 send() 的「没有通道接」混为一谈 → 日志刷满。
+//   * sendEach 的「没人关心」与 send() 的「没有通道接」混为一谈 → 日志刷满。
 // 所以下面重点钉「合并的底是谁」和「谁压过谁」。
 //
 // 另外几处**源码实际行为与设计描述不一致**的地方，都就地用注释标了出来，并按
@@ -471,8 +471,11 @@ describe('redactChannel', () => {
 })
 
 // ---------------------------------------------------------------------------
-// E. ChannelManager：选片顺序、跳过、故障转移
+// E. ChannelManager：投递顺序、逐台发送、单台失败不牵连
 // ---------------------------------------------------------------------------
+//
+// 《每机器人设置方案》之后，投递走 `sendEach()`：**谁勾了谁收到**，两台都勾同一
+// 会话就各收一条（不短路）。`send()` 保留旧的故障转移语义，只有老路径在用。
 
 interface LogLine {
   level: 'info' | 'warn' | 'error'
@@ -503,7 +506,7 @@ function notification(overrides: Partial<Notification> = {}): Notification {
 
 const DROPPED = '没有可用的通道，通知被丢弃'
 
-describe('ChannelManager 的选片与故障转移', () => {
+describe('ChannelManager 的逐台投递', () => {
   afterEach(() => {
     vi.restoreAllMocks()
   })
@@ -522,7 +525,7 @@ describe('ChannelManager 的选片与故障转移', () => {
     vi.spyOn(QqChannel.prototype, 'start').mockResolvedValue(undefined)
   }
 
-  it('两台机器人都不关心这个会话：sendSelected 静默返回 undefined，只有 send() 才 warn', async () => {
+  it('两台机器人都不关心这个会话：sendEach 静默返回空数组，只有 send() 才 warn', async () => {
     stubStart()
     const send = vi.spyOn(QqChannel.prototype, 'send').mockResolvedValue({ messageId: 'm-1' })
     const { manager, lines } = makeManager()
@@ -530,20 +533,20 @@ describe('ChannelManager 的选片与故障转移', () => {
       channel({ id, sessionScope: 'filter', sessionFilter: ['other-session'] })
     await manager.start([uninterested('a'), uninterested('b')])
 
-    // sendSelected：调用方（宿主）自己已经判断过「没人关心」，空手而归是正常路径
-    const selected = await manager.sendSelected(() => undefined)
-    expect(selected).toBeUndefined()
+    // sendEach：调用方（宿主）自己已经判断过「没人关心」，空手而归是正常路径
+    const sent = await manager.sendEach(() => undefined)
+    expect(sent).toEqual([])
     expect(send).not.toHaveBeenCalled()
     expect(lines.filter((line) => line.message.includes(DROPPED))).toEqual([])
 
     // send()：两台都被会话过滤筛掉了，这条必须报（否则用户以为「已经发出去了」）
-    const sent = await manager.send(notification({ sessionId: 'not-followed' }))
-    expect(sent).toBeUndefined()
+    const fallback = await manager.send(notification({ sessionId: 'not-followed' }))
+    expect(fallback).toBeUndefined()
     expect(send).not.toHaveBeenCalled()
     expect(lines.filter((line) => line.level === 'warn' && line.message.includes(DROPPED))).toHaveLength(1)
   })
 
-  it('默认通道优先：select 依次问 b → a，只有改主意的那台发包', async () => {
+  it('两台机器人都关心：各发一份（不短路），顺序按默认通道优先', async () => {
     stubStart()
     const send = vi.spyOn(QqChannel.prototype, 'send').mockResolvedValue({ messageId: 'm-a' })
     const { manager } = makeManager()
@@ -551,17 +554,34 @@ describe('ChannelManager 的选片与故障转移', () => {
     await manager.start([channel({ id: 'a' }), channel({ id: 'b' })], 'b')
 
     const asked: string[] = []
-    const result = await manager.sendSelected((channelId) => {
+    const results = await manager.sendEach((channelId) => {
+      asked.push(channelId)
+      return notification()
+    })
+
+    expect(asked).toEqual(['b', 'a'])
+    expect(results.map((result) => result.channelId)).toEqual(['b', 'a'])
+    expect(send).toHaveBeenCalledTimes(2)
+  })
+
+  it('不关心的那台被跳过，关心的那台照发', async () => {
+    stubStart()
+    const send = vi.spyOn(QqChannel.prototype, 'send').mockResolvedValue({ messageId: 'm-a' })
+    const { manager } = makeManager()
+    await manager.start([channel({ id: 'a' }), channel({ id: 'b' })], 'b')
+
+    const asked: string[] = []
+    const results = await manager.sendEach((channelId) => {
       asked.push(channelId)
       return channelId === 'b' ? undefined : notification()
     })
 
     expect(asked).toEqual(['b', 'a'])
-    expect(result?.channelId).toBe('a')
+    expect(results.map((result) => result.channelId)).toEqual(['a'])
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it('默认通道发包抛错 → 回退到下一台，两台 status 的计数与既有语义一致', async () => {
+  it('一台发不出去不影响另一台：各自记 status，错误只报自己的', async () => {
     stubStart()
     const send = vi.spyOn(QqChannel.prototype, 'send').mockImplementation(function (this: QqChannel) {
       return this.id === 'b' ? Promise.reject(new Error('平台拒收')) : Promise.resolve({ messageId: 'ok-a' })
@@ -569,16 +589,11 @@ describe('ChannelManager 的选片与故障转移', () => {
     const { manager, lines } = makeManager()
     await manager.start([channel({ id: 'a' }), channel({ id: 'b' })], 'b')
 
-    const asked: string[] = []
-    const result = await manager.sendSelected((channelId) => {
-      asked.push(channelId)
-      return notification()
-    })
+    const results = await manager.sendEach(() => notification())
 
-    expect(asked).toEqual(['b', 'a']) // 先试默认通道，失败才轮到 a
-    expect(result?.channelId).toBe('a')
-    expect(result?.messageId).toBe('ok-a')
-    expect(send).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenCalledTimes(2) // b 失败也照样轮到 a
+    expect(results.map((result) => result.channelId)).toEqual(['a'])
+    expect(results[0]?.messageId).toBe('ok-a')
 
     const byId = new Map(manager.statuses.map((status) => [status.id, status]))
     expect(byId.get('b')?.failed).toBe(1)
@@ -588,7 +603,7 @@ describe('ChannelManager 的选片与故障转移', () => {
     expect(byId.get('a')?.failed).toBe(0)
     expect(byId.get('a')?.connected).toBe(true)
     expect(byId.get('a')?.lastError).toBeUndefined()
-    expect(lines.some((line) => line.level === 'error' && line.message.includes('尝试下一个通道'))).toBe(true)
+    expect(lines.some((line) => line.level === 'error' && line.message.includes('通道「b」发送失败'))).toBe(true)
   })
 
   it('candidates() 默认通道优先，且不含被禁用的通道', async () => {
@@ -608,7 +623,7 @@ describe('ChannelManager 的选片与故障转移', () => {
   it('start() 抛错的通道仍留在 candidates() 里（与「只含已启动的通道」的注释不符）', async () => {
     // 源码在 `await channel.start()` **之前**就把通道塞进了通道表，失败时只写
     // lastError、不删条目 → 「已启动的通道」这个说法对启动失败的通道不成立：
-    // 它照样会被 send()/sendSelected() 试到（然后每发一条报一次错）。
+    // 它照样会被 send()/sendEach() 试到（然后每发一条报一次错）。
     // 钉住现状，顺便说明真要去掉它得在 catch 里 `#channels.delete(config.id)`。
     vi.spyOn(QqChannel.prototype, 'start').mockRejectedValue(new Error('缺少 appId / appSecret'))
     const { manager } = makeManager()
