@@ -75,13 +75,16 @@ import {
 } from './rpc.js'
 import {
   BIND_TTL_MS,
-  RPC_CHANNEL,
   RPC_METHODS,
+  RPC_ROUTE_PREFIX,
+  rpcRoutePath,
   type BindPayload,
   type PatchPayload,
   type PendingBind,
   type QrPayload,
   type RpcMethod,
+  type RpcRequestEnvelope,
+  type RpcResponseEnvelope,
   type RpcResult,
   type StatePayload,
   type TestPayload,
@@ -114,14 +117,29 @@ const SEEN_INBOUND_LIMIT = 800
 /**
  * 宿主「客户端连接」服务的 cordis 服务名。
  *
- * ⚠️ 是 `client-connection`，**不是** `connection`：后者（见
- * `@deepseek-ai/dsh-client-connection/lib/client.js` 的 `ctx.provide("connection", …)`）
- * 是**浏览器半边**的名字，宿主上根本不存在。
+ * ⚠️ **是 `connection`，不是 `client-connection`**。两个名字的权威出处：
+ *   - 服务名：`@deepseek-ai/dsh-client-connection/lib/index.js:566`——`HostConnectionService`
+ *     的构造函数写的是 `super(ctx, "connection")`；
+ *   - 第一方用法：`@deepseek-ai/dsh-api-gateway/lib/types/index.js:83`
+ *     `ctx.inject(['connection'], (c) => c.connection.rpc.intercept(…))`，以及同文件
+ *     `:286` 的 `this.ctx.get('connection')`；
+ *   - 而 `dsh-client-connection/lib/index.js:788` 的 `const name = "client-connection"`
+ *     只是该 cordis 插件自己的**模块名**（注释原文「Stable Cordis plugin name.」），
+ *     与服务名无关。
+ *
+ * 曾经误用后者：`ctx.get('client-connection')` 永远返回 `undefined`，40 次重试全部
+ * 落空，设置页永远停在「正在读取配置…」。`tests/install-rpc.spec.ts` 现在锁死这一点。
  */
-const CONNECTION_SERVICE = 'client-connection'
-/** 客户端连接服务可能排在本插件之后装载；取不到时按这个间隔再试。 */
+const CONNECTION_SERVICE = 'connection'
+
+/**
+ * 取服务失败后的重试间隔。
+ *
+ * bundle 层是按包名顺序组合的，插件之间没有装载顺序保证；`ctx.get` 在 strict 模式
+ * 下一个还没 ACTIVE 的服务会返回 `undefined`，所以「第一次取不到」不能当判决。
+ */
 const RPC_RETRY_INTERVAL_MS = 500
-/** 重试上限（40 × 500ms ≈ 20s）；超过就认定这个宿主没有 Web 半边，只警告一次。 */
+/** 重试上限（40 × 500ms ≈ 20s）；超过只警告一次，不刷日志。 */
 const RPC_RETRY_LIMIT = 40
 
 // ---------------------------------------------------------------------------
@@ -146,7 +164,7 @@ interface TlnotifyHost {
    * 读一个既不是自有属性、又没被 `inject` 声明、store 里也没有的服务名时它会
    * **抛错**而不是返回 undefined（`@deepseek-ai/cordis/lib/index.js:676`：
    * `cannot get property "${prop}" without inject`），`?.` 挡不住抛异常的 getter。
-   * 取服务统一走 `#connection()`。
+   * 取服务统一走 `readConnectionFetch()`（模块级函数）。
    */
   connection?: HostConnectionLike
   /**
@@ -159,27 +177,83 @@ interface TlnotifyHost {
 }
 
 /**
- * `ctx.connection` 的结构化视图（真实的类型在 `@deepseek-ai/dsh-client-connection`
- * 里，插件不依赖那个包，所以只描述用到的那一个方法）。
- *
- * 契约：`handle(channel, handler)` 注册一个「已鉴权的绝对通道前缀」，
- * handler 收到 `(endpoint, payload, signal, peer)`，返回
- * `{ok:true,value} | {ok:false,error}`；返回的函数用来注销。
+ * `connection` 服务的结构化视图（真实类型在 `@deepseek-ai/dsh-client-connection`
+ * 里，插件不依赖那个包，所以只描述用到的那一面）。
  */
 interface HostConnectionLike {
-  rpc?: HostConnectionRpcLike
+  fetch?: HostConnectionFetchLike
+  rpc?: unknown
 }
 
-interface HostConnectionRpcLike {
-  handle(
-    channel: string,
-    handler: (
-      endpoint: string,
-      payload: unknown,
-      signal: AbortSignal,
-      peer: unknown,
-    ) => Promise<unknown>,
-  ): () => Promise<void>
+/**
+ * `connection.fetch` 的注册面——插件把 HTTP 端点交给浏览器半边的**官方通道**。
+ *
+ * 为什么只用它、不用同级的 `connection.rpc.handle`，见 `#installRpc` 的注释。
+ */
+interface HostConnectionFetchLike {
+  /** 注册一条路由，返回注销函数。路径必须挂在 `/api/` 下。 */
+  register(route: HostFetchRoute): unknown
+}
+
+/** 一条 exact Fetch 路由（`registerFetchRoute` 入参的形状）。 */
+interface HostFetchRoute {
+  path: string
+  methods: readonly string[]
+  /** Connection 只把它原样存进路由表；带上以对齐 dsh-im 的用法。 */
+  requestBody?: 'buffered' | 'stream'
+  fetch(request: HostFetchRequestLike): unknown
+}
+
+/** 我们真正用到的那两个 `Request` 成员（Node 18+ 的 Web 标准 Request）。 */
+interface HostFetchRequestLike {
+  method: string
+  json(): Promise<unknown>
+}
+
+/**
+ * Node 18+ 的全局 `Response`。
+ *
+ * 宿主 tsconfig 不带 DOM，所以这里只声明用到的那一个静态方法（模块级声明会遮蔽
+ * 全局同名声明，与 `@types/node` 自带的 undici 类型不冲突）。
+ */
+declare const Response: {
+  json(body: unknown, init?: { status?: number; headers?: Record<string, string> }): unknown
+}
+
+/**
+ * 安全地取宿主「客户端连接」服务的 **fetch 注册面**；取不到返回 `undefined`，
+ * **任何情况下都不抛**。
+ *
+ * 两条路径都是安全的：
+ *   ① `ctx.get(name)` —— 反射服务的取值入口，注释原文（`@deepseek-ai/cordis/lib/index.js:755-772`）
+ *      「Read a service from the store without the inject requirement … or `undefined`
+ *      when not (yet) provided」，未就绪时返回 `undefined`；
+ *   ② `ctx[name]` —— 服务真在 store 里时 Proxy 顺着 fiber 链能解析出来，但取不到时
+ *      **会抛**，所以整段包在 try/catch 里兜住（见 `TlnotifyHost.connection` 的注释）。
+ *
+ * 只返回 `fetch.register` 可用的服务：拿到服务却没有注册面，跟没拿到是同一件事——
+ * 都只能降级成「直接改 config.json」。
+ */
+function readConnectionFetch(ctx: TlnotifyHost): HostConnectionFetchLike | undefined {
+  let service: HostConnectionLike | undefined
+  try {
+    if (typeof ctx.get === 'function') {
+      const viaGet = ctx.get(CONNECTION_SERVICE)
+      if (viaGet) service = viaGet as HostConnectionLike
+    }
+  } catch {
+    // 取服务本身抛错＝这个宿主没有客户端半边，降级。
+  }
+  if (!service) {
+    try {
+      const viaProperty = (ctx as unknown as Record<string, unknown>)[CONNECTION_SERVICE]
+      if (viaProperty) service = viaProperty as HostConnectionLike
+    } catch {
+      // Proxy 抛错不是异常情况，是「没有这个服务」的正常表达方式。
+    }
+  }
+  const fetch = service?.fetch
+  return fetch && typeof fetch.register === 'function' ? fetch : undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -215,10 +289,15 @@ class Tlnotify {
   #pendingBind: PendingBind | undefined = undefined
   /** 绑定期间从 IM 侧观察到的发送者 id；等设置页来 `bind` 取走时才落盘。 */
   #bindObserved: { channelId: string; targetId: string } | undefined = undefined
-  #unregisterRpc: (() => Promise<void>) | undefined = undefined
-  /** 等待客户端连接服务就绪的重试定时器（见 `#scheduleRpcRetry`）。 */
+  /** 注销所有端点路由的函数（`fetch.register` 的返回值汇总）。 */
+  #unregisterRpc: (() => void) | undefined = undefined
+  /** 等 `connection` 服务就绪的定时器（见 `#scheduleRpcRetry`）。 */
   #rpcTimer: ReturnType<typeof setTimeout> | undefined = undefined
   #rpcRetries = 0
+  /** `#installRpc()` 只走一次：重复注册会撞 Connection 的重复路由检查并抛错。 */
+  #rpcStarted = false
+  /** 路由是否真的挂上了（诊断用）。 */
+  #rpcMounted = false
 
   constructor(ctx: Context, rawConfig: Partial<TlnotifyConfig>) {
     this.#host = ctx as unknown as TlnotifyHost
@@ -331,10 +410,7 @@ class Tlnotify {
       clearTimeout(this.#saveTimer)
       this.#saveTimer = undefined
     }
-    if (this.#rpcTimer) {
-      clearTimeout(this.#rpcTimer)
-      this.#rpcTimer = undefined
-    }
+    this.#clearRpcTimer()
     this.#saveState()
     await this.#channels.stop()
     this.#log.info('tlnotify 已卸载')
@@ -343,98 +419,187 @@ class Tlnotify {
   // ── 设置页 RPC ──────────────────────────────────────────────────────────
 
   /**
-   * 挂上浏览器半边的 RPC 通道。
+   * 把设置页的 5 条端点挂到宿主的 `/api` 浏览器传输上。
    *
-   * 用宿主原生的 `client-connection` 服务的 `rpc.handle`，而不是自建 HTTP 路由：
-   * 鉴权、Host / Origin 校验、请求体上限、只允许 loopback 全由 Connection 负责，
-   * 设置页方案 §4.3 的安全约束因此天然成立，插件不需要自己再实现一遍（实现一遍
-   * 就多一处漏）。
+   * ## 为什么是 `connection.fetch.register`，而不是 `connection.rpc.handle`
    *
-   * 宿主没装 `dsh-client-connection` 时这里只是少一个设置页，插件其余部分照常
-   * 工作——所以降级路径是 warn 而不是抛错。
+   * `rpc.handle(channel, handler)` 看起来才像「原生通道」，但它在 DSH 里**用不了**：
+   * 它内部执行 `owner.webServer.register(route)`
+   * （`@deepseek-ai/dsh-client-connection/lib/index.js:640-657`），而 `owner` 是
+   * **读这个服务的那个 ctx**——`Service` 把 `this.ctx` 重绑到读者派生出来的 ctx 上
+   * （`@deepseek-ai/cordis/lib/index.js:84-158` 的 `getTraceable`/`createShadow`，
+   * 探针实测 `owner.fiber.name` 就是读者插件名）。插件自己的 ctx 没有声明
+   * `webServer`，于是注册内部抛 `cannot get property "webServer" without inject`。
+   * 五条救法全部**实测失败**：插件 `inject` 里加上 webServer、只加 connection、
+   * 改用属性访问、用真 `ctx.inject(['webServer','connection'], …)` 造子 fiber、
+   * 以及在沙箱里调到 `ctx.inject`（沙箱根本不暴露 `inject`）。根因是 cordis 的
+   * 属性访问要求**祖先 fiber 的 `store` 里有这个服务**（`lib/index.js:660-699` 的
+   * 解析循环），子 fiber 也不满足。
    *
-   * ⚠️ 历史上这里写的是 `this.#host.connection?.rpc`，它会在 cordis 的 Context
-   * Proxy 上抛 `cannot get property "connection" without inject`——`start()` 因此
-   * 在写出第一行 plugin.log **之前**就 reject，表现为「设置页永远停在『正在读取
-   * 配置…』、plugin.log 一行都没有」。取服务必须走 `#connection()`。
+   * 失败的样子极其隐蔽：注册抛的错被我们自己的 catch 吞成一行 warn，路由从没进过
+   * webserver，浏览器的 `POST /tlnotify/state` 掉进 `dsh-host-frontend-static` 的
+   * 兜底静态座位（该文件 `:87-92`「non-GET/HEAD is 405」），页面显示
+   * `transport failure for /tlnotify/state: HTTP 405`。
+   *
+   * `fetch.register` 只用到 `owner.effect(...)`（`registerFetchRoute`，`:625-639`），
+   * **完全不碰 `owner.webServer`**，所以在没有任何 inject 声明的插件 ctx 上也成功。
+   * 生态里就是这么做的：`@xmanrui/dsh-im/plugin-src/management-rpc.mjs:41-72`。
+   *
+   * ## 安全性没有让步
+   *
+   * `/api` 那条前缀路由由 Connection 自己挂（`dsh-client-connection/lib/index.js:820-844`），
+   * 它的 handler 先做 `connection.admit(req)`：Host / Origin 校验 + 浏览器登录态，
+   * 不通过直接 401/403。端点路由在这之后才被查到（`createSharedFetchHandler` 先查
+   * exact Fetch 路由再查拦截器，`lib/index.js:608-623`），所以方案 §4.3「只允许本机
+   * 来源、拒绝跨站、限制体积」依然由宿主统一保证。
+   *
+   * ## 降级
+   *
+   * 宿主没有 Web 半边（headless）时这里只是少一个设置页，插件其余部分照常工作——
+   * 所以降级路径是 warn 而不是抛错，`connection` 也**不写进**插件自己的 `inject`
+   * （`inject` 是一道激活门，那会让 headless 部署永不激活）。
+   *
+   * 事故记录之二：历史上这里写的是 `this.#host.connection?.rpc`，它在 cordis 的
+   * Context Proxy 上抛 `cannot get property "connection" without inject`——`start()`
+   * 因此在写出第一行 plugin.log **之前**就 reject，表现为「设置页永远停在『正在读取
+   * 配置…』、plugin.log 一行都没有」。取服务必须走 `readConnectionFetch()`（取不到
+   * 只返回 `undefined`，永不抛）。
    */
   #installRpc(): void {
-    if (this.#unregisterRpc) return // 幂等：重复调用不重复注册
-    const rpc = this.#connection()?.rpc
-    if (!rpc || typeof rpc.handle !== 'function') {
-      this.#scheduleRpcRetry()
-      return
-    }
-    try {
-      this.#unregisterRpc = rpc.handle(RPC_CHANNEL, (endpoint, payload) => this.#rpcHandle(endpoint, payload))
-      this.#rpcRetries = 0
-      this.#log.debug(`设置页 RPC 已挂载：${RPC_CHANNEL}`)
-    } catch (error) {
-      this.#log.warn('挂载设置页 RPC 失败（设置页不可用，插件其余功能不受影响）', error)
-    }
+    if (this.#disposed || this.#rpcStarted) return // 幂等：重复注册会撞 Connection 的重复路由检查
+    this.#rpcStarted = true
+    // 服务可能比我们晚 ACTIVE（bundle 层按包名组合，插件间没有装载顺序保证），
+    // 所以第一次取不到不能当判决：有界重试，到上限才判定「这个宿主没有 Web 半边」。
+    if (!this.#mountRpc()) this.#scheduleRpcRetry()
   }
 
   /**
-   * 安全地取宿主「客户端连接」服务；取不到返回 `undefined`，**任何情况下都不抛**。
+   * 注册 5 条端点路由；拿不到服务返回 `false`（交给重试）。
    *
-   * 两条路径都被证明是安全的：
-   *   ① `ctx.get(name)`——反射服务提供的入口，注释原文「Read a service from the
-   *      store without the inject requirement … or `undefined` when not (yet)
-   *      provided」；
-   *   ② `ctx[name]`——服务真的在 store 里时 Proxy 顺着 fiber 链能解析出来，但
-   *      取不到时会抛，所以整段包在 try/catch 里兜住。
+   * 单条注册失败会先撤掉已经挂上的那几条再报错：半成功比全失败更糟——路由挂着但
+   * 缺一条，页面上表现为「某个操作莫名 404」，比彻底不可用更难查。
    */
-  #connection(): HostConnectionLike | undefined {
-    const host = this.#host
+  #mountRpc(): boolean {
+    if (this.#disposed || this.#unregisterRpc) return true
+    const fetch = readConnectionFetch(this.#host)
+    if (!fetch) return false
+
+    const disposers: (() => void)[] = []
     try {
-      if (typeof host.get === 'function') {
-        const viaGet = host.get(CONNECTION_SERVICE)
-        if (viaGet) return viaGet as HostConnectionLike
+      for (const method of RPC_METHODS) {
+        const disposer = fetch.register({
+          path: rpcRoutePath(method),
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: (request) => this.#serveRpc(method, request),
+        })
+        if (typeof disposer === 'function') disposers.push(disposer as () => void)
       }
-    } catch {
-      // 取服务本身出错＝这个宿主没有客户端半边，降级到「直接改 config.json」。
+    } catch (error) {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          // 注销失败没有补救手段，忽略（下次启动会重新注册）。
+        }
+      }
+      this.#log.warn('挂载设置页 RPC 失败（设置页不可用，插件其余功能不受影响）', error)
+      return true // 不是瞬态问题，别重试刷日志
     }
-    try {
-      const viaProp = (host as unknown as Record<string, unknown>)[CONNECTION_SERVICE]
-      if (viaProp) return viaProp as HostConnectionLike
-    } catch {
-      // 同上：Proxy 抛错不是异常情况，是「没有这个服务」的正常表达方式。
+
+    this.#unregisterRpc = () => {
+      for (const dispose of disposers) dispose()
     }
-    return undefined
+    this.#rpcMounted = true
+    this.#rpcRetries = 0
+    this.#clearRpcTimer()
+    // 用 info 而不是 debug：设置页能不能用是用户会踩到的第一件事，而失败诊断全靠
+    // plugin.log（DSH 宿主不落任何日志文件）。一次启动一行，不吵。
+    this.#log.info(
+      `设置页 RPC 已挂载：${RPC_ROUTE_PREFIX}/<${RPC_METHODS.join('|')}>（${CONNECTION_SERVICE}.fetch）`,
+    )
+    return true
   }
 
   /**
-   * 客户端连接服务排在本插件之后装载时，等它就绪再挂 RPC。
+   * 一条端点路由的处理器：自己解 Connection 的信封，自己封回去。
+   *
+   * 信封形状照抄 `@xmanrui/dsh-im/plugin-src/management-rpc.mjs:33-72`：请求
+   * `{type:'client-request',rpcId,method,payload}`，响应
+   * `{type:'server-response',rpcId,result}`；`rpcId` 必须原样回显，浏览器侧的
+   * `parseConnectionResponse`（`dsh-client-connection/lib/client.js:1288-1304`）
+   * 会核对它。
+   *
+   * 业务失败一律走 `fail(...)` 的 `RpcResult`（HTTP 200），这样页面上能显示「哪一项
+   * 没通过校验」；只有信封本身就不对才回 HTTP 4xx——那种情况没有 `rpcId` 可以回显。
+   *
+   * 到这里的请求已经过 Connection 的 `admit`（Host/Origin 校验 + 浏览器登录态），
+   * 见 `#installRpc` 的注释。
+   */
+  async #serveRpc(method: RpcMethod, request: HostFetchRequestLike): Promise<unknown> {
+    if (request.method !== 'POST') {
+      return Response.json({ ok: false, message: 'method-not-allowed' }, { status: 405 })
+    }
+    let raw: unknown
+    try {
+      raw = await request.json()
+    } catch {
+      return Response.json({ ok: false, message: 'invalid-json' }, { status: 400 })
+    }
+    const envelope = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<RpcRequestEnvelope>
+    const rpcId = typeof envelope.rpcId === 'string' ? envelope.rpcId : ''
+    if (envelope.type !== 'client-request' || rpcId.length === 0) {
+      return Response.json({ ok: false, message: 'invalid-envelope' }, { status: 400 })
+    }
+    const result = (await this.#rpcHandle(method, envelope.payload)) as RpcResult<unknown>
+    const body: RpcResponseEnvelope = { type: 'server-response', rpcId, result }
+    return Response.json(body)
+  }
+
+  /**
+   * 反射取值路径专用的重试。
    *
    * bundle 层是按包名顺序组合的，插件之间没有装载顺序保证；`ctx.get` 在 strict
    * 模式下一个还没 ACTIVE 的服务会返回 `undefined`，所以「第一次取不到」不能当
    * 判决。重试到上限才认定这个宿主真的没有 Web 半边。
    */
   #scheduleRpcRetry(): void {
-    if (this.#disposed || this.#rpcTimer) return
+    if (this.#disposed || this.#rpcTimer || this.#unregisterRpc) return
     if (this.#rpcRetries >= RPC_RETRY_LIMIT) {
-      this.#log.warn(
-        `宿主没有提供客户端 RPC 通道（${CONNECTION_SERVICE}），设置页不可用；可以直接编辑 ${join(this.#dataDir, 'config.json')}`,
-      )
+      this.#warnRpcUnavailable()
       return
     }
     this.#rpcRetries += 1
     const timer = setTimeout(() => {
       this.#rpcTimer = undefined
       if (this.#disposed) return
-      this.#installRpc()
+      if (this.#mountRpc()) return
+      this.#scheduleRpcRetry()
     }, RPC_RETRY_INTERVAL_MS)
     // 不让这个定时器拖住进程退出（探针脚本、`dsh rescue` 这类短命进程）。
     ;(timer as unknown as { unref?: () => void }).unref?.()
     this.#rpcTimer = timer
   }
 
+  #clearRpcTimer(): void {
+    if (!this.#rpcTimer) return
+    clearTimeout(this.#rpcTimer)
+    this.#rpcTimer = undefined
+  }
+
+  #warnRpcUnavailable(): void {
+    this.#log.warn(
+      `宿主没有提供客户端 RPC 通道（${CONNECTION_SERVICE} 服务或它的 fetch 注册表），设置页不可用；可以直接编辑 ${join(this.#dataDir, 'config.json')}`,
+    )
+  }
+
   async #uninstallRpc(): Promise<void> {
     const unregister = this.#unregisterRpc
     this.#unregisterRpc = undefined
+    this.#rpcMounted = false
     if (!unregister) return
     try {
-      await unregister()
+      unregister()
     } catch (error) {
       this.#log.warn('注销设置页 RPC 时出错（已隔离）', error)
     }

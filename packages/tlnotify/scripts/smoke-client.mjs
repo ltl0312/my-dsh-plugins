@@ -103,7 +103,7 @@ check('factory 在只有 react 可 require 的环境下能解析', () => {
   assert.deepEqual([...new Set(required)], ['react'], `产物只能 require react，实际 require 了 ${required.join(', ')}`)
 })
 
-check('只注入 slots：注入一个不存在的服务会让插件永不激活', () => {
+check('只注入 slots：connection 是软依赖，改为 ctx.get 现取', () => {
   // 注意：inject 数组来自 jsdom realm，它的原型是 window.Array.prototype，
   // 直接 deepEqual 会因为原型不同而报「same structure but not reference-equal」。
   assert.deepEqual(Array.from(mod.inject), ['slots'])
@@ -180,9 +180,12 @@ function stateValue() {
 
 const fakeRpc = {
   async call(channel, endpoint, payload) {
-    rpcCalls.push({ channel, endpoint, payload })
-    if (endpoint === 'state') return { ok: true, value: stateValue() }
-    if (endpoint === 'patch') {
+    // 宿主侧的路由是 `connection.fetch.register` 挂的 `POST /api/tlnotify/<method>`，
+    // 浏览器侧就是 `rpc.call('/api', 'tlnotify/<method>', payload)`。
+    const method = String(endpoint).replace(/^tlnotify\//, '')
+    rpcCalls.push({ channel, endpoint, method, payload })
+    if (method === 'state') return { ok: true, value: stateValue() }
+    if (method === 'patch') {
       return { ok: true, value: { applied: 'hot', changed: ['enabled'], config: stateValue().config } }
     }
     return { ok: false, error: { code: 'not-stubbed', message: `未打桩的端点: ${endpoint}`, details: {} } }
@@ -190,6 +193,12 @@ const fakeRpc = {
 }
 
 const registrations = []
+// 忠实模仿真实的客户端 ctx：`dsh-cordis-client-runner` 把 ctx 包成**白名单代理**，
+// 没写进 `inject` 的服务名**一读就抛**（`lib/client.js:331` 的 `service "x" is not
+// declared by your plugin`，且 `?.` 挡不住）。所以 `connection` 与 `logger` 在这里
+// 都定义成**会抛的 getter**，只有 `ctx.get(name)` 这条路走得通。
+// 谁把代码改回 `ctx.connection`，下面「初始加载会调用 state 端点」会立刻失败——
+// 这正是实机上「页面永远停在正在读取配置…」的成因。
 const fakeCtx = {
   slots: {
     inject(name, callback) {
@@ -200,8 +209,15 @@ const fakeCtx = {
       return () => {}
     },
   },
-  connection: { rpc: fakeRpc },
-  logger: { warn: (...args) => console.warn('[ctx.warn]', ...args) },
+  get(name) {
+    return name === 'connection' ? { rpc: fakeRpc } : undefined
+  },
+  get connection() {
+    throw new Error('service "connection" is not declared by your plugin')
+  },
+  get logger() {
+    throw new Error('dynamic ctx does not expose "logger"')
+  },
 }
 
 check('apply 不抛错，并注册 settings.section', () => {
@@ -232,27 +248,27 @@ window.document.body.appendChild(container)
 const root = ReactDOMClient.createRoot(container)
 const Section = registrations[0].component
 
-const renderOnce = async () => {
-  const element = React.createElement(Section, { close: () => {} })
+const renderInto = async (targetRoot, Component) => {
+  const element = React.createElement(Component, { close: () => {} })
   if (act) {
     await act(async () => {
-      root.render(element)
+      targetRoot.render(element)
     })
     await act(async () => {
       await flush()
     })
     return
   }
-  root.render(element)
+  targetRoot.render(element)
   await flush()
 }
-await renderOnce()
+await renderInto(root, Section)
 
 const text = () => container.textContent ?? ''
 
 check('初始加载会调用 state 端点', () => {
   assert.ok(
-    rpcCalls.some((call) => call.channel === '/tlnotify' && call.endpoint === 'state'),
+    rpcCalls.some((call) => call.channel === '/api' && call.method === 'state'),
     `没有发出 state 调用，实际: ${JSON.stringify(rpcCalls)}`,
   )
 })
@@ -273,7 +289,7 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
 })
 
 {
-  const before = rpcCalls.filter((call) => call.endpoint === 'state').length
+  const before = rpcCalls.filter((call) => call.method === 'state').length
   const reloadBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '重新读取')
   check('找得到「重新读取」按钮', () => assert.ok(reloadBtn, '状态栏里没有重新读取按钮'))
   if (reloadBtn) {
@@ -288,7 +304,7 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
       reloadBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
       await flush()
     }
-    const after = rpcCalls.filter((call) => call.endpoint === 'state').length
+    const after = rpcCalls.filter((call) => call.method === 'state').length
     check('重新读取真的重新拉了状态', () => assert.ok(after > before, `state 调用次数没有增加 (${before} → ${after})`))
   }
 }
@@ -312,13 +328,70 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
       click()
       await flush()
     }
-    const patched = rpcCalls.filter((call) => call.endpoint === 'patch')
+    const patched = rpcCalls.filter((call) => call.method === 'patch')
     check('切换总开关会发出 patch', () => {
       assert.ok(patched.length > 0, '没有发出 patch 调用')
       assert.equal(patched[0].payload.patch.enabled, false)
     })
   }
 }
+
+// ── 5. 拿不到 connection 时也必须给出结论，而不是永远转圈 ────────────────────
+{
+  const registrations2 = []
+  const offlineCtx = {
+    slots: {
+      inject(name, callback) {
+        return callback()
+      },
+      register(options, component) {
+        registrations2.push({ options, component })
+        return () => {}
+      },
+    },
+    get() {
+      return undefined
+    },
+    get connection() {
+      throw new Error('service "connection" is not declared by your plugin')
+    },
+    get logger() {
+      throw new Error('dynamic ctx does not expose "logger"')
+    },
+  }
+  mod.apply(offlineCtx)
+  const container2 = window.document.createElement('div')
+  window.document.body.appendChild(container2)
+  const root2 = ReactDOMClient.createRoot(container2)
+  await renderInto(root2, registrations2[0].component)
+  const offlineText = container2.textContent ?? ''
+  check('拿不到 connection 时进只读态（不再停在「正在读取配置…」）', () => {
+    assert.ok(!offlineText.includes('正在读取配置'), `页面仍停在加载态：${offlineText.slice(0, 200)}`)
+    assert.match(offlineText, /只能看，不能改/, '没有出现只读提示')
+  })
+  if (act) {
+    await act(async () => {
+      root2.unmount()
+    })
+  } else {
+    root2.unmount()
+  }
+}
+
+// 失败路径上的日志本身也不能再抛：真实 ctx 里 `logger` 同样不在白名单里。
+check('logger 一读就抛时，apply 走警告分支也只是安静降级', () => {
+  mod.apply({
+    get() {
+      return undefined
+    },
+    get connection() {
+      throw new Error('service "connection" is not declared by your plugin')
+    },
+    get logger() {
+      throw new Error('dynamic ctx does not expose "logger"')
+    },
+  })
+})
 
 // unmount 会同步触发一批 effect 清理与状态更新；不包 act 的话 React 会打一条
 // 「update not wrapped in act」告警，会把真正的失败淹掉。

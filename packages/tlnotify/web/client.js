@@ -2665,7 +2665,9 @@ window.__ModuleLoader__.load({
       }
     
       // src/protocol.ts
-      var RPC_CHANNEL = "/tlnotify";
+      var RPC_API_CHANNEL = "/api";
+      var RPC_ENDPOINT_PREFIX = "tlnotify";
+      var RPC_ROUTE_PREFIX = `${RPC_API_CHANNEL}/${RPC_ENDPOINT_PREFIX}`;
       var RPC_METHODS = Object.freeze([
         "state",
         "patch",
@@ -2673,6 +2675,9 @@ window.__ModuleLoader__.load({
         "qr",
         "bind"
       ]);
+      function rpcEndpoint(method) {
+        return `${RPC_ENDPOINT_PREFIX}/${method}`;
+      }
       var BIND_TTL_MS = 10 * 60 * 1e3;
     
       // src/client/rpc.ts
@@ -2685,7 +2690,16 @@ window.__ModuleLoader__.load({
         }
       };
       function createClientRpc(ctx) {
-        const read = () => ctx.connection?.rpc;
+        const read = () => {
+          try {
+            const queried = typeof ctx.get === "function" ? ctx.get("connection") : void 0;
+            const service = queried ?? ctx.connection;
+            const rpc = service?.rpc;
+            return typeof rpc?.call === "function" ? rpc : void 0;
+          } catch {
+            return void 0;
+          }
+        };
         return {
           get available() {
             return typeof read()?.call === "function";
@@ -2695,7 +2709,7 @@ window.__ModuleLoader__.load({
             if (!rpc || typeof rpc.call !== "function") return NO_CONNECTION;
             let raw;
             try {
-              raw = await rpc.call(RPC_CHANNEL, method, payload);
+              raw = await rpc.call(RPC_API_CHANNEL, rpcEndpoint(method), payload);
             } catch (error) {
               const failure = error;
               return {
@@ -2763,13 +2777,17 @@ window.__ModuleLoader__.load({
           setDrafts((previous) => sameChannelIds(previous, next.config.channels) ? previous : toDrafts(next.config));
         }, []);
         const reload = import_react5.default.useCallback(async () => {
-          const result = await rpc.call("state");
-          if (!result.ok) {
-            setError(result.error.message);
-            return;
+          try {
+            const result = await rpc.call("state");
+            if (!result.ok) {
+              setError(result.error.message);
+              return;
+            }
+            setError(void 0);
+            applyState(result.value);
+          } catch (error2) {
+            setError(error2 instanceof Error ? error2.message : String(error2));
           }
-          setError(void 0);
-          applyState(result.value);
         }, [rpc, applyState]);
         import_react5.default.useEffect(() => {
           void reload();
@@ -3585,6 +3603,14 @@ window.__ModuleLoader__.load({
     
       // src/client/index.tsx
       var inject = ["slots"];
+      function warn(ctx, message, error) {
+        try {
+          const queried = typeof ctx.get === "function" ? ctx.get("logger") : void 0;
+          const logger = queried ?? ctx.logger;
+          logger?.warn?.(message, error);
+        } catch {
+        }
+      }
       function useLang() {
         const [lang, setLang] = import_react6.default.useState(() => detectLang());
         import_react6.default.useEffect(() => {
@@ -3603,13 +3629,13 @@ window.__ModuleLoader__.load({
         if (typeof document === "undefined") return;
         const slots = ctx.slots;
         if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") {
-          ctx.logger?.warn?.("tlnotify: \u5BBF\u4E3B\u6CA1\u6709 slots \u670D\u52A1\uFF0C\u8BBE\u7F6E\u9875\u65E0\u6CD5\u6302\u8F7D\u3002");
+          warn(ctx, "tlnotify: \u5BBF\u4E3B\u6CA1\u6709 slots \u670D\u52A1\uFF0C\u8BBE\u7F6E\u9875\u65E0\u6CD5\u6302\u8F7D\u3002");
           return;
         }
         try {
           ensureClientStyles();
         } catch (error) {
-          ctx.logger?.warn?.("tlnotify: \u6CE8\u5165\u6837\u5F0F\u5931\u8D25\uFF0C\u9875\u9762\u4F1A\u5931\u53BB\u5916\u89C2\u4F46\u4ECD\u53EF\u7528\u3002", error);
+          warn(ctx, "tlnotify: \u6CE8\u5165\u6837\u5F0F\u5931\u8D25\uFF0C\u9875\u9762\u4F1A\u5931\u53BB\u5916\u89C2\u4F46\u4ECD\u53EF\u7528\u3002", error);
         }
         const Section2 = () => {
           const lang = useLang();
@@ -3631,7 +3657,7 @@ window.__ModuleLoader__.load({
             )
           );
         } catch (error) {
-          ctx.logger?.warn?.("tlnotify: \u6CE8\u518C\u8BBE\u7F6E\u9875\u5931\u8D25\u3002", error);
+          warn(ctx, "tlnotify: \u6CE8\u518C\u8BBE\u7F6E\u9875\u5931\u8D25\u3002", error);
         }
         ctx.effect?.(() => () => removeClientStyles(), "tlnotify: client mounts");
       }

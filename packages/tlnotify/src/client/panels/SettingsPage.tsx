@@ -69,13 +69,20 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
   }, [])
 
   const reload = React.useCallback(async (): Promise<void> => {
-    const result = await rpc.call<StatePayload>('state')
-    if (!result.ok) {
-      setError(result.error.message)
-      return
+    try {
+      const result = await rpc.call<StatePayload>('state')
+      if (!result.ok) {
+        setError(result.error.message)
+        return
+      }
+      setError(undefined)
+      applyState(result.value)
+    } catch (error) {
+      // 兜的是一类「页面永远转圈」的事故：这个 effect 里写的是 `void reload()`，
+      // 所以 `rpc.call` 一旦抛出就没人接这个拒绝，页面永远停在「正在读取配置…」。
+      // 宁可就地把它变成一条看得见的错误提示。
+      setError(error instanceof Error ? error.message : String(error))
     }
-    setError(undefined)
-    applyState(result.value)
   }, [rpc, applyState])
 
   React.useEffect(() => {

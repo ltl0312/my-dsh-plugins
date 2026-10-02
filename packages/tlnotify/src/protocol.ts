@@ -7,40 +7,54 @@
  *
  * ## 与方案文档的对应关系
  *
- * 方案里写的是四个 HTTP 端点：
+ * 方案里写的是几个 HTTP 端点，实际实现是 Connection 的 exact Fetch 路由
+ * （每个方法一条 `POST /api/tlnotify/<method>`）：
  *
- * | 方案文档                        | 实际实现                                        |
- * | ------------------------------- | ----------------------------------------------- |
- * | `GET  /tlnotify/rpc/state`      | `call(RPC_CHANNEL, 'state')`                    |
- * | `POST /tlnotify/rpc/patch`      | `call(RPC_CHANNEL, 'patch', { patch })`         |
- * | `POST /tlnotify/rpc/test`       | `call(RPC_CHANNEL, 'test',  { channelId? })`    |
- * | `POST /tlnotify/rpc/qr`         | `call(RPC_CHANNEL, 'qr',    { channelId? })`    |
+ * | 方案文档                        | 实际实现                                            |
+ * | ------------------------------- | --------------------------------------------------- |
+ * | `GET  /tlnotify/rpc/state`      | `call('/api', 'tlnotify/state')`  → `POST /api/tlnotify/state` |
+ * | `POST /tlnotify/rpc/patch`      | `call('/api', 'tlnotify/patch', { … })`              |
+ * | `POST /tlnotify/rpc/test`       | `call('/api', 'tlnotify/test',  { … })`              |
+ * | `POST /tlnotify/rpc/qr`         | `call('/api', 'tlnotify/qr',    { … })`              |
+ * | （方案 §7 的扫码绑定轮询）        | `call('/api', 'tlnotify/bind',  { … })`              |
  *
- * 我们**不走自建 HTTP 路由**，而是用 DSH 原生的客户端 RPC 通道
- *（宿主 `ctx.connection.rpc.handle(channel, handler)`，
- *  浏览器 `ctx.connection.rpc.call(channel, endpoint, payload)`）。
+ * 我们**不走自建 HTTP 路由**：宿主侧用 `ctx.get('connection').fetch.register(...)`
+ * 把每条端点挂到 Connection 的 `/api` 浏览器传输上
+ * （`@xmanrui/dsh-im/plugin-src/management-rpc.mjs:41-72` 是同一套做法），
+ * 浏览器侧用 `connection.rpc.call('/api', endpoint, payload)` 调它。
  * 理由：
  *
- * 1. 原生通道自带鉴权与来源校验（DSH 已经做了 Host/Origin 校验与浏览器
- *    登录态绑定），我们不用自己实现 loopback 白名单、Origin 校验、
- *    请求体上限这一整套，也就不存在把它们写错的风险；
- * 2. 方案 §4.3 的安全约束（只允许本机来源、拒绝跨站、限制体积）由宿主统一
- *    保证，比插件各写一份更可靠；
- * 3. 断线重连、多标签页、桌面端与 Web 端共用同一条链路，不需要额外的
- *    轮询与重试逻辑。
- *
- * 因此方案文档里「只监听 127.0.0.1」这条约束在此实现下是**天然成立**的：
- * 通道本身只在已鉴权的客户端连接上可用。
+ * 1. `/api` 那条前缀路由由 Connection 自己挂，它的 handler 先做
+ *    `connection.admit(req)`（Host / Origin 校验 + 浏览器登录态），不通过直接
+ *    401/403。方案 §4.3 的安全约束（只允许本机来源、拒绝跨站、限制体积）因此
+ *    仍由宿主统一保证，插件不需要（也不应该）自己再实现一遍；
+ * 2. 方案文档里「只监听 127.0.0.1」这条约束在此实现下**天然成立**；
+ * 3. 断线重连、多标签页、桌面端与 Web 端共用同一条链路。
  *
  * ## 信封
  *
- * 每个方法都返回 `RpcResult<T>`。失败一律走 `{ ok: false, error }`，
- * 而不是抛异常——抛出去会被连接层折叠成一句没有上下文的报错，用户看不到
- * 「哪一项没通过校验」。
+ * 请求 `{ type: 'client-request', rpcId, method, payload }`、
+ * 响应 `{ type: 'server-response', rpcId, result }` —— 由 Connection 定义
+ * （`@deepseek-ai/dsh-client-connection/lib/index.js` 的 `clientRequestSchema` /
+ * `serverResponseSchema`）。`rpcId` 必须原样回显，浏览器侧会核对。
+ *
+ * 业务结果一律是 `RpcResult<T>`：失败走 `{ ok: false, error }` 而不是抛异常，
+ * 也不做成 HTTP 4xx——抛出去会被连接层折叠成一句没有上下文的报错，用户就看不到
+ * 「哪一项没通过校验」了。只有「信封本身就不对」才回 HTTP 400（那种情况没有
+ * `rpcId` 可以回显）。
  */
 
-/** 客户端 RPC 通道名（绝对前缀，与 `rpc.handle` 的参数一致）。 */
-export const RPC_CHANNEL = '/tlnotify'
+/**
+ * 浏览器 `rpc.call(channel, …)` 的 channel：Connection 自己挂在 `/api` 上的
+ * 浏览器传输（`@deepseek-ai/dsh-client-connection/lib/index.js:820-844`）。
+ */
+export const RPC_API_CHANNEL = '/api'
+
+/** 本插件所有端点的 endpoint 前缀；路由路径去掉 `/api/` 就是它。 */
+export const RPC_ENDPOINT_PREFIX = 'tlnotify'
+
+/** 宿主注册用的路由前缀。必须挂在 `/api/` 下（Connection 的 `assertFetchRoute` 硬要求）。 */
+export const RPC_ROUTE_PREFIX = `${RPC_API_CHANNEL}/${RPC_ENDPOINT_PREFIX}`
 
 /** 支持的 RPC 方法。 */
 export type RpcMethod = 'state' | 'patch' | 'test' | 'qr' | 'bind'
@@ -54,6 +68,21 @@ export const RPC_METHODS: readonly RpcMethod[] = Object.freeze([
   'bind',
 ] as const)
 
+/**
+ * 某个方法的 endpoint（＝路由路径去掉 `/api/`）：`tlnotify/state`。
+ *
+ * 它同时是请求信封里的 `method`：Connection 用它做端点归属校验，所以宿主注册的
+ * 路径、浏览器拼的 endpoint 必须出自这一个函数。
+ */
+export function rpcEndpoint(method: RpcMethod): string {
+  return `${RPC_ENDPOINT_PREFIX}/${method}`
+}
+
+/** 某个方法的 HTTP 路由路径：`/api/tlnotify/state`。 */
+export function rpcRoutePath(method: RpcMethod): string {
+  return `${RPC_API_CHANNEL}/${rpcEndpoint(method)}`
+}
+
 /** 失败原因；`code` 供程序判断，`message` 直接展示给用户。 */
 export interface RpcFailure {
   code: string
@@ -64,6 +93,25 @@ export interface RpcFailure {
 
 /** 统一的返回信封。 */
 export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: RpcFailure }
+
+// ---------------------------------------------------------------------------
+// Connection 的信封（浏览器 ↔ 宿主）
+// ---------------------------------------------------------------------------
+
+/** 浏览器 → 宿主。字段名与 `clientRequestSchema` 一致，`method` 就是 `rpcEndpoint()`。 */
+export interface RpcRequestEnvelope {
+  type: 'client-request'
+  rpcId: string
+  method: string
+  payload: unknown
+}
+
+/** 宿主 → 浏览器。`rpcId` 原样回显；`result` 就是 `RpcResult`。 */
+export interface RpcResponseEnvelope {
+  type: 'server-response'
+  rpcId: string
+  result: RpcResult<unknown>
+}
 
 // ---------------------------------------------------------------------------
 // state

@@ -19,11 +19,30 @@ import { ensureClientStyles, removeClientStyles } from './styles.js'
 /**
  * 注入的宿主服务名。
  *
- * 只注入 `slots`。`connection` **不注入**：拿不准它在客户端 cordis 里注册的短名，
- * 而注入一个不存在的服务会让插件永远不激活（比降级严重得多）。设置页在每次调用
- * 时才读 `ctx.connection.rpc`，服务晚就位也能自己好起来。
+ * 只注入 `slots`——它是**硬依赖**（没有它这一页根本挂不上）。`connection` **不注入**：
+ * 它是**软依赖**（拿不到就退化成只读态，而不是整页消失），而客户端的 ctx 是白名单
+ * 代理，`inject` 里每个名字都会变成一道**激活门**（provider 卸载时整包被 park）。
+ * 官方指引同此：「Prefer ctx.get(name) with an undefined check; use inject only for
+ * hard dependencies.」（`dsh-cordis-client-runner/lib/client.js:6144`）。所以设置页
+ * 每次调用时用 `ctx.get('connection')` 现取。
  */
 export const inject: string[] = ['slots']
+
+/**
+ * 打招呼专用。
+ *
+ * 客户端的 ctx 是白名单代理，`ctx.logger` **不在**白名单里（读它同样会抛）。日志是
+ * 失败路径上的最后一环，绝不能再制造第二个异常，所以取不到就安静算了。
+ */
+function warn(ctx: ClientContextLike, message: string, error?: unknown): void {
+  try {
+    const queried = typeof ctx.get === 'function' ? ctx.get('logger') : undefined
+    const logger = (queried ?? ctx.logger) as { warn?: (message: string, error?: unknown) => void } | undefined
+    logger?.warn?.(message, error)
+  } catch {
+    /* 客户端的 ctx 可能连 logger 都不给：这里只是打招呼，绝不能因此再抛。 */
+  }
+}
 
 /** 跟随宿主语言。`<html lang>`/`class` 变了就重渲染。 */
 function useLang(): Lang {
@@ -48,14 +67,14 @@ export function apply(ctx: ClientContextLike): void {
 
   const slots = ctx.slots
   if (!slots || typeof slots.inject !== 'function' || typeof slots.register !== 'function') {
-    ctx.logger?.warn?.('tlnotify: 宿主没有 slots 服务，设置页无法挂载。')
+    warn(ctx, 'tlnotify: 宿主没有 slots 服务，设置页无法挂载。')
     return
   }
 
   try {
     ensureClientStyles()
   } catch (error) {
-    ctx.logger?.warn?.('tlnotify: 注入样式失败，页面会失去外观但仍可用。', error)
+    warn(ctx, 'tlnotify: 注入样式失败，页面会失去外观但仍可用。', error)
   }
 
   const Section = (): React.ReactElement => {
@@ -80,7 +99,7 @@ export function apply(ctx: ClientContextLike): void {
       ),
     )
   } catch (error) {
-    ctx.logger?.warn?.('tlnotify: 注册设置页失败。', error)
+    warn(ctx, 'tlnotify: 注册设置页失败。', error)
   }
 
   ctx.effect?.(() => () => removeClientStyles(), 'tlnotify: client mounts')
