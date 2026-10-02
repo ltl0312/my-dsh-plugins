@@ -117,8 +117,12 @@ describe('tlmemory 工具返回契约（MCP/DSH 规范）', () => {
     db.close()
   })
 
-  it('注册了 tlmemory_save 与 tlmemory_query 两个工具', () => {
-    expect(host.tools.map((t) => t.name).sort()).toEqual(['tlmemory_query', 'tlmemory_save'])
+  it('注册了 tlmemory_save / tlmemory_query / tlmemory_delete 三个工具', () => {
+    expect(host.tools.map((t) => t.name).sort()).toEqual([
+      'tlmemory_delete',
+      'tlmemory_query',
+      'tlmemory_save',
+    ])
   })
 
   it('tlmemory_save 的 execute 返回规范信封且通过 output.schema', async () => {
@@ -251,5 +255,123 @@ describe('tlmemory 工具作用域动态感知（v0.6.6 防漂移）', () => {
     // session: null 经 extractExecSession 探测后回退为 undefined（鸭子类型守卫）
     expect(seenSessions).toEqual([undefined])
     expect(result.content[0].text).toContain('pnpm')
+  })
+})
+
+describe('tlmemory_delete 受控删除（v0.6.11）', () => {
+  let db: MemoryDB
+  let host: ReturnType<typeof createToolHost>
+  let dispose: () => void
+
+  /** 造一条记忆（默认落当前工程作用域） */
+  const seed = async (treeScope: 'project' | 'global' = 'project') => {
+    const save = host.get('tlmemory_save')
+    const result: any = await save.execute({ ...SAVE_ARGS, tree_scope: treeScope })
+    return result
+  }
+
+  beforeEach(() => {
+    db = new MemoryDB(':memory:')
+    host = createToolHost()
+    dispose = registerMemoryTools(host.ctx, db, () => 'repo:testscope')
+  })
+
+  afterEach(() => {
+    dispose()
+    db.close()
+  })
+
+  it('confirm 非布尔 true 时一律拒绝（字符串 "true" 也不行）', async () => {
+    await seed()
+    const tool = host.get('tlmemory_delete')
+    const leaf = db.getAllNodes().find((n) => n.is_leaf === 1)!
+
+    const missing: any = await tool.execute({ id: leaf.id })
+    expect(missing.content[0].text).toContain('confirm')
+    expect(db.getNode(leaf.id)).not.toBeNull()
+
+    await tool.execute({ id: leaf.id, confirm: 'true' })
+    expect(db.getNode(leaf.id)).not.toBeNull()
+  })
+
+  it('confirm: true 时按 id 删除叶子记忆，返回规范信封', async () => {
+    await seed()
+    const tool = host.get('tlmemory_delete')
+    const leaf = db.getAllNodes().find((n) => n.is_leaf === 1)!
+    const args = { id: leaf.id, confirm: true }
+
+    const result: any = await tool.execute(args)
+
+    expect(db.getNode(leaf.id)).toBeNull()
+    expect(result.content[0].text).toContain('已删除记忆')
+    runHostPipeline(tool, args, result)
+  })
+
+  it('拒绝删除分类目录（is_leaf=0 会级联清空整棵子树）', async () => {
+    await seed()
+    const tool = host.get('tlmemory_delete')
+    const dir = db.getAllNodes().find((n) => n.is_leaf === 0)!
+    const result: any = await tool.execute({ id: dir.id, confirm: true })
+
+    expect(db.getNode(dir.id)).not.toBeNull()
+    expect(result.content[0].text).toContain('分类目录')
+  })
+
+  it('跨作用域守卫：默认拒绝 global 记忆，显式 allow_cross_scope 才放行', async () => {
+    await seed('global')
+    const tool = host.get('tlmemory_delete')
+    const globalLeaf = db.getAllNodes('global').find((n) => n.is_leaf === 1)!
+
+    const refused: any = await tool.execute({ id: globalLeaf.id, confirm: true })
+    expect(db.getNode(globalLeaf.id)).not.toBeNull()
+    expect(refused.content[0].text).toContain('allow_cross_scope')
+
+    const allowed: any = await tool.execute({ id: globalLeaf.id, confirm: true, allow_cross_scope: true })
+    expect(db.getNode(globalLeaf.id)).toBeNull()
+    expect(allowed.content[0].text).toContain('已删除记忆')
+  })
+
+  it('无 id 时按 rule_name 在作用域内定位删除', async () => {
+    await seed()
+    const tool = host.get('tlmemory_delete')
+
+    const result: any = await tool.execute({ rule_name: SAVE_ARGS.rule_name, confirm: true })
+
+    expect(result.content[0].text).toContain('已删除记忆')
+    expect(db.getAllNodes().filter((n) => n.is_leaf === 1)).toHaveLength(0)
+  })
+
+  it('同名命中多条时拒绝猜测，返回候选 id 要求改用 id 重试', async () => {
+    db.upsertLeaf('repo:testscope', ['一类'], '同名规则', '断言一', ['k'], { source: 'manual' })
+    db.upsertLeaf('repo:testscope', ['二类'], '同名规则', '断言二', ['k'], { source: 'manual' })
+    const tool = host.get('tlmemory_delete')
+
+    const result: any = await tool.execute({ rule_name: '同名规则', confirm: true })
+
+    expect(result.content[0].text).toContain('无法确定唯一目标')
+    expect(result.content[0].text).toContain('id=')
+    expect(db.getAllNodes('repo:testscope').filter((n) => n.name === '同名规则')).toHaveLength(2)
+  })
+
+  it('目标不存在时返回说明性文本而非抛错', async () => {
+    const tool = host.get('tlmemory_delete')
+
+    const byId: any = await tool.execute({ id: '不存在的id', confirm: true })
+    expect(byId.content[0].text).toContain('未找到')
+
+    const byName: any = await tool.execute({ rule_name: '从未记录过的规则', confirm: true })
+    expect(byName.content[0].text).toContain('未在当前范围找到')
+
+    const neither: any = await tool.execute({ confirm: true })
+    expect(neither.content[0].text).toContain('必须提供 id 或 rule_name')
+  })
+
+  it('tlmemory_query 结果附带节点 id，供删除工具精确定位', async () => {
+    await seed()
+    const query = host.get('tlmemory_query')
+
+    const result: any = await query.execute({ query: 'pnpm 依赖构建放行' })
+
+    expect(result.content[0].text).toContain('id: ')
   })
 })

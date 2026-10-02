@@ -22,7 +22,7 @@ import type { Context } from "cordis";
 import { sanitizeSegment } from "./db.js";
 import type { MemoryDB } from "./db.js";
 import { expandQueryCandidates } from "./query-expand.js";
-import type { SearchResult } from "./types.js";
+import type { MemoryNode, SearchResult } from "./types.js";
 
 /** MCP 规范文本内容块（与 dsh-llm 的 TextBlock 逐字段一致） */
 export interface ToolTextBlock {
@@ -353,7 +353,9 @@ export function registerMemoryTools(
           : results
               .map(
                 (r) =>
-                  `* [${r.tree_type === "global" ? "全局偏好" : "当前工程"}] ${r.path}${r.name}: ${r.content ?? ""} (得分: ${r.score.toFixed(1)})`,
+                  // v0.6.11：附带节点 id —— tlmemory_delete 用它精确定位目标，
+                  // 否则模型只能靠名称猜，同名条目无法区分（删除工具因此要求带 id 重试）。
+                  `* [${r.tree_type === "global" ? "全局偏好" : "当前工程"}] ${r.path}${r.name}: ${r.content ?? ""} (得分: ${r.score.toFixed(1)}, id: ${r.id})`,
               )
               .join("\n");
 
@@ -361,8 +363,151 @@ export function registerMemoryTools(
     },
   });
 
+  /**
+   * v0.6.11 受控删除工具（用户诉求：错误的记忆必须能删掉）。
+   *
+   * 删除能力此前只存在于看板（MemoryTree.vue 的删除按钮 + window.confirm），
+   * Agent 侧只有 save/query 两个工具，于是「沉淀错了就没法自己纠正」。
+   * 本工具把删除暴露给模型，但必须带上三条护栏，缺一不可：
+   *   1. confirm 必须显式为 true —— 删除不可逆，任何「默认放行」都可能被
+   *      一次措辞含糊的模型调用毁掉一条正确记忆；
+   *   2. 只允许删 is_leaf=1 的记忆叶子 —— 目录节点是骨架，db.deleteNode 会
+   *      级联清空其下整棵子树，目录修剪留给看板（那里有鼠标确认环节）；
+   *   3. 作用域守卫 —— 默认只能删「当前会话解析出的工程树」；global 全局偏好
+   *      与其它工程树必须显式 allow_cross_scope: true（模型没有鼠标确认可依赖，
+   *      只能靠调用参数把意图写清楚）。
+   */
+  const unregisterDelete = ctx.tools.register({
+    name: "tlmemory_delete",
+    description:
+      "删除一条长期记忆（不可逆）。仅支持 is_leaf=1 的记忆条目，必须显式 confirm；" +
+      "默认只能删当前工程作用域，删全局或其它工程需显式 allow_cross_scope",
+    parameters: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description:
+            "记忆节点 id（tlmemory_query 的结果已附带 id，优先用它精确定位）",
+        },
+        rule_name: {
+          type: "string",
+          description:
+            "记忆名称（未给 id 时按名称定位；同树内必须唯一，命中多条会返回候选要求改用 id）",
+        },
+        tree_scope: {
+          type: "string",
+          enum: ["global", "project"],
+          description:
+            "按名称定位时限定在哪棵树上查找，缺省为当前工程树（未命中再回退 global）",
+        },
+        confirm: {
+          type: "boolean",
+          description: "必须显式传 true —— 删除不可逆，无默认值",
+        },
+        allow_cross_scope: {
+          type: "boolean",
+          description:
+            "允许删除 global 全局树或其它工程作用域的记忆，默认 false",
+        },
+      },
+      required: ["confirm"],
+    },
+    output: toolOutput(),
+    async execute(
+      args: {
+        id?: string;
+        rule_name?: string;
+        tree_scope?: "global" | "project";
+        confirm: boolean;
+        allow_cross_scope?: boolean;
+      },
+      exec?: unknown,
+    ) {
+      // 作用域与非破坏性校验一律走「返回说明性文本」，绝不抛错：抛错会打断模型
+      // 的工具环，而拒绝删除本身是一个正常结果。
+      if (args?.confirm !== true) {
+        return toToolResult(
+          "拒绝删除：confirm 必须显式传 true（删除不可逆，请确认目标无误后重试）。",
+        );
+      }
+
+      const currentScope = resolveScope(extractExecSession(exec));
+      const wantedId = typeof args.id === "string" ? args.id.trim() : "";
+      const wantedName =
+        typeof args.rule_name === "string" ? sanitizeSegment(args.rule_name) : "";
+
+      let node: MemoryNode | null = null;
+      if (wantedId) {
+        node = db.getNode(wantedId);
+        if (!node) {
+          return toToolResult(
+            `未找到 id=${wantedId} 的记忆节点（可能已被删除）。可用 tlmemory_query 重新检索。`,
+          );
+        }
+      } else if (wantedName) {
+        const trees =
+          args.tree_scope === "global"
+            ? ["global"]
+            : args.tree_scope === "project"
+              ? [currentScope]
+              : [currentScope, "global"];
+        const matches: MemoryNode[] = [];
+        for (const tree of trees) {
+          for (const candidate of db.getAllNodes(tree)) {
+            if (candidate.is_leaf === 1 && candidate.name === wantedName) matches.push(candidate);
+          }
+        }
+        if (matches.length === 0) {
+          return toToolResult(
+            `未在当前范围找到名为「${wantedName}」的记忆叶子。可先用 tlmemory_query 检索，再带 id 精确删除。`,
+          );
+        }
+        if (matches.length > 1) {
+          const list = matches
+            .map((m) => `- id=${m.id} [${m.tree_type}] ${m.path}${m.name}`)
+            .join("\n");
+          return toToolResult(
+            `名称「${wantedName}」命中 ${matches.length} 条记忆，无法确定唯一目标。请改用 id 精确删除：\n${list}`,
+          );
+        }
+        node = matches[0]!;
+      } else {
+        return toToolResult("拒绝删除：必须提供 id 或 rule_name 之一以指定目标。");
+      }
+
+      if (node.is_leaf !== 1) {
+        return toToolResult(
+          `拒绝删除：${node.path}${node.name} 是分类目录（is_leaf=0），删除会级联清空其下所有记忆。目录修剪请在记忆看板上操作。`,
+        );
+      }
+
+      if (!args.allow_cross_scope) {
+        if (node.tree_type === "global") {
+          return toToolResult(
+            "拒绝删除：该记忆属于 global 全局树（跨工程偏好）。确需删除请显式传 allow_cross_scope: true。",
+          );
+        }
+        if (node.tree_type !== currentScope) {
+          return toToolResult(
+            `拒绝删除：该记忆属于 ${node.tree_type}，不属于当前会话作用域 ${currentScope}。确需删除请显式传 allow_cross_scope: true。`,
+          );
+        }
+      }
+
+      const target = `${node.path}${node.name}`;
+      const deleted = db.deleteNode(node.id);
+      return toToolResult(
+        deleted
+          ? `已删除记忆 [${node.tree_type}] ${target}`
+          : `删除失败：节点 id=${node.id} 未能从库中移除（可能已被并发删除）。`,
+      );
+    },
+  });
+
   return () => {
     unregisterSave();
     unregisterQuery();
+    unregisterDelete();
   };
 }

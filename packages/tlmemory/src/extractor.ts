@@ -70,7 +70,10 @@ const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。�
     }
   ]
 }
-若本轮交互无长期价值，请直接输出 {"reflections": []}。`
+若本轮交互无长期价值，请直接输出 {"reflections": []}。
+
+【输出格式硬约束】只允许输出上述 JSON 本体：禁止输出任何分析、思考、解释、寒暄或前后缀文字，
+禁止 Markdown 代码块围栏（不要套 json 代码块、不要写语言标注），第一个字符必须是 {，最后一个字符必须是 }。`
 
 // P2-12：路径分段 / 规则简名净化统一复用 db.ts 导出的 sanitizeSegment
 //（白名单：字母、数字、下划线、中文与连字符），不再本地维护正则副本。
@@ -133,26 +136,194 @@ export function passesFilterGate(text: string): boolean {
   return !injectionPatterns.some((pattern) => pattern.test(text.trim()))
 }
 
-/** 剥离 Markdown 代码块围栏并收敛至首个 JSON 对象边界 */
-export function sanitizeJsonString(raw: string): string {
-  let sanitized = raw.trim()
-  if (sanitized.startsWith('```json')) {
-    sanitized = sanitized.slice(7)
-  } else if (sanitized.startsWith('```')) {
-    sanitized = sanitized.slice(3)
+/** 剥离 Markdown 代码块围栏（含 ```json 语言标注），返回围栏内文本 */
+function stripCodeFence(raw: string): string {
+  let text = raw.trim()
+  if (text.startsWith('```')) {
+    const newline = text.indexOf('\n')
+    text = newline === -1 ? text.slice(3) : text.slice(newline + 1)
   }
-  if (sanitized.endsWith('```')) {
-    sanitized = sanitized.slice(0, -3)
-  }
-  sanitized = sanitized.trim()
+  if (text.endsWith('```')) text = text.slice(0, -3)
+  return text.trim()
+}
 
-  // 兜底收敛：仅保留首个 '{' 至末尾 '}' 之间的片段
-  const start = sanitized.indexOf('{')
-  const end = sanitized.lastIndexOf('}')
-  if (start !== -1 && end !== -1 && end > start) {
-    sanitized = sanitized.slice(start, end + 1)
+/**
+ * 字符串感知的平衡扫描：从 start 起按嵌套深度找与起始字符配对的收尾。
+ * 引号内（含转义）的括号不参与计数 —— 这正是旧实现「首个 `{` 到最后一个 `}`」
+ * 切片在「散文在前」「输出被截断」两类真实失败上必崩的原因。
+ */
+function scanBalanced(text: string, start: number): { complete: boolean; end: number } {
+  const closers: string[] = []
+  let inString = false
+  let escaped = false
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '{') closers.push('}')
+    else if (ch === '[') closers.push(']')
+    else if (ch === '}' || ch === ']') {
+      if (closers.length === 0) return { complete: false, end: i }
+      if (closers[closers.length - 1] !== ch) return { complete: false, end: i }
+      closers.pop()
+      if (closers.length === 0) return { complete: true, end: i }
+    }
   }
-  return sanitized.trim()
+  return { complete: false, end: text.length - 1 }
+}
+
+/**
+ * 截断抢救：把扫描到末尾仍未闭合的片段回退到**最后一个完整元素边界**
+ * （深度 ≥1 处出现的 `}` / `]`），补齐父结构闭合括号，尽可能保住已生成的前若干条。
+ * 无可回退边界返回 null。
+ */
+function salvageTruncated(fragment: string): string | null {
+  const stack: string[] = []
+  let inString = false
+  let escaped = false
+  let lastBoundary = -1
+  let lastClosers: string[] = []
+  for (let i = 0; i < fragment.length; i++) {
+    const ch = fragment[i]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '{') stack.push('}')
+    else if (ch === '[') stack.push(']')
+    else if (ch === '}' || ch === ']') {
+      if (stack.length === 0) break
+      stack.pop()
+      // 栈里仍有父结构 ⇒ 这是一个「完整元素」的收尾，可作为回退点；否则整个片段已闭合
+      if (stack.length === 0) break
+      lastBoundary = i
+      lastClosers = [...stack]
+    }
+  }
+  if (lastBoundary === -1) return null
+  const body = fragment.slice(0, lastBoundary + 1).replace(/[,\s]+$/, '')
+  return body + lastClosers.reverse().join('')
+}
+
+/**
+ * 从模型原始输出中抽取 JSON 载荷（v0.6.11 提炼容错）。
+ *
+ * 旧实现只做「剥首尾围栏 + 首个 `{` 到最后一个 `}` 切片」，在两类真实失败上必崩：
+ *   1. 模型先输出推理散文（其中没有 `{`，或散文里的括号与 JSON 不配对）；
+ *   2. 输出被 maxTokens 截断，切片跨过未闭合的元素。
+ * 这里改用字符串感知的平衡扫描定位真正的收尾，截断时回退到最后一个完整元素并补齐闭合。
+ * 无 JSON 结构时原样返回 trim 结果，交由调用方兜底（本函数绝不抛错）。
+ */
+export function extractJsonPayload(raw: string): string {
+  const text = stripCodeFence(String(raw ?? ''))
+  if (!text) return ''
+  // 候选起点按先后排列：散文里常出现方括号（如 "[step 1]"）而真载荷是对象，
+  // 因此先扫全部候选，优先返回能完整闭合的**对象**候选，其次才是数组/抢救结果。
+  const starts = [text.indexOf('{'), text.indexOf('[')].filter((index) => index !== -1).sort((a, b) => a - b)
+  if (starts.length === 0) return text
+
+  let fallback: string | null = null
+  for (const start of starts) {
+    const scan = scanBalanced(text, start)
+    if (!scan.complete) {
+      const salvaged = salvageTruncated(text.slice(start))
+      if (salvaged && !fallback) fallback = salvaged
+      continue
+    }
+    const slice = text.slice(start, scan.end + 1).trim()
+    if (slice.startsWith('{')) return slice
+    if (!fallback) fallback = slice
+  }
+  return fallback ?? text
+}
+
+/** 归一化模型可能返回的多种形态：裸数组 / 单条对象 / 标准信封 */
+function normalizeReflectionResponse(value: unknown): ReflectionResponse | null {
+  if (Array.isArray(value)) return { reflections: value as RawReflectionItem[] }
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  if (Array.isArray(record.reflections)) return { reflections: record.reflections as RawReflectionItem[] }
+  // 单条形态：模型只吐出一个 reflection 对象而没有外层信封
+  if (typeof record.name === 'string' && typeof record.content === 'string') {
+    return { reflections: [record as unknown as RawReflectionItem] }
+  }
+  return null
+}
+
+function tryParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 逐个对象抢救：散文夹 JSON、或多个对象拼接、或首尾都不完整时，扫出所有**完整**的
+ * 顶层对象，保留同时具备 name/content 的条目（对象内信封形态的 reflections 也接受）。
+ */
+function collectReflectionObjects(text: string): RawReflectionItem[] {
+  const collected: RawReflectionItem[] = []
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue
+    const scan = scanBalanced(text, i)
+    if (!scan.complete) continue
+    const normalized = normalizeReflectionResponse(tryParseJson(text.slice(i, scan.end + 1)))
+    // 非记忆对象（例如外层包装 {result:[...]}）：不消费，继续向内层扫描
+    if (!normalized) continue
+    for (const item of normalized.reflections) {
+      if (item && typeof item.name === 'string' && typeof item.content === 'string') collected.push(item)
+    }
+    i = scan.end
+  }
+  return collected.slice(0, MAX_REFLECTIONS_PER_TURN)
+}
+
+/**
+ * 反思提炼返回值的解析阶梯（v0.6.11）：平衡抽取 → 形态归一 → 逐对象抢救。
+ *
+ * 输入是模型的**原始输出**（不是先切好的片段），因为「散文里用文字隔开多个 JSON 对象」
+ * 这类形态必须回到全文才能捞全。全部手段都用尽仍无结果时返回 null，由调用方静默降级。
+ */
+export function parseReflectionResponse(raw: string): ReflectionResponse | null {
+  const text = String(raw ?? '')
+  const payload = extractJsonPayload(text)
+  const parsed = tryParseJson(payload)
+  const normalized = normalizeReflectionResponse(parsed)
+
+  // 明确信封（{reflections:[...]}）或裸数组：语义无歧义，直接采用
+  const explicitEnvelope =
+    Array.isArray(parsed) ||
+    (typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as Record<string, unknown>).reflections))
+  if (normalized && explicitEnvelope) return normalized
+
+  // 其余形态（单条对象 / 散文夹多个对象 / 截断残片）：回全文逐对象抢救，能捞多少捞多少
+  const objects = collectReflectionObjects(text)
+  if (objects.length > 0) return { reflections: objects }
+  if (normalized) return normalized
+
+  const salvaged = salvageTruncated(payload)
+  if (salvaged) return normalizeReflectionResponse(tryParseJson(salvaged))
+  return null
+}
+
+/** @deprecated v0.6.11 起由 extractJsonPayload 取代（保留导出以兼容既有调用点与测试） */
+export function sanitizeJsonString(raw: string): string {
+  return extractJsonPayload(raw)
 }
 
 /** 物理级原子化截断：单条断言不允许超过 80 字 */
@@ -221,7 +392,9 @@ export class MemoryExtractor {
               },
             ],
             system: REFLECTION_SYSTEM_PROMPT,
-            maxTokens: 2048,
+            // v0.6.11：2048 太小 —— 模型先写一段推理散文就会把预算烧光，
+            // 真正的 JSON 被截断（日志里大量「Expected ',' or ']' ... at position 1744」）。
+            maxTokens: 4096,
             ...(options.sessionId ? { sessionId: options.sessionId } : {}),
             purpose: 'tlmemory-reflection',
             ...(options.signal ? { signal: options.signal } : {}),
@@ -242,12 +415,19 @@ export class MemoryExtractor {
       }
       traceExtract(`llm: stream 完成 rawOutput=${rawOutput.length}ch`)
 
-      const cleanJson = sanitizeJsonString(rawOutput)
-      const parsed: ReflectionResponse = JSON.parse(cleanJson)
+      // v0.6.11：旧实现只做一次 sanitizeJsonString + JSON.parse，模型先出散文或被
+      // maxTokens 截断时必崩（09-30 以来 9 次真实调度中 5 次零产出，全部卡在这里）。
+      const parsed = parseReflectionResponse(rawOutput)
 
-      if (!parsed.reflections || !Array.isArray(parsed.reflections)) {
-        traceExtract(`result: 非法结构（reflections 非数组），raw=${rawOutput.slice(0, 200)}`)
-        this.ctx.logger?.info?.('[tlmemory] 本轮提炼结果为空，无新记忆沉淀')
+      if (!parsed) {
+        const head = rawOutput.replace(/\s+/g, ' ').slice(0, 200)
+        traceExtract(
+          `parse-fail: payload=${extractJsonPayload(rawOutput).length}ch raw=${rawOutput.length}ch head=${head}`,
+        )
+        // 失败不再只写文件日志：宿主 logger 同步 warn，否则用户侧完全不可见
+        this.ctx.logger?.warn?.(
+          '[tlmemory] 本轮反思提炼输出无法解析为 JSON，已跳过沉淀（详见 tlmemory-extract.log）',
+        )
         return
       }
       traceExtract(`result: ${parsed.reflections.length} 条 reflection`)
