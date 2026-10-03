@@ -21,7 +21,7 @@ interface Harness {
 }
 
 /** 装一个只认 `ctx.on` 的假 ctx，把两个 waterfall 钩子记下来手工驱动。 */
-function makeHarness(options: { now?: () => number } = {}): Harness {
+function makeHarness(options: { now?: () => number; host?: () => Promise<unknown> } = {}): Harness {
   const pending: RawEvent[] = []
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const bridge = new InteractionBridge({
@@ -37,12 +37,13 @@ function makeHarness(options: { now?: () => number } = {}): Harness {
     },
   })
 
-  // `next` 永不 resolve：宿主自己的 UI 一直不回答，只能靠 IM 这边结算。
+  // `next` 默认永不 resolve：宿主自己的 UI 一直不回答，只能靠 IM 这边结算。
   const never = () => new Promise<never>(() => {})
+  const host = options.host ?? never
   const call = (name: string, request: unknown): Promise<unknown> => {
     const listener = listeners.get(name)
     if (!listener) throw new Error(`桥没有订阅 ${name}`)
-    return Promise.resolve(listener(request, never))
+    return Promise.resolve(listener(request, host))
   }
 
   return {
@@ -391,6 +392,130 @@ describe('hasLivePending：桥是不是已经在等这个会话', () => {
 
     expect(h.bridge.settleText('sess-1', '方案甲')?.ok).toBe(true)
     expect(h.bridge.hasLivePending('sess-1', 'question')).toBe(false)
+    h.bridge.dispose()
+  })
+})
+
+/** 等赛跑 + finally 都跑完。 */
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+/**
+ * 网页上那张卡片为什么必须靠这个 signal 才会消失：宿主的提问 / 授权是当「转发 Remote event」
+ * 送到浏览器的，宿主侧 `request.signal` 会被单独抽出来当那条 pending event 的取消信号
+ * （`dsh-api-gateway` 的 `projectRemoteEventRequest`），只有它 abort 时浏览器才会收到
+ * `cancel` 帧、把卡片释放掉（`dsh-client-ui-user-questions` 的 `reconcile()` 要求
+ * `hasWaterfall()` 为假；`dsh-client-ui-approval` 的 `PendingApproval` 只认这个 abort）。
+ *
+ * 而它就是工具调用自己的 signal——**别人抢答之后永远不会 abort**。于是 QQ 里回一句话把提问
+ * 答掉了，网页上的卡片却留在原地，连会话结束都不消失（用户报的「请求回答之后，dsh 界面的
+ * 提问框依然在」）。
+ *
+ * 所以桥在 `proceed()` 之前把 signal 换成自己可控制的复合信号，这次交互一结束就 abort 它。
+ */
+describe('接管宿主的取消信号：交互结束后卡片才会消失', () => {
+  it('QQ 文本结算之后交给宿主的 signal 会 abort，宿主自己的信号不动', async () => {
+    const h = makeHarness()
+    const host = new AbortController()
+    const request = questionRequest({ callId: 'call-1' }) as { signal?: AbortSignal }
+    request.signal = host.signal
+
+    void h.ask(request)
+    await flush()
+    // 换成了复合信号：网关那边会校验 instanceof AbortSignal，所以必须是真信号。
+    expect(request.signal).toBeInstanceOf(AbortSignal)
+    expect(request.signal).not.toBe(host.signal)
+    expect(request.signal?.aborted).toBe(false)
+
+    expect(h.bridge.settleText('sess-1', '方案甲')?.ok).toBe(true)
+    await flush()
+    expect(request.signal?.aborted).toBe(true)
+    // 不能把宿主自己的信号也 abort 掉：下游还有别人在用它。
+    expect(host.signal.aborted).toBe(false)
+    h.bridge.dispose()
+  })
+
+  it('宿主没给 signal 时也要补一个，否则网关根本拿不到取消信号', async () => {
+    const h = makeHarness()
+    const request = questionRequest({ callId: 'call-1' }) as { signal?: AbortSignal }
+    expect(request.signal).toBeUndefined()
+
+    void h.ask(request)
+    await flush()
+    expect(request.signal).toBeInstanceOf(AbortSignal)
+
+    expect(h.bridge.settleText('sess-1', '方案乙')?.ok).toBe(true)
+    await flush()
+    expect(request.signal?.aborted).toBe(true)
+    h.bridge.dispose()
+  })
+
+  it('宿主自己取消时，复合信号跟着 abort 并带上同一个 reason', async () => {
+    const h = makeHarness()
+    const host = new AbortController()
+    const request = questionRequest({ callId: 'call-1' }) as { signal?: AbortSignal }
+    request.signal = host.signal
+    void h.ask(request)
+    await flush()
+
+    const reason = new Error('宿主取消了这次提问')
+    host.abort(reason)
+    expect(request.signal?.aborted).toBe(true)
+    expect(request.signal?.reason).toBe(reason)
+    h.bridge.dispose()
+  })
+
+  it('进来时宿主信号已经 abort 的话，补上的信号也立刻是 abort 的', async () => {
+    const h = makeHarness()
+    const host = new AbortController()
+    host.abort(new Error('早就取消了'))
+    const request = questionRequest({ callId: 'call-1' }) as { signal?: AbortSignal }
+    request.signal = host.signal
+
+    void h.ask(request)
+    await flush()
+    expect(request.signal?.aborted).toBe(true)
+    h.bridge.dispose()
+  })
+
+  it('网页先答也要收掉，不然卡片永远挂着', async () => {
+    const h = makeHarness({ host: () => Promise.resolve({ answers: [{ id: 'q1', selected: ['方案甲'] }] }) })
+    const host = new AbortController()
+    const request = questionRequest({ callId: 'call-1' }) as { signal?: AbortSignal }
+    request.signal = host.signal
+
+    await h.ask(request)
+    await flush()
+    expect(request.signal?.aborted).toBe(true)
+    h.bridge.dispose()
+  })
+
+  it('审批路径同样接管', async () => {
+    const h = makeHarness()
+    const host = new AbortController()
+    const request = approvalRequest({ callId: 'appr-1' }) as { signal?: AbortSignal }
+    request.signal = host.signal
+
+    void h.approve(request)
+    await flush()
+    expect(request.signal?.aborted).toBe(false)
+
+    expect(h.bridge.settleText('sess-1', '允许')?.ok).toBe(true)
+    await flush()
+    expect(request.signal?.aborted).toBe(true)
+    expect(host.signal.aborted).toBe(false)
+    h.bridge.dispose()
+  })
+
+  it('请求对象被冻住时退化成老行为，不抛异常', async () => {
+    const h = makeHarness()
+    const request = Object.freeze(questionRequest({ callId: 'call-1' })) as { signal?: AbortSignal }
+
+    void h.ask(request)
+    await flush()
+    expect(request.signal).toBeUndefined()
+
+    expect(h.bridge.settleText('sess-1', '方案甲')?.ok).toBe(true)
+    await flush()
     h.bridge.dispose()
   })
 })

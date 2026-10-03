@@ -198,6 +198,43 @@ export interface InteractionBridgeOptions {
 const DEFAULT_TTL_MS = 30 * 60 * 1000
 
 /**
+ * 把这次交互的取消信号接过来，返回一个「这次交互结束了」的释放函数。
+ *
+ * 宿主的提问 / 授权是当「转发 Remote event」送到浏览器的（`dsh-api-gateway`）：宿主侧
+ * `request.signal` 会被单独抽出来当那条 pending event 的取消信号（不进 JSON 载荷），
+ * 浏览器拿到的是重新挂上的 delivery signal。只有宿主 `cancelRemoteEvent`（也就是这个
+ * signal abort）时，浏览器才会收到 `cancel` 帧、把那张卡片释放掉。
+ *
+ * 麻烦在于这个 signal 就是工具调用自己的 signal：**别人抢答之后它永远不会 abort**。
+ * 于是 QQ 里回一句话把提问结算了，网页上那张卡片却留在原地——连会话结束都不消失
+ * （`dsh-client-ui-user-questions` 的 `reconcile()` 要求 `hasWaterfall()` 为假，
+ * `dsh-client-ui-approval` 的 `PendingApproval` 也只认这个 signal 的 abort）。
+ *
+ * 所以我们在 `proceed()` **之前**把 `request.signal` 换成「原信号 + 我们自己那条」的复合
+ * 信号：cordis 的 `next()` 传的是同一个对象引用，下游读到的就是它，网关那边还会校验
+ * `instanceof AbortSignal`（复合出来的正好是）。等这次交互真结束了再 abort 自己那条，
+ * 宿主就会给浏览器发 cancel 帧，卡片跟着消失。
+ *
+ * @param request - 宿主给的请求对象；`signal` 会被就地替换。
+ * @returns 交互结束时调用。只 abort 我们自己那条，原信号不受影响；对象被冻住时退化成空操作。
+ */
+function holdRemoteEvent(request: { signal?: AbortSignal }): () => void {
+  const lifetime = new AbortController()
+  const original = request.signal
+  if (original !== undefined) {
+    if (original.aborted) lifetime.abort(original.reason)
+    else original.addEventListener('abort', () => lifetime.abort(original.reason), { once: true })
+  }
+  try {
+    request.signal = lifetime.signal
+  } catch {
+    // 请求对象被冻住（或 signal 只读）：退回老行为——卡片只能靠网页自己点掉。
+    return () => {}
+  }
+  return () => lifetime.abort(new Error('tlnotify：这次交互已经在别处结算了'))
+}
+
+/**
  * 把宿主的两个 waterfall 钩子接到 IM 上。
  *
  * `install(ctx)` 需要传 cordis 的 `Context`——这里按 any 收，因为插件的
@@ -354,7 +391,9 @@ export class InteractionBridge {
     const req = request as ApprovalRequestLike
     const proceed = next as () => Promise<ApprovalOutcomeLike>
 
-    // 先让宿主自己的 UI 接手，再和我们的答案赛跑。
+    // 先让宿主自己的 UI 接手，再和我们的答案赛跑。接管取消信号必须赶在 proceed() 之前
+    // ——`next()` 传的是同一个对象引用，改晚了网关就看不见了，见 holdRemoteEvent。
+    const release = holdRemoteEvent(req)
     const hostPromise = typeof proceed === 'function' ? proceed() : Promise.resolve<ApprovalOutcomeLike>('unavailable')
     const sessionId = req.agent?.session?.id
     if (!sessionId) return hostPromise
@@ -391,6 +430,8 @@ export class InteractionBridge {
       // 宿主先答的话，表项要清掉，免得按钮一直显示成可点。
       const still = this.#pending.get(requestId)
       if (still) this.#finish(requestId, still)
+      // 这次交互结束了（不管是谁答的），让宿主给浏览器发 cancel 帧，把那张卡片收掉。
+      release()
     }
   }
 
@@ -410,6 +451,8 @@ export class InteractionBridge {
   async #handleQuestion(request: unknown, next: unknown): Promise<unknown> {
     const req = request as AskUserQuestionRequestLike
     const proceed = next as () => Promise<AskUserQuestionAnswerLike>
+    // 接管取消信号必须赶在 proceed() 之前，见 holdRemoteEvent。
+    const release = holdRemoteEvent(req)
     const hostPromise = typeof proceed === 'function' ? proceed() : Promise.resolve({ answers: [] })
 
     const sessionId = req.agent?.session?.id
@@ -467,6 +510,8 @@ export class InteractionBridge {
     } finally {
       const still = this.#pending.get(requestId)
       if (still) this.#finish(requestId, still)
+      // 这次交互结束了（不管是谁答的），让宿主给浏览器发 cancel 帧，把那张卡片收掉。
+      release()
     }
   }
 
