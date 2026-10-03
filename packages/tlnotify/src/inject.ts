@@ -173,6 +173,8 @@ interface PendingApproval extends PendingBase {
 interface PendingQuestion extends PendingBase {
   kind: 'question' | 'plan'
   questionId: string
+  /** 认「这是同一个问题」用的键（会话 + 题目 id），用于压掉重复通知。 */
+  questionKey?: string
   /** 批准选项的 label（plan-review 才有）。 */
   approveLabel?: string
   /** 所有候选 label，用于校验按钮回传的 choice。 */
@@ -204,6 +206,8 @@ const DEFAULT_TTL_MS = 30 * 60 * 1000
  */
 export class InteractionBridge {
   readonly #pending = new Map<string, Pending>()
+  /** 「会话 + 题目 id」→ 正在等作答的 requestId，用来认出被重复投递的同一个问题。 */
+  readonly #liveQuestions = new Map<string, string>()
   readonly #options: InteractionBridgeOptions
   readonly #ttlMs: number
   readonly #now: () => number
@@ -218,6 +222,23 @@ export class InteractionBridge {
 
   get pendingCount(): number {
     return this.#pending.size
+  }
+
+  /**
+   * 这个会话现在有没有正在等作答的请求。
+   *
+   * 给日志兜底路径（`index.ts` 的 `#maybePending`）用。那条路原本只靠 requestId 判断
+   * 「waterfall 是不是已经认领了同一个提问」，但 waterfall 在宿主没给 callId 时会自己
+   * 合成一个 id（`question-<n>-<时间戳>`），两边永远对不上，于是同一个提问被两条路各发了
+   * 一条通知。按「会话 + 类型」问一句就不依赖 id 了。
+   */
+  hasLivePending(sessionId: string, kind: 'approval' | 'question' | 'plan'): boolean {
+    for (const pending of this.#pending.values()) {
+      if (pending.sessionId !== sessionId) continue
+      if (pending.kind !== kind) continue
+      return true
+    }
+    return false
   }
 
   install(ctx: { on: (name: string, listener: (...args: unknown[]) => unknown) => (() => void) | undefined }): void {
@@ -318,6 +339,13 @@ export class InteractionBridge {
   #finish(requestId: string, pending: Pending): void {
     clearTimeout(pending.expireTimer)
     this.#pending.delete(requestId)
+    if (pending.kind !== 'approval' && pending.questionKey) {
+      // 只清理自己登记的那条：同一个问题可能有两个 pending 共用一个 key，先结算的
+      // 那个不该把后来者的登记抹掉。
+      if (this.#liveQuestions.get(pending.questionKey) === requestId) {
+        this.#liveQuestions.delete(pending.questionKey)
+      }
+    }
   }
 
   // ── approval/request ────────────────────────────────────────────────────
@@ -392,9 +420,19 @@ export class InteractionBridge {
     const isPlan = first.intent?.kind === 'plan-review'
     const labels = (first.options ?? []).map((option) => option.label)
 
+    // 宿主的同一个问题会从两条路各投一次（`tool/call` 那条带 callId，waterfall 那条
+    // 不带），于是算出两个 requestId、注册两个 pending，用户就收到两条一模一样的
+    // 「等待我回答」（现场：08:54:58.419 与 .430 相隔 11 毫秒）。他回的那句话只会
+    // 结算其中一条，另一条看上去就像「没生效」。所以按「会话 + 题目 id」认重：
+    // pending 照旧注册（哪条路上来的解答都要能结算），只是第二条通知不再发。
+    const questionKey = `${sessionId}|${first.id}`
+    const duplicated = this.#liveQuestions.has(questionKey)
+    this.#liveQuestions.set(questionKey, requestId)
+
     const imPromise = new Promise<AskUserQuestionAnswerLike>((resolve) => {
       const expireTimer = setTimeout(() => {
         this.#pending.delete(requestId)
+        if (this.#liveQuestions.get(questionKey) === requestId) this.#liveQuestions.delete(questionKey)
       }, this.#ttlMs)
       expireTimer.unref?.()
       const pending: PendingQuestion = {
@@ -404,6 +442,7 @@ export class InteractionBridge {
         createdAt: this.#now(),
         expireTimer,
         questionId: first.id,
+        questionKey,
         labels,
         resolve,
       }
@@ -412,11 +451,15 @@ export class InteractionBridge {
       this.#pending.set(requestId, pending)
     })
 
-    const event = this.#questionEvent(req, first, sessionId, requestId, isPlan)
-    try {
-      await this.#options.onPending(event)
-    } catch (error) {
-      this.#options.log?.('投递提问通知失败', error)
+    if (duplicated) {
+      this.#options.log?.(`同一个问题又被投递了一次（${questionKey}），不再发第二条等待通知`)
+    } else {
+      const event = this.#questionEvent(req, first, sessionId, requestId, isPlan)
+      try {
+        await this.#options.onPending(event)
+      } catch (error) {
+        this.#options.log?.('投递提问通知失败', error)
+      }
     }
 
     try {

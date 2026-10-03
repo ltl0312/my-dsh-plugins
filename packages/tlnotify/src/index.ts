@@ -1304,12 +1304,22 @@ class Tlnotify {
       this.#log.info(`这条等待通知已经发过了（req ${requestId}），跳过重复投递`)
       return
     }
+    // 上面两条按 requestId 判断，而 waterfall 在宿主没给 callId 时会自己合成一个 id
+    // （`question-<n>-<时间戳>`），两边永远对不上，于是同一个提问被两条路各发一条通知
+    // （现场 08:54:58.419/.430 与 15:05:20.142/.286）。这里按「会话 + 类型」再问一句桥：
+    // 桥已经在等这个提问了，兜底就不该再发。判据是活着的 pending，不是时间窗，所以
+    // 同一会话连着问两个问题不会被误吞。
+    if ((raw.kind === 'question' || raw.kind === 'plan') && this.#bridge.hasLivePending(raw.sessionId, raw.kind)) {
+      this.#log.info(`这条等待通知已经由 waterfall 发过了（${raw.sessionId} · ${raw.kind}），跳过日志兜底`)
+      return
+    }
     if (!this.#canPush()) return
     if (!this.#dedupe.accept(raw.sessionId, raw.seq)) {
       this.#noteSkippedIntervention(raw, `被判成重复事件（seq ${raw.seq}）`)
       return
     }
     if (requestId) this.#markDelivered(requestId)
+    this.#log.info(`等待通知来自日志兜底（req ${requestId ?? '宿主没给 id'}）`)
     void this.#deliver(raw)
   }
 
@@ -1331,6 +1341,7 @@ class Tlnotify {
     // 用户可能抢在 waterfall 之前就答了（见 WaitingIntervention）。命中就替他答，
     // 不再发第二条通知——那条通知正是他「回两次才生效」的原因。
     if (await this.#consumeHeldAnswer(event)) return
+    this.#log.info(`等待通知来自 waterfall（req ${requestId ?? '合成 id'}）`)
     return this.#deliver(event)
   }
 
@@ -1628,15 +1639,25 @@ class Tlnotify {
 
   async #onInbound(channelId: string, reply: InboundReply): Promise<void> {
     try {
+      const text = (reply.text ?? '').trim()
+      // 入站第一现场：把身份与长度先记下来。这里以前只有静默 return，导致「用户说发了、
+      // 插件说没收到」时无法判断停在哪一步（qq-2 的 08:55 就是这种现场）。
+      this.#log.info(
+        `入站（${channelId}）：id=${reply.messageId || '(无)'} ` +
+          `sender=${reply.senderId || '(无)'} 文本=${text.length} 字` +
+          `${reply.quotedMessageId ? '（引用了一条消息）' : ''}`,
+      )
       if (reply.messageId) {
         if (this.#seenInbound.has(reply.messageId)) {
-          this.#log.debug(`忽略平台重投的入站消息 ${reply.messageId}`)
+          this.#log.info(`忽略平台重投的入站消息 ${reply.messageId}（这条已经处理过）`)
           return
         }
         this.#rememberInbound(reply.messageId)
       }
-      const text = (reply.text ?? '').trim()
-      if (text.length === 0) return
+      if (text.length === 0) {
+        this.#log.warn(`入站消息 ${reply.messageId || '(无 id)'} 没有正文（图片 / 语音 / 空消息），已忽略`)
+        return
+      }
 
       // 扫码绑定期间的第一句话既不是命令也不是回复，是「我是谁」的证明。
       if (this.#observeBind(channelId, reply)) {
@@ -1719,7 +1740,9 @@ class Tlnotify {
         await this.#echo(channelId, settlement.reason ?? '这条回复没能对上等待中的请求')
         return true
       }
-      this.#log.info(`文本作答结算了等待中的请求（${this.#label(sessionId)}）：${settlement.echo ?? ''}`)
+      this.#log.info(
+        `文本作答结算了等待中的请求（${channelId} → ${this.#label(sessionId)}）：${settlement.echo ?? ''}`,
+      )
       this.#clearWaiting(sessionId)
       await this.#echo(channelId, settlement.echo ?? '已处理')
       return true

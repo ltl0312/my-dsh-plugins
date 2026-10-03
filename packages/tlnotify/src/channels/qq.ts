@@ -170,6 +170,15 @@ export class QqChannel implements Channel {
     bot.on('interaction', (...args: unknown[]) => {
       void this.#onInteraction(args[args.length - 1] as InteractionEventLike, context)
     })
+    // SDK 把「自己没专门处理」的平台事件从这个口子透传出来。平时它没什么用，但排查
+    // 「用户到底有没有发东西过来」时它是唯一的旁证：事件类型能看见，就说明长连接活着
+    // 且平台在推。
+    bot.on('rawEvent', (...args: unknown[]) => {
+      const raw = args[args.length - 1] as { eventType?: string; data?: unknown } | undefined
+      this.#log.info(
+        `QQ 通道「${this.id}」收到平台事件：${raw?.eventType ?? '(未知类型)'} ${clip(stringify(raw?.data), 300)}`,
+      )
+    })
 
     this.#started = true
     // start() 的 Promise 要等到 stop/abort 才 resolve，不能 await——否则 apply 就挂住了。
@@ -258,19 +267,38 @@ export class QqChannel implements Channel {
 
   async #onMessage(msg: InboundMessageLike, context: ChannelStartContext): Promise<void> {
     try {
-      if (!msg) return
+      if (!msg) {
+        this.#log.warn(`QQ 通道「${this.id}」收到空的入站载荷（SDK 没给出消息体）`)
+        return
+      }
       // 群消息只有被 @ 时才算「在跟机器人说话」，普通群消息一律忽略。
-      if (msg.kind === 'group' && msg.rawEventType !== 'GROUP_AT_MESSAGE_CREATE') return
+      if (msg.kind === 'group' && msg.rawEventType !== 'GROUP_AT_MESSAGE_CREATE') {
+        this.#log.info(`QQ 通道「${this.id}」忽略未被 @ 的群消息（type=${msg.rawEventType}）`)
+        return
+      }
       if (!this.#isAllowedSender(msg)) {
         this.#log.warn(`QQ 通道「${this.id}」忽略了非授权来源的消息（sender=${msg.senderId}）`)
         return
+      }
+
+      // 入站取证：到达通道的每一条消息都要留痕。以前这里只有静默 return，一旦出现
+      // 「用户说发了、插件说没收到」，就只能靠有没有回执倒推，代价太大。
+      const text = inboundText(msg)
+      this.#log.info(
+        `QQ 通道「${this.id}」收到入站：type=${msg.rawEventType} kind=${msg.kind} ` +
+          `id=${msg.messageId || '(无)'} 文本=${text.trim().length} 字`,
+      )
+      if (text.trim().length === 0) {
+        // 正文为空的消息会被上层静默丢掉，等于「用户发了但什么都没发生」。把原始载荷
+        // 记下来，才能分辨是平台压根没给正文，还是正文藏在别的字段里。
+        this.#log.warn(`QQ 通道「${this.id}」这条入站没有正文，原始载荷：${clip(stringify(msg), 600)}`)
       }
 
       this.#lastInbound = { msgId: msg.messageId, target: msg.replyTarget, time: Date.now() }
 
       const quoted = this.#resolveQuoted(msg)
       const reply: InboundReply = {
-        text: msg.content ?? '',
+        text,
         messageId: msg.messageId,
         senderId: msg.senderId,
       }
@@ -369,7 +397,10 @@ export class QqChannel implements Channel {
       info: (...args: unknown[]) => log.info(`[qq-sdk] ${args.map(stringify).join(' ')}`),
       warn: (...args: unknown[]) => log.warn(`[qq-sdk] ${args.map(stringify).join(' ')}`),
       error: (...args: unknown[]) => log.error(`[qq-sdk] ${args.map(stringify).join(' ')}`),
-      debug: () => {},
+      // SDK 的 debug 里带着「收到了什么帧、丢弃了什么」这类关键旁证。以前直接丢掉，
+      // 排查「平台到底有没有推东西」时就只剩猜测。它只在 logLevel=debug 时才会落盘，
+      // 平时是 no-op，所以正常跑不受影响。
+      debug: (...args: unknown[]) => log.debug?.(`[qq-sdk] ${args.map(stringify).join(' ')}`),
     }
   }
 }
@@ -381,6 +412,26 @@ function safeJson(text: string): unknown {
   } catch {
     return undefined
   }
+}
+
+/**
+ * 取出入站消息的正文。
+ *
+ * 平台的 `content` 并不总是有值：图片 / 文件这类消息本来就没有正文，而部分客户端上的
+ * 「引用回复」会把被引用的原文放进 `msg_elements[].content`，`content` 反而留空。只认
+ * `content` 会让这些消息变成「用户发了但什么都没发生」——上层拿到空文本就静默返回。
+ */
+export function inboundText(msg: Pick<InboundMessageLike, 'content' | 'msgElements'>): string {
+  const direct = msg.content ?? ''
+  if (direct.trim().length > 0) return direct
+  return (msg.msgElements ?? [])
+    .map((element) => element?.content ?? '')
+    .filter((part) => part.trim().length > 0)
+    .join(' ')
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…（共 ${text.length} 字）` : text
 }
 
 /**

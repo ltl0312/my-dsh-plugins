@@ -221,6 +221,8 @@ export interface ChannelLogger {
   info(message: string): void
   warn(message: string, error?: unknown): void
   error(message: string, error?: unknown): void
+  /** 只写进 verbose/debug 级别的细碎日志；实现可以省略（调用方需容忍 undefined）。 */
+  debug?(message: string): void
   /** 带前缀的子 logger；实现可以省略（调用方需容忍 undefined）。 */
   child?(prefix: string): ChannelLogger
 }

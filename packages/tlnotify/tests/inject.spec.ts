@@ -280,3 +280,117 @@ describe('matchAnswer：提问还没就绪时的判读', () => {
     }
   })
 })
+
+/**
+ * 同一个问题被两条 hook 路径各投一次。
+ *
+ * 现场（plugin.log 08:54:58）：一个问题在 11 毫秒里发了两条一模一样的「等待我回答」，
+ * requestId 分别是 `call_00_Sp8u8…` 与合成出来的 `question-1-1791017697940`——`tool/call`
+ * 那条带 callId，waterfall 那条不带，于是 `#deliveredRequests` 的按 requestId 去重拦不住。
+ * 用户回一句话只会结算其中一条，另一条看上去就是「我回了但它还在等」。
+ */
+describe('同一个问题被重复投递', () => {
+  /** waterfall 那条路：宿主既没给 `wait.callId`，`question[].intent.callId` 也是空的。 */
+  function waterfallRequest(): unknown {
+    return { ...(questionRequest({}) as Record<string, unknown>), wait: {} }
+  }
+
+  it('只发第一条通知，但两条路上来的 pending 都能被结算', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ callId: 'call_00_sp8u8' }))
+    await Promise.resolve()
+    expect(h.pending).toHaveLength(1)
+
+    void h.ask(waterfallRequest())
+    await Promise.resolve()
+    // 通知不再重发……
+    expect(h.pending).toHaveLength(1)
+    // ……但 pending 照旧注册：哪条路上来的解答都要能算数。
+    expect(h.bridge.pendingCount).toBe(2)
+
+    const settled = h.bridge.settleText('sess-1', '方案乙')
+    expect(settled?.ok).toBe(true)
+    expect(h.bridge.pendingCount).toBe(1)
+    h.bridge.dispose()
+  })
+
+  it('不是同一个问题（题目 id 不同）照旧两条通知', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ callId: 'call-a' }))
+    await Promise.resolve()
+    const second = questionRequest({ callId: 'call-b' }) as {
+      questions: { id: string }[]
+    }
+    second.questions[0]!.id = 'q2'
+    void h.ask(second)
+    await Promise.resolve()
+    expect(h.pending).toHaveLength(2)
+    h.bridge.dispose()
+  })
+
+  it('上一个问题结算之后，同一个 id 再问一次仍然要发通知', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ callId: 'call-1' }))
+    await Promise.resolve()
+    expect(h.pending).toHaveLength(1)
+    expect(h.bridge.settleText('sess-1', '方案甲')?.ok).toBe(true)
+
+    void h.ask(questionRequest({ callId: 'call-2' }))
+    await Promise.resolve()
+    expect(h.pending).toHaveLength(2)
+    h.bridge.dispose()
+  })
+})
+
+/**
+ * `hasLivePending` 是给日志兜底路径（`index.ts` 的 `#maybePending`）用的：两条路本该按
+ * requestId 去重，但 waterfall 会自己合成 id，对不上，于是同一个提问被发两条通知。兜底路径
+ * 改成先问一句「桥是不是已经在等这个会话的这类请求了」，就不再依赖 id 是否对得上。
+ */
+describe('hasLivePending：桥是不是已经在等这个会话', () => {
+  it('没有任何等待时一律 false', () => {
+    const h = makeHarness()
+    expect(h.bridge.hasLivePending('sess-1', 'question')).toBe(false)
+    expect(h.bridge.hasLivePending('sess-1', 'plan')).toBe(false)
+    expect(h.bridge.hasLivePending('sess-1', 'approval')).toBe(false)
+    h.bridge.dispose()
+  })
+
+  it('只认「同一个会话 + 同一种等待」，会话或类型对不上都不算', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ sessionId: 'sess-1', callId: 'call-1' }))
+    await Promise.resolve()
+
+    expect(h.bridge.hasLivePending('sess-1', 'question')).toBe(true)
+    // 别的会话：不能替它把通知压掉。
+    expect(h.bridge.hasLivePending('sess-2', 'question')).toBe(false)
+    // 别的类型：提问不能当成审批。
+    expect(h.bridge.hasLivePending('sess-1', 'approval')).toBe(false)
+    expect(h.bridge.hasLivePending('sess-1', 'plan')).toBe(false)
+    h.bridge.dispose()
+  })
+
+  it('计划与审批各自认自己的类型', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ sessionId: 'sess-1', callId: 'plan-1', plan: true }))
+    void h.approve(approvalRequest({ sessionId: 'sess-2', callId: 'appr-1' }))
+    await Promise.resolve()
+
+    expect(h.bridge.hasLivePending('sess-1', 'plan')).toBe(true)
+    expect(h.bridge.hasLivePending('sess-1', 'question')).toBe(false)
+    expect(h.bridge.hasLivePending('sess-2', 'approval')).toBe(true)
+    expect(h.bridge.hasLivePending('sess-2', 'question')).toBe(false)
+    h.bridge.dispose()
+  })
+
+  it('结算之后回到 false，下一个提问不会被误压', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ sessionId: 'sess-1', callId: 'call-1' }))
+    await Promise.resolve()
+    expect(h.bridge.hasLivePending('sess-1', 'question')).toBe(true)
+
+    expect(h.bridge.settleText('sess-1', '方案甲')?.ok).toBe(true)
+    expect(h.bridge.hasLivePending('sess-1', 'question')).toBe(false)
+    h.bridge.dispose()
+  })
+})
