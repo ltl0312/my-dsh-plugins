@@ -14,6 +14,7 @@
 
 import { formatDuration, summarizeTools } from './aggregate.js'
 import { shortSessionId } from './events.js'
+import { toPlainText } from './markdown.js'
 import { EVENT_LABELS, LEVEL_BY_KIND } from './types.js'
 import type {
   ActionValue,
@@ -75,14 +76,19 @@ function metadataLine(snapshot: TurnSnapshot | undefined, includeTiming: boolean
 
 /** 出错时优先展示错误文本，其余情况展示助手正文。 */
 function primaryText(event: RawEvent, snapshot: TurnSnapshot | undefined): string {
-  if (event.detail.text) return event.detail.text
-  if (snapshot?.assistantText) return snapshot.assistantText
+  // 必须先压成纯文本：精简模式下面马上要 `oneLine()`，表格与标题一旦被折成一行，
+  // 就再也认不出块结构了（见 markdown.ts 顶部的顺序约束）。
+  if (event.detail.text) return toPlainText(event.detail.text)
+  if (snapshot?.assistantText) return toPlainText(snapshot.assistantText)
   return ''
 }
 
 function failedTools(snapshot: TurnSnapshot | undefined): string[] {
   if (!snapshot) return []
-  return snapshot.tools.filter((tool) => !tool.ok).map((tool) => `${tool.name}: ${tool.error ?? '失败'}`)
+  // 工具报错是外部程序吐出来的自由文本，里面出现 `##`、代码围栏、表格都不稀奇。
+  return snapshot.tools
+    .filter((tool) => !tool.ok)
+    .map((tool) => oneLine(toPlainText(`${tool.name}: ${tool.error ?? '失败'}`)))
 }
 
 /** 精简正文：一行。 */
@@ -121,15 +127,18 @@ function briefBody(event: RawEvent, snapshot: TurnSnapshot | undefined, options:
 /** 提问正文：问题 + 编号选项。 */
 function questionBody(event: RawEvent, withOptions: boolean): string {
   const lines: string[] = []
-  if (event.detail.text) lines.push(event.detail.text)
+  // 问题和选项都是模型写的，照样可能是 Markdown。选项标签一律 `oneLine`——它要
+  // 跟在「1. 」后面，折行会把这个前缀冲掉。
+  if (event.detail.text) lines.push(toPlainText(event.detail.text))
   const options = event.detail.options ?? []
   if (withOptions && options.length > 0) {
     options.forEach((option, index) => {
-      const description = option.description ? ` —— ${option.description}` : ''
-      lines.push(`${index + 1}. ${option.label}${description}`)
+      const label = oneLine(toPlainText(option.label))
+      const description = option.description ? ` —— ${oneLine(toPlainText(option.description))}` : ''
+      lines.push(`${index + 1}. ${label}${description}`)
     })
   } else if (options.length > 0) {
-    lines.push(`可选：${options.map((option) => option.label).join(' / ')}`)
+    lines.push(`可选：${options.map((option) => oneLine(toPlainText(option.label))).join(' / ')}`)
   }
   if (event.detail.multiSelect) lines.push('（可多选）')
   // QQ 单聊的按钮在桌面端 / 老版本上根本不渲染，正文里的这句话才是真正可用的作答
@@ -141,8 +150,10 @@ function questionBody(event: RawEvent, withOptions: boolean): string {
 }
 
 function approvalBody(event: RawEvent): string {
-  const tool = event.detail.toolName ? `工具 \`${event.detail.toolName}\`` : '一个工具'
-  const reason = event.detail.text ? `\n原因：${event.detail.text}` : ''
+  // 工具名原来裹着反引号（`` 工具 `Bash` ``）。lark_md 不认行内代码，QQ 更是纯
+  // 文本，两边的用户看到的都是多余的反引号，所以这里直接不要标记。
+  const tool = event.detail.toolName ? `工具 ${event.detail.toolName}` : '一个工具'
+  const reason = event.detail.text ? `\n原因：${oneLine(toPlainText(event.detail.text))}` : ''
   return `${tool} 正在申请权限。${reason}\n回复「允许」或「拒绝」即可。`
 }
 
@@ -156,7 +167,12 @@ function detailedBody(event: RawEvent, snapshot: TurnSnapshot | undefined, optio
     lines.push(approvalBody(event))
   } else if (event.kind === 'plan') {
     lines.push('等待你确认这份计划：')
-    if (event.detail.plan) lines.push('', truncate(event.detail.plan, Math.max(200, Math.floor(options.content.maxBodyChars * 0.6))))
+    if (event.detail.plan) {
+      lines.push(
+        '',
+        truncate(toPlainText(event.detail.plan), Math.max(200, Math.floor(options.content.maxBodyChars * 0.6))),
+      )
+    }
     lines.push('', '回复「批准」或「不批准」即可。')
   } else {
     const primary = primaryText(event, snapshot)
@@ -179,7 +195,8 @@ function detailedBody(event: RawEvent, snapshot: TurnSnapshot | undefined, optio
 
   const showUserPrompt = options.content.includeUserPrompt || context?.includeUserPrompt === true
   if (showUserPrompt && snapshot?.userPrompt) {
-    lines.push('', `你刚才问：${truncate(oneLine(snapshot.userPrompt), 300)}`)
+    // 真人提问也可能整段贴的是 Markdown，所以同样先压再 `oneLine()`——顺序不能反。
+    lines.push('', `你刚才问：${truncate(oneLine(toPlainText(snapshot.userPrompt)), 300)}`)
   }
 
   // 只看数组本身：轮数已经由调用方按**这台机器人**的配置算好了（`historyTurns`
@@ -189,7 +206,7 @@ function detailedBody(event: RawEvent, snapshot: TurnSnapshot | undefined, optio
   if (previousTurns.length > 0) {
     lines.push('', `最近 ${previousTurns.length} 轮：`)
     for (const turn of previousTurns) {
-      const prompt = turn.userPrompt ? truncate(oneLine(turn.userPrompt), 120) : '(无提问)'
+      const prompt = turn.userPrompt ? truncate(oneLine(toPlainText(turn.userPrompt)), 120) : '(无提问)'
       const tools = turn.tools.length > 0 ? ` [${summarizeTools(turn.tools, 3)}]` : ''
       lines.push(`· ${prompt}${tools}`)
     }
@@ -266,6 +283,11 @@ export function renderNotification(event: RawEvent, snapshot: TurnSnapshot | und
   const detailed =
     options.mode === 'session' || options.detailed === true || options.global.verbosity === 'normal'
   const raw = detailed ? detailedBody(event, snapshot, options) : briefBody(event, snapshot, options)
+  // 这里**不要**再统一跑一遍 `toPlainText`。它会把代码块与行内代码还原成原文，
+  // 而还原出来的 `# 注释`、`- 参数`、`**a**` 在第二遍里就会被当成标记吃掉——
+  // 也就是说它不是幂等的。所以正文里每一处自由文本都在它自己的位置先压平
+  // （`primaryText` / `questionBody` / `approvalBody` / plan / userPrompt /
+  // previousTurns / failedTools），别在末尾兜底。
   const body = truncate(raw || EVENT_LABELS[event.kind], options.content.maxBodyChars)
 
   return {

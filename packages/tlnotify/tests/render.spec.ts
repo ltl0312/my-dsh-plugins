@@ -219,7 +219,9 @@ describe('提问与审批正文', () => {
       undefined,
       options(),
     )
-    expect(notification.body).toContain('工具 `Bash`')
+    // 反引号是 Markdown 的标记，QQ 纯文本 / 飞书 lark_md 都不会把它渲染成行内代码，
+    // 用户只会看到多出来的两个反引号，所以这里不要标记。
+    expect(notification.body).toContain('工具 Bash')
     expect(notification.body).toContain('原因：要执行 rm')
     expect(notification.body).toContain('回复「允许」或「拒绝」即可。')
   })
@@ -484,5 +486,76 @@ describe('shardNotification', () => {
 
   it('默认上限是 1200', () => {
     expect(DEFAULT_SHARD_CHARS).toBe(1200)
+  })
+})
+
+describe('正文里的 Markdown 一律压成纯文本', () => {
+  // 通知正文最常放的就是助手回复原文，而助手回复几乎必然是 Markdown。QQ 只发纯
+  // 文本、飞书的 lark_md 只认内联子集，不压平的话用户看到的就是 `| 分类 | 条目 |`
+  // 这种源码。这一组用例盯的就是「用户看到什么」。
+  const markdownReport = ['## 入库结果', '', '| 分类 | 条目 |', '|---|---|', '| 架构 | x |'].join('\n')
+
+  it('精简模式：折成一行之后仍然不带标记', () => {
+    const notification = renderNotification(event(), snapshot({ assistantText: markdownReport }), options())
+    expect(notification.body).toContain('【入库结果】')
+    expect(notification.body).toContain('· 架构：x')
+    expect(notification.body).not.toContain('|')
+    expect(notification.body).not.toContain('##')
+    // 精简模式只有一行——表格必须在 `oneLine()` **之前**压平，否则表头与数据行
+    // 会被折到一起，谁都认不出来。
+    expect(notification.body).not.toContain('\n')
+  })
+
+  it('详细模式：块结构保留，但没有竖线与井号', () => {
+    const notification = renderNotification(
+      event(),
+      snapshot({ assistantText: markdownReport }),
+      options({ mode: 'session' }),
+    )
+    expect(notification.body).toContain('【入库结果】\n\n· 架构：x')
+    expect(notification.body).not.toContain('|')
+  })
+
+  it('计划正文同样压平', () => {
+    const notification = renderNotification(
+      event({ kind: 'plan', detail: { project: 'DSH', plan: '## 步骤\n\n- 一\n- 二' } }),
+      undefined,
+      options({ mode: 'session' }),
+    )
+    expect(notification.body).toContain('【步骤】\n\n· 一\n· 二')
+  })
+
+  it('提问的问题与选项里的标记也去掉', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: {
+          project: 'DSH',
+          text: '选**哪个**？',
+          requestId: 'call-1',
+          options: [{ label: '**甲**' }, { label: '乙' }],
+        },
+      }),
+      undefined,
+      options(),
+    )
+    expect(notification.body).toContain('选哪个？')
+    expect(notification.body).toContain('可选：甲 / 乙')
+  })
+
+  it('代码块内容原样保留：注释里的井号不是标题', () => {
+    // 回归护栏：如果有人在 `renderNotification` 末尾再加一道统一的 `toPlainText`
+    // 兜底，这里就会变成「【安装依赖】」——因为第一遍把代码还原成原文之后，第二遍
+    // 就分不清它是不是代码了。
+    const code = ['```bash', '# 安装依赖', 'pnpm install', '```'].join('\n')
+    const notification = renderNotification(
+      event(),
+      snapshot({ assistantText: code }),
+      options({ mode: 'session' }),
+    )
+    expect(notification.body).toContain('# 安装依赖')
+    expect(notification.body).toContain('pnpm install')
+    expect(notification.body).not.toContain('【安装依赖】')
+    expect(notification.body).not.toContain('```')
   })
 })

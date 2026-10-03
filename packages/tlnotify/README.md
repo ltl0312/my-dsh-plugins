@@ -244,6 +244,14 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 | `includeUserPrompt` | `true` | 是否回显触发这一轮的提问 |
 | `maxBodyChars` | `1500` | 正文硬上限，超出截断并标注 |
 
+> **正文一律是纯文本。** 助手回复、计划、提问选项、工具报错这些自由文本在进入正文前
+> 都会先过一遍 `src/markdown.ts` 的 `toPlainText()`：标题 `## X` → `【X】`，表格
+> `| a | b |` → `· a：b`（表头行丢弃，首列当键），列表 `- x` → `· x`，加粗 / 斜体 /
+> 删除线 / 链接 / 行内代码去掉标记留文字，围栏代码块内容原样保留、只丢掉围栏。
+> 原因：QQ 只发 `msg_type: 0` 纯文本，飞书的 `lark_md` 只认内联子集——两边都不渲染
+> 标题和表格，不压平的话用户看到的就是 `| 分类 | 记忆条目 |` 这种源码。
+> 没有开关，也不需要有：IM 里没有需要保留 Markdown 的场景。
+
 ### `routing` —— 回复怎么找到会话
 
 | 配置项 | 默认值 | 说明 |
@@ -470,6 +478,7 @@ QQ 单聊机器人是**首选通道**：长连接收事件、支持按钮、支�
 | `src/gate.ts` | `CompletionGate`：等 agent 真正空闲再发，防抖 + 重试上限 |
 | `src/dedupe.ts` | 按 `会话:seq` 去重（24 小时窗口 / 2000 条上限） |
 | `src/render.ts` | 标题三段式、正文渲染、按钮生成、长文本分片 |
+| `src/markdown.ts` | `toPlainText()`：把模型写的 Markdown 压成 IM 看得懂的纯文本。**不幂等**，每处自由文本各压一次 |
 | `src/route.ts` | `RouteTable`：三层路由 + TTL + 序列化 |
 | `src/mode.ts` | `ModeState`：详细模式名单、遗留全局模式字段，以及 `/mode` 命令解析与每台机器人的范围文案 |
 | `src/inject.ts` | `SessionInjector`（回注消息、中止会话）与 `InteractionBridge`（审批 / 提问 waterfall） |
