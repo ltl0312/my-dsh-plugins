@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlnotify",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "license": "MIT",
   "description": "把 DSH 会话事件（中断 / 结束 / 报错 / 等待操作）聚合到一个 IM 通道，推到 QQ / 飞书，带可点按钮与定向回复",
   "type": "module",
