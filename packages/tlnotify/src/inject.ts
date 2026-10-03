@@ -198,6 +198,14 @@ export interface InteractionBridgeOptions {
 const DEFAULT_TTL_MS = 30 * 60 * 1000
 
 /**
+ * 「这条提问已经有人发过通知了」这笔账最多记多久。
+ *
+ * 正常情况下这笔账会在提问被结算时（`#finish`）就抹掉，这个上限只是给「只有日志兜底
+ * 发过、桥从来没注册过 pending」那种情况兜底，免得表一直涨。
+ */
+const ANNOUNCE_TTL_MS = 2 * 60 * 1000
+
+/**
  * 把这次交互的取消信号接过来，返回一个「这次交互结束了」的释放函数。
  *
  * 宿主的提问 / 授权是当「转发 Remote event」送到浏览器的（`dsh-api-gateway`）：宿主侧
@@ -245,6 +253,8 @@ export class InteractionBridge {
   readonly #pending = new Map<string, Pending>()
   /** 「会话 + 题目 id」→ 正在等作答的 requestId，用来认出被重复投递的同一个问题。 */
   readonly #liveQuestions = new Map<string, string>()
+  /** 「会话 + 题目 id」→ 这条提问的通知是什么时候发出去的，两条生产者路径共用的一道闸。 */
+  readonly #announced = new Map<string, number>()
   readonly #options: InteractionBridgeOptions
   readonly #ttlMs: number
   readonly #now: () => number
@@ -278,6 +288,38 @@ export class InteractionBridge {
     return false
   }
 
+  /**
+   * 「这条提问的通知已经有人发过了吗」——两条生产者路径共用的一道闸。
+   *
+   * 同一个提问会从两条路进来：`session/event` 的 `tool/call`（`index.ts#maybePending`，
+   * 带真实 callId）和 `user-questions/request` waterfall（本桥）。两条路算出来的 requestId
+   * 可能对不上（现场：`call_00_dGHQUzZz9ZWpxg1gDB906158` vs `question-1-1791042098331`），
+   * 而且谁先谁后不定（08:54:58 / 15:05:20 是 waterfall 先，15:41:38 是兜底先），所以只按 id
+   * 去重必然漏。改成按两条路都拿得到的身份认：`会话 + 题目 id`。
+   *
+   * 先到的那条记一笔并返回 true（照发），后到的那条返回 false（跳过通知，但 pending 照旧
+   * 注册——哪条路上来的作答都要能结算）。这笔账在提问被结算时抹掉，所以同一会话隔一会儿
+   * 用同一个题目 id 再问一次不会被误吞。
+   *
+   * @param sessionId - 会话 id。
+   * @param questionId - `questions[0].id`；拿不到时不认重（返回 true），退化成老行为。
+   * @returns 这条提问是不是第一次被通知。
+   */
+  announceQuestion(sessionId: string, questionId?: string): boolean {
+    if (!questionId) return true
+    const key = `${sessionId}|${questionId}`
+    const now = this.#now()
+    const at = this.#announced.get(key)
+    if (at !== undefined && now - at < ANNOUNCE_TTL_MS) return false
+    this.#announced.set(key, now)
+    if (this.#announced.size > 64) {
+      for (const [other, when] of this.#announced) {
+        if (now - when >= ANNOUNCE_TTL_MS) this.#announced.delete(other)
+      }
+    }
+    return true
+  }
+
   install(ctx: { on: (name: string, listener: (...args: unknown[]) => unknown) => (() => void) | undefined }): void {
     const approvalDisposer = ctx.on('approval/request', (request, next) => this.#handleApproval(request, next))
     if (typeof approvalDisposer === 'function') this.#disposers.push(approvalDisposer)
@@ -297,6 +339,8 @@ export class InteractionBridge {
     this.#disposers = []
     for (const pending of this.#pending.values()) clearTimeout(pending.expireTimer)
     this.#pending.clear()
+    this.#liveQuestions.clear()
+    this.#announced.clear()
   }
 
   /** 按钮 / 文本回复结算一个等待中的请求。 */
@@ -382,6 +426,8 @@ export class InteractionBridge {
       if (this.#liveQuestions.get(pending.questionKey) === requestId) {
         this.#liveQuestions.delete(pending.questionKey)
       }
+      // 提问结束了，这笔「已经通知过」的账也抹掉：同一个题目 id 以后还能再问一次。
+      this.#announced.delete(pending.questionKey)
     }
   }
 
@@ -469,6 +515,10 @@ export class InteractionBridge {
     // 结算其中一条，另一条看上去就像「没生效」。所以按「会话 + 题目 id」认重：
     // pending 照旧注册（哪条路上来的解答都要能结算），只是第二条通知不再发。
     const questionKey = `${sessionId}|${first.id}`
+    // 同一个问题被本桥投递两次（宿主的 `tool/call` 那条带 callId、waterfall 那条不带）时，
+    // pending 照旧注册，只是第二条通知不再发。跨路径（日志兜底 vs 本桥）的去重由
+    // `index.ts#deliver` 里那道 `announceQuestion` 闸统一负责——顺序不定，只能放在真正
+    // 投递的那一刻判断。
     const duplicated = this.#liveQuestions.has(questionKey)
     this.#liveQuestions.set(questionKey, requestId)
 
@@ -535,6 +585,8 @@ export class InteractionBridge {
     }
     if (first.options && first.options.length > 0) detail.options = first.options
     detail.multiSelect = first.multiSelect === true
+    // 日志兜底那条路（`extractToolCallEvent`）也会填这个字段，两条路靠它认重。
+    if (first.id) detail.questionId = first.id
     return { kind, sessionId, seq: this.#syntheticSeq(requestId), time: this.#now(), detail }
   }
 

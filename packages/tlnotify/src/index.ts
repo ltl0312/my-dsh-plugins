@@ -1306,9 +1306,12 @@ class Tlnotify {
     }
     // 上面两条按 requestId 判断，而 waterfall 在宿主没给 callId 时会自己合成一个 id
     // （`question-<n>-<时间戳>`），两边永远对不上，于是同一个提问被两条路各发一条通知
-    // （现场 08:54:58.419/.430 与 15:05:20.142/.286）。这里按「会话 + 类型」再问一句桥：
+    // （现场 08:54:58.419/.430、15:05:20.142/.286、15:41:38.317/.332）。这里问一句桥：
     // 桥已经在等这个提问了，兜底就不该再发。判据是活着的 pending，不是时间窗，所以
     // 同一会话连着问两个问题不会被误吞。
+    //
+    // 注意这条只在**桥先注册**时管用；15:41:38 那次是兜底先跑，所以真正的去重是
+    // `#announceOnce`（按「会话 + 题目 id」认，与顺序无关），见下面 `#deliver`。
     if ((raw.kind === 'question' || raw.kind === 'plan') && this.#bridge.hasLivePending(raw.sessionId, raw.kind)) {
       this.#log.info(`这条等待通知已经由 waterfall 发过了（${raw.sessionId} · ${raw.kind}），跳过日志兜底`)
       return
@@ -1545,8 +1548,29 @@ class Tlnotify {
       .join('；')
   }
 
+  /**
+   * 同一个提问的两条生产者路径（日志兜底 / waterfall）只能有一条真的发通知。
+   *
+   * 两条路算出来的 requestId 可能对不上（现场：`call_00_dGHQUzZz9ZWpxg1gDB906158` vs
+   * `question-1-1791042098331`），而且谁先谁后不定（08:54:58 与 15:05:20 是 waterfall 先，
+   * 15:41:38 是日志兜底先），所以只按 id 去重必然漏。改成按两条路都拿得到的身份认：
+   * `会话 + 题目 id`（`ask_user_question` 的 `questions[0].id`）。
+   *
+   * 闸门必须放在**真正投递的那一刻**，而不是各自算完 id 之后：`#deliver` 里有 await，
+   * 晚到的那条只有在这里才拦得住。
+   */
+  #announceOnce(event: RawEvent): boolean {
+    if (event.kind !== 'question') return true
+    if (this.#bridge.announceQuestion(event.sessionId, event.detail.questionId)) return true
+    this.#log.info(
+      `这条等待通知已经发过了（${event.sessionId} · 题目 id ${event.detail.questionId ?? '未知'}），跳过重复投递`,
+    )
+    return false
+  }
+
   async #deliver(event: RawEvent): Promise<void> {
     if (this.#disposed) return
+    if (!this.#announceOnce(event)) return
     const targets = new Set(
       this.#channels
         .candidates()

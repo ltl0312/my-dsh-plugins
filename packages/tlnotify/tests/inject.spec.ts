@@ -519,3 +519,90 @@ describe('接管宿主的取消信号：交互结束后卡片才会消失', () =
     h.bridge.dispose()
   })
 })
+
+/**
+ * 同一条等待会从两条路进来：`session/event` 的 `tool/call`（`index.ts#maybePending`，带真实
+ * callId）和 `user-questions/request` waterfall（本桥）。两条路算出来的 requestId 可能对不上，
+ * 而且谁先谁后不定（现场 08:54:58 / 15:05:20 是 waterfall 先，15:41:38 是兜底先），于是同一个
+ * 提问被两条路各发一条「等待我回答」。这里测的是两条路共用的那道闸：`会话 + 题目 id`。
+ */
+describe('同一条等待只发一次通知：两条生产者路径共用一道闸', () => {
+  it('桥发出去的等待事件带着题目 id，兜底那条路也拿得到同一个身份', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest())
+    await flush()
+    expect(h.pending).toHaveLength(1)
+    expect(h.pending[0]?.detail.questionId).toBe('q1')
+    h.bridge.dispose()
+  })
+
+  it('先到的那条记账，后到的那条被拦下来', async () => {
+    const h = makeHarness()
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(false)
+    h.bridge.dispose()
+  })
+
+  it('不同题目、不同会话各算一条', async () => {
+    const h = makeHarness()
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+    expect(h.bridge.announceQuestion('sess-1', 'q2')).toBe(true)
+    expect(h.bridge.announceQuestion('sess-2', 'q1')).toBe(true)
+    h.bridge.dispose()
+  })
+
+  it('拿不到题目 id 时不认重，退化成老行为（宁可多发也不吞）', async () => {
+    const h = makeHarness()
+    expect(h.bridge.announceQuestion('sess-1', undefined)).toBe(true)
+    expect(h.bridge.announceQuestion('sess-1', undefined)).toBe(true)
+    h.bridge.dispose()
+  })
+
+  it('提问被结算之后这笔账就抹掉：同一个题目 id 以后还能再问一次', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest())
+    await flush()
+    // 通知那道闸（index.ts#deliver）在这里记一笔。
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(false)
+
+    expect(h.bridge.settleText('sess-1', '方案甲')?.ok).toBe(true)
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案甲'] }] })
+
+    // 提问结束了，账也抹掉：同一个题目 id 以后还能再问一次。
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+    h.bridge.dispose()
+  })
+
+  it('兜底先记账、waterfall 后到：pending 照旧注册，文字作答仍然能结算', async () => {
+    const h = makeHarness()
+    // 兜底那条路先认领了这条通知（通知本身由 index.ts 的闸决定发不发）。
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+
+    const answer = h.ask(questionRequest())
+    await flush()
+    // 桥照样注册 pending：QQ 里回文字必须还能答掉它。
+    expect(h.bridge.pendingCount).toBe(1)
+    expect(h.bridge.settleText('sess-1', '方案乙')).toEqual({ ok: true, echo: '已选择「方案乙」' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案乙'] }] })
+    h.bridge.dispose()
+  })
+
+  it('时间窗过期的账不再拦人', async () => {
+    let now = 1_000
+    const h = makeHarness({ now: () => now })
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(false)
+
+    now += 2 * 60 * 1000 + 1
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+    h.bridge.dispose()
+  })
+
+  it('dispose 之后账本清空，不会把下一轮的通知吞掉', async () => {
+    const h = makeHarness()
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+    h.bridge.dispose()
+    expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
+  })
+})

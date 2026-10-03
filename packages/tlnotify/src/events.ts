@@ -278,6 +278,7 @@ export function extractToolCallEvent(
     const parsed = extractQuestions(args)
     if (parsed.text) detail.text = parsed.text
     if (parsed.options.length > 0) detail.options = parsed.options
+    if (parsed.questionId) detail.questionId = parsed.questionId
     detail.multiSelect = parsed.multiSelect
   }
   return { kind, sessionId: session.id, seq: event.seq, time: event.time, detail }
