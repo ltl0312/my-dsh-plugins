@@ -1,4 +1,76 @@
-# dsh-plugin-tlmemory
+# my-dsh-plugins · DSH 插件合集
+
+这是 DeepSeek Harness（DSH）的插件合集仓库，用 pnpm workspace 单仓管理。
+三个插件都发布到 npm，都是 DSH 原生 **bundle** 形态（`package.json` 的 `dsh.bundle.patch`
+指向包内自带的 `cordis.patch.yml`），装进 profile 即自动激活。
+各自的设计取舍、完整配置与源码结构见对应包的 README。
+
+---
+
+## 📦 插件一览
+
+| 插件 | 版本 | 一句话 | 详细文档 |
+|---|---|---|---|
+| `dsh-plugin-tlmemory` | 0.6.11 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
+| `dsh-plugin-tlnotify` | 0.2.0 | 把 DSH 会话事件聚合到一个 IM 通道推到 QQ / 飞书，并且能直接回话 | [`packages/tlnotify/README.md`](packages/tlnotify/README.md) |
+| `dsh-plugin-tlsearch` | 0.3.2 | 低 Token 消耗的联网搜索，只返回清洗过的标题 / URL / 摘要 | [`packages/tlsearch/README.md`](packages/tlsearch/README.md) |
+
+---
+
+## 🚀 安装
+
+三个插件都用同一条命令安装并激活：
+
+```powershell
+dsh plugin --profile web add dsh-plugin-tlmemory
+dsh plugin --profile web add dsh-plugin-tlnotify
+dsh plugin --profile web add dsh-plugin-tlsearch
+```
+
+三个包都是 **bundle 形态**，只要被列进 profile 的 `dsh.profile.bundles` 就会自动激活，
+**不需要**再往 profile 的 `cordis.patch.yml` 写挂载条目（补丁已随包发布）。
+
+### 手工安装（等价三步）
+
+`dsh plugin add` 自动做的就是这三件事：装依赖 → 放行原生模块
+（`pnpm-workspace.yaml` 的 `allowBuilds`）→ 把包归并进 `dsh.profile.bundles`（幂等）。
+手工等价步骤如下（以 tlmemory 为例，另外两个包同理换包名）：
+
+1. 进入 profile 目录：`cd ~/.dsh/profiles/web`
+2. 装依赖：`pnpm add dsh-plugin-tlmemory`
+3. 把包名加进该目录 `package.json` 的 `dsh.profile.bundles` 数组
+
+```json
+"dsh": { "profile": { "bundles": ["…", "dsh-plugin-tlmemory"] } }
+```
+
+> 只装依赖、不进 `dsh.profile.bundles` 是**不会生效**的。装 tlmemory 时若 pnpm 提示
+> `Ignored build scripts`（`better-sqlite3`），需要按该包 README 放行 `allowBuilds`。
+
+### 查看与摘除
+
+```powershell
+dsh plugin --profile web list
+dsh plugin --profile web remove dsh-plugin-tlmemory
+```
+
+`list` 查看挂载 / 激活状态，`remove <包名>` 一键摘除补丁并卸载。
+
+### 全局选项（任何子命令都可用）
+
+| 选项 | 作用 |
+|---|---|
+| `--json` | stdout 只输出一行结果 JSON，人类日志改走 stderr；也可用 `DSH_PLUGIN_OUTPUT=json` |
+| `--timeout <值>` | pnpm 超时（`1500` / `30s` / `5m`），超时以退出码 `124` 结束；也可用 `DSH_PLUGIN_TIMEOUT` |
+| `--yes` | 确认「用内置默认层栈首次创建无模板的同名 profile」，没有它时未知 profile 名的首次创建会被拒绝 |
+| `--no-lock` | 跳过 profile 互斥锁 |
+
+> `--profile` 必须紧跟 `dsh plugin` 且只能出现一次；退出码、诊断前缀、原子回写等细节
+> 见各包 README 的「安装」一节。
+
+---
+
+## 🧠 一、dsh-plugin-tlmemory —— 无感记忆与自省管理
 
 > DeepSeek Harness (DSH) 原生无感记忆与自省管理插件。
 
@@ -6,7 +78,7 @@
 
 ---
 
-## ✨ 核心特性
+### ✨ 核心特性
 
 - **无感静默沉淀**：基于 DSH 官方 `session/event` 契约监听 `turn/end` (completed) 事件，静默后台提炼关键工程结论、用户偏好与决策规则，不抢占推理上下文。
 - **全局一级视口**：与 DSH 内置「SSH / 任务看板」同级，常驻左侧导航栏核心区，一键切换主视口并支持 `‹ 返回会话` 快捷回退。
@@ -22,9 +94,9 @@
 
 ---
 
-## 📦 安装方式
+### 📦 安装方式
 
-### 方式一：一条命令安装并自动挂载（推荐）
+#### 方式一：一条命令安装并自动挂载（推荐）
 
 ```powershell
 dsh plugin --profile web add dsh-plugin-tlmemory
@@ -56,7 +128,7 @@ dsh plugin --profile web add dsh-plugin-tlmemory
 > 失败时给出分类后的诊断（`adding-to-root` / `ignored-builds` / `fetch-404` /
 > `windows-file-locked` / `network` …）。
 
-### 方式二：手工安装（等价于方式一的三步）
+#### 方式二：手工安装（等价于方式一的三步）
 
 进入你的 DSH profile 目录（例如 `~/.dsh/profiles/web`）：
 
@@ -81,7 +153,7 @@ allowBuilds:
 
 ---
 
-## ⚙️ 配置与挂载
+### ⚙️ 配置与挂载
 
 编辑 Profile 目录下的补丁文件 `~/.dsh/profiles/web/cordis.patch.yml`，挂载插件即可
 （看板服务随宿主**零配置自启**，无需任何开关声明）：
@@ -107,9 +179,9 @@ allowBuilds:
 
 ---
 
-## 🚀 启动与使用
+### 🚀 启动与使用
 
-### 1. 启动 DSH Web 宿主
+#### 1. 启动 DSH Web 宿主
 
 在任意终端路径下直接启动：
 
@@ -120,7 +192,7 @@ dsh web
 > Node 版本：运行需 Node >= 22；由于 `better-sqlite3` 是原生模块，**建议统一用 Node 24**
 > （原生二进制的 ABI 必须与运行它的 Node 匹配，混用会报 `NODE_MODULE_VERSION` 不匹配）。
 
-### 2. 访问记忆看板
+#### 2. 访问记忆看板
 
 1. 打开浏览器进入 DSH 界面（通常为 http://127.0.0.1:3080）。
 2. 在左侧边栏顶部（「+ 新会话」下方、「技能中心」旁）点击 **「记忆看板」**。
@@ -131,7 +203,173 @@ dsh web
 
 ---
 
-## 🛠️ 项目常用命令（开发与测试）
+## 🔔 二、dsh-plugin-tlnotify —— 把会话事件推到 QQ / 飞书，并且能回话
+
+DSH 跑在电脑上，人不在电脑前。tlnotify 把「哪个项目的哪个对话」出了什么事推到你的手机
+（QQ 单聊机器人 / 飞书自建应用），并且让你**直接在那条消息下面回复**，内容会注入回正确的
+会话——不用回电脑，也不用在浏览器里翻找那个标签页。
+
+### ✨ 核心特性
+
+- **一个通道看全部会话**：标题三段式 `DSH · <项目目录名> · <短会话id> · <事件>`，
+  例 `DSH · my-dsh-plugins · 519cc141 · 权限请求`——一眼看出是哪个项目的哪个对话。
+- **九类事件**：任务完成、执行错误、执行被阻塞、手动中止、Token 达到上限、异常中断、
+  等待我回答、权限请求、等待计划确认。
+- **能点按钮**：审批给「允许 / 拒绝」，提问给选项按钮，计划确认给「批准计划 / 不批准」，
+  另外附「打开会话」「详细模式」两个操作按钮；点击即在 DSH 侧生效。
+- **能定向回复**：三层路由（按钮 → 长按引用回复 → 显式短 id 前缀）保证消息回到正确的
+  会话；没有引用时兜底发给**最新一条通知**的会话，并且**一定回显「已发给 X」**。
+- **等待中的提问与审批可以直接回一段文字作答**：按钮不是唯一入口，回文字更可靠
+  （QQ 单聊的按钮在桌面端与旧版手机上不渲染，而宿主那边只要没人结算就会一直等）。
+- **零公网依赖**：两个通道都走 WebSocket 长连接，**不需要公网 IP、不需要域名、不需要内网穿透**。
+- **每台机器人各自订阅**：会话范围是每台机器人自己的（全部 / 一个 / 名单里的若干个），投递逐台进行——一台设成单会话，另一台照样收全局。
+- **不刷屏、重启不丢**：完成门控（等 agent 真正空闲再发）+ 按 `会话:seq` 去重（24 小时窗口）+
+  正文聚合 + 长文本分片（按钮只在首片）；路由表、每台机器人的会话范围与详细模式名单都落盘，
+  TTL 默认 7 天。
+
+### 🚀 快速开始（QQ，约 10 分钟）
+
+1. 打开 <https://q.qq.com/> 创建机器人，拿到 `AppID` 与 `AppSecret`。
+2. 在「开发设置」里开启 **C2C 消息**（单聊）相关权限；用群聊还要开启群 @ 消息。
+3. 用你自己的 QQ 给机器人发一条消息，插件日志里的 `sender=<你的 openid>` 就是 `targetChatId`。
+4. 在 DSH 的**设置页**（设置 → 插件 → **通知助手**）里添加一个 `qq` 通道，填入 `AppID` /
+   `AppSecret` / `targetChatId`；也可以直接编辑 `$DSH_HOME/tlnotify/config.json`。
+5. 重启 DSH，在 QQ 里给机器人发 `/mode` 验证双向通路。
+
+```json
+{
+  "enabled": true, "mode": "global", "defaultChannelId": "qq-main",
+  "channels": [{ "id": "qq-main", "type": "qq", "enabled": true,
+                 "appId": "102xxxxxx", "appSecret": "xxxxxxxxxxxxxxxx",
+                 "targetChatId": "你的 openid" }]
+}
+```
+
+> ⚠️ **唯一的硬限制**：QQ 用户可以在客户端设置里关闭「允许主动发送消息」，关闭后
+> **所有主动推送都会失败**（按钮回调后的回复属于被动回复，仍可用）；插件检测到这种情况
+> 会在日志里给出明确提示。
+
+### 🔌 通道
+
+| 通道 | `type` | 接入要点 |
+|---|---|---|
+| QQ 单聊机器人 | `qq` | 长连接收事件、支持按钮、支持长按引用回复，个人可自助注册；主动消息限额 **1000 条/天/用户**、**20 条/分钟**，被动回复窗口 60 分钟、最多 4 次 |
+| 飞书自建应用 | `feishu` | 事件订阅方式选**长连接**（免公网的关键，不需要填回调地址）；订阅 `im.message.receive_v1` 与 `card.action.trigger`，权限 `im:message` / `im:message:send_as_bot` |
+
+### ⚙️ 关键配置（带默认值）
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 总开关；`false` 时不连任何通道 |
+| `channels[].markdown` | **关** | 通道级开关；开了才用 QQ 原生 Markdown 卡片（`msg_type: 2`），关着发纯文本 |
+| `channels[].sessionScope` | `all` | `all` 关心全局 / `single` 只关心 `sessionId` 那一个 / `filter` 只关心 `sessionFilter` 里列的会话；`historyTurns`（跟随全局）决定这条通知带该会话最近几轮提问：`0` = 不带、`N` = 最近 N 轮（上限 20） |
+| `events.onTurnEnd` / `onError` / `onAborted` / `onPending` / `onMaxTokens` | 均 `true` | 各类事件的推送开关（`onError` 同时控制「执行被阻塞」与「异常中断」）；`events.includeSubagent` 默认 `false`，是否也推子 Agent 的事件 |
+| `content.maxBodyChars` | `1800` | 正文硬上限，超出截断并标注（设置页可调，范围 200–20000）；`routing.allowPrefix` / `fallback` / `tableTtlDays` / `echoTarget` 默认 `true` / `latest` / `7` / `true`（显式短 id 前缀定向 / 无引用时发给最新一条通知的会话 / 路由表 TTL 天数 / 投递后回显「已发给 X」） |
+| `session.context.previousTurns` | `3` | 单会话范围时附带前 N 轮摘要（每台机器人可用 `historyTurns` 覆盖） |
+
+### 💬 IM 命令与文字作答
+
+| 命令 | 作用 |
+|---|---|
+| `/mode` | 查看**这台机器人**当前关心哪些会话（全部 / 一个 / 名单里的 N 个）与详细模式名单 |
+| `/mode global` / `/mode session <短id>` | 让**这台机器人**关心全部会话 / 只关心这个会话，之后只推这一个 |
+| `detail`（也可写 `detail on`） | 把当前路由到的那个会话升级为详细模式 |
+| `undetail`（也可写 `detail off` / `brief` / `精简`） | 恢复精简，整句提示复制回来也生效 |
+| `stop` | 中止当前路由到的会话 |
+| `<短id> 你的话` | 显式定向投递到那个会话 |
+| 直接说话 | 按三层路由投递（推荐**长按引用**某条通知再回复） |
+
+等待中的提问与审批**可以直接回一段文字作答**：
+
+| 情况 | 你可以回 |
+|---|---|
+| 提问 | `1`（序号）、选项原文，或任意一句自由文本（自由文本直接当答案） |
+| 提问：自定义回答 | 先回最后一行那个序号（候选数 + 1），再发一段文本——那段文本原样当答案 |
+| 多选提问 | `1 3` / `1、3` / `1,3` |
+| 审批 | `允许` / `同意` / `批准` / `yes` / `1`；`拒绝` / `不同意` / `deny` / `2` |
+| 计划确认 | `批准` / `不批准`（**不认自由文本**——免得随手一句话就把计划批了） |
+
+提问正文里的选项是**编号分行**的，最后一行固定是「N+1. 自定义回答（先输入序号再输入文本）」。
+结算按**会话**找**最新一条**还在等待的请求；文本没对上任何等待中的请求时，它会照常作为
+普通发言注入会话。
+
+> 通道级 `markdown` 开关**默认关**是有原因的：QQ 把 `msg_type: 2` 的消息画在一张**固定宽度**
+> 的卡片里（客户端写死 618px 画布），**不随窗口自适应**。2026-10-04 在同一台电脑、同一个
+> 最大化窗口（2094px 宽）里实测：Markdown 卡片气泡右边界约 **600px**，而同一窗口里**普通文本**
+> 气泡约 **850px**——手机上看着正好的通知，在电脑上就像「只有手机宽」，右侧空一半。
+> 想要加粗标题就打开 `markdown`，想要和普通消息一样的观感就保持关闭（默认）。
+
+完整文档见 [`packages/tlnotify/README.md`](packages/tlnotify/README.md)。
+
+---
+
+## 🔎 三、dsh-plugin-tlsearch —— 低 Token 消耗的联网搜索
+
+把「一次搜索」塞进模型上下文的东西压到最少：只返回清洗过的 `{ title, url, snippet }`，
+没有提供方散文、没有 Raw HTML、没有埋点参数、没有每轮重复的引用指引。后端可插拔
+（Tavily / Brave / SearXNG / Google / Exa），端点可自建。
+
+### ✨ 核心特性
+
+- **结构化最小输出**：每条结果最多两行（`N. 标题 — URL` + 缩进摘要），零装饰词、零填充句。
+- **摘要硬上限**：`maxSnippetChars`（默认 250）逐条截断并尽量落在词边界，Token 成本可预算、可封顶。
+- **结果数硬上限**：`maxResults`（默认 5，上限 10）——原生 `web_search` 默认 8 条。
+- **清洗是确定性的**：剥离 HTML 标签（`<strong>`、`<p>`、`<style>` 正文整块丢弃）、
+  解码 HTML 实体（`&#x27;` 6 个字符 → `'` 1 个字符）、折叠换行/制表/NBSP/零宽字符。
+- **URL 减负**：剔除 `utm_*` / `fbclid` / `gclid` / `srsltid` 等纯埋点参数，保留路径、
+  其余查询参数与 `#hash`；解析失败的 URL **逐字节原样返回**，绝不改写。
+- **先去重再截断**：按归一化后的 URL 去重，避免同一篇文章的多个镜像先占满名额再被去重。
+- **超时 + 熔断**：每次请求挂 `AbortController` 超时；连续失败 3 次即熔断 60 秒，
+  冷却期内**不发网络请求**直接快速失败；调用方主动中断**不计入**熔断。
+- **零运行时依赖**：网络层直接用 Node 原生 `fetch` / `AbortSignal`，不引入 axios 等重库。
+
+### 💰 为什么更省 Token（可复现的度量）
+
+用同一批**真实脏数据**（8 条 Brave 风格原始结果：带 `<strong>` 高亮、HTML 实体、
+埋点参数、均值 372 字符的长摘要）走真实管线对比：
+
+| 指标 | 原生 `web_search` 风格 | `tlsearch` 默认 | 差异 |
+|---|---|---|---|
+| 结果条数 | 8 | 5 | −37% |
+| 单条摘要字符（均值） | 372（未清洗、无上限） | 248（清洗 + 250 上限） | −33% |
+| 单条 URL 字符（均值） | 105（含 `utm_*`/`fbclid`） | 34 | −68% |
+| **总字符数** | **4346** | **1608** | **2.70×** |
+| 粗估 Token（英文 ≈ 4 字符/token） | ≈ 1087 | ≈ 402 | 2.70× |
+
+### 🔌 支持的后端
+
+| 后端 | 密钥 | 默认端点 | 说明 |
+|---|---|---|---|
+| `tavily`（默认） | 必需 | `https://api.tavily.com` | 1000 credits/月，结构化 JSON、字段干净；密钥同时走 `Authorization` 头与请求体，兼容自建/中转网关 |
+| `searxng` | **不需要** | 无（必须自配） | 自托管元搜索，`baseUrl` 必填，并需在实例 `settings.yml` 的 `search.formats` 中启用 `json` |
+| `brave` | 必需 | `https://api.search.brave.com` | 请求侧关闭 `text_decorations` 并限定 `result_filter=web`，避免 `<strong>` 与 infobox 噪声 |
+| `exa` | 必需 | `https://api.exa.ai` | 语义/神经检索，适合「找概念、找相似」；搜索与 contents 分开计费 |
+| `google` | 必需（key + `cx`） | `https://www.googleapis.com` | ⚠️ 自 2026 年起不再向新客户开放，2027-01-01 停服；适配器仅为存量老 CSE 过渡保留 |
+
+### ⚙️ 关键配置（带默认值）
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `provider` | `tavily` | 主后端：`tavily` / `searxng` / `google` / `brave` / `exa` |
+| `maxResults` | `5` | 返回条数上限（钳制在 1-10） |
+| `maxSnippetChars` | `250` | 单条摘要字符上限（钳制在 40-2000，控制 Token 的主旋钮） |
+| `timeoutMs` | `15000` | 单次请求超时（钳制在 1000-60000） |
+| `outputFormat` | `markdown` | `markdown`（最省 Token）或 `json`（结构化，便于精确解析） |
+| `includeAnswer` | `false` | 是否附带后端的一句话答案（默认关以省 Token） |
+| `chain[]` / `fallback` | `[]` / `none` | 后备后端链，主后端失败/熔断时按顺序降级，每级一个独立熔断器 |
+
+### 📊 额度自查工具 `tlsearch_usage`
+
+配置里存在 Tavily 后端时，会**额外注册**一个无入参的 `tlsearch_usage` 工具，返回一行额度信息
+（如 `137/1000 credits used this cycle; 863 remaining`），让 agent 在搜索开始出现配额/限流错误时
+（或准备发起大批搜索前）自己查一下余量。只在配置了 Tavily 时注册——其余后端没有机器可读的
+额度接口，注册一个永远只会说「请去控制台看」的工具纯粹是每轮 Token 浪费。
+
+完整文档见 [`packages/tlsearch/README.md`](packages/tlsearch/README.md)。
+
+---
+
+## 🛠️ 仓库常用命令（开发与测试）
 
 ```powershell
 # 运行单元测试（全工作区）
@@ -148,9 +386,9 @@ pnpm run test:cli
 pnpm run install:cli
 ```
 
-> 根目录 `pnpm run build` 是递归构建（workspace 同时包含 `packages/tlmemory` 与
-> `packages/tlmemory/web`），因此 `dist/`、`web/client.js`、`web/dist/` 会被一并刷新 ——
-> 发包前跑这一条即可。单独构建看板前端用 `pnpm --dir packages/tlmemory/web run build`。
+> 根目录 `pnpm run build` 是递归构建（workspace 含 `packages/tlmemory`、`packages/tlnotify`
+> 与 `packages/tlsearch`），因此三个包的产物会被一并刷新 —— 发包前跑这一条即可。
+> 单独构建某个包用 `pnpm --filter <包名> run build`。
 
 ---
 
