@@ -68,6 +68,8 @@ export interface ChannelDraft {
    */
   historyTurns: number | null
   bindUrl: string
+  /** QQ 用原生 Markdown 卡片发（默认 false = 纯文本：卡片宽度由 QQ 客户端写死，比普通气泡窄）。 */
+  markdown: boolean
   /** 通知规则是否覆盖全局。false 时 `events` 只是「翻开关时的初值」，不生效。 */
   overrideEvents: boolean
   events: EventsConfig
@@ -106,6 +108,7 @@ export function toDraft(channel: ChannelView): ChannelDraft {
     sessionFilter: formatSessionFilter(channel.sessionFilter),
     historyTurns: typeof channel.historyTurns === 'number' ? channel.historyTurns : null,
     bindUrl: channel.bindUrl ?? '',
+    markdown: channel.markdown === true,
     overrideEvents: channel.overrideEvents,
     // 即使没开覆盖也照抄生效值：用户点开「自定义」的那一刻，看到的应该是
     // **当前正在生效的那份**，而不是内置默认——否则一开开关行为就变了。
@@ -151,6 +154,7 @@ export function toPatch(draft: ChannelDraft): ChannelPatch {
     // 三态原样送出：`null`＝回到跟随全局，`0`＝这台机器人不带历史。
     historyTurns: draft.historyTurns,
     bindUrl: draft.bindUrl.trim(),
+    markdown: draft.markdown,
     overrideEvents: draft.overrideEvents,
     events: draft.overrideEvents ? { ...draft.events } : null,
     overrideContent: draft.overrideContent,
@@ -198,6 +202,7 @@ export function createDraft(
     // 新机器人跟随全局的历史轮数：不替用户做「带不带历史」这个决定。
     historyTurns: null,
     bindUrl: '',
+    markdown: false,
     overrideEvents: false,
     events: { ...global.events },
     overrideContent: false,

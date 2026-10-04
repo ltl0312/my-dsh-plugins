@@ -647,3 +647,38 @@ describe('ChannelManager 的逐台投递', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 })
+
+/**
+ * QQ 原生 Markdown 开关（`channels[].markdown`）。
+ *
+ * 缺省是**纯文本**：`msg_type: 2` 的卡片宽度由 QQ 客户端写死（桌面端实测约
+ * 600px，普通文本气泡约 850px），在电脑上看着像「只有手机宽」。这条链路要保证
+ * 「没配 = false」「配了就原样回显」「不碰它就别动它」三件事。
+ */
+describe('QQ 原生 Markdown 开关', () => {
+  it('没配 markdown 时，脱敏视图回 false（界面默认关）', () => {
+    const base = configWith(channel())
+    expect(redactChannel(base.channels[0] as ChannelConfig, base).markdown).toBe(false)
+  })
+
+  it('补丁能打开，并原样回显', () => {
+    const base = configWith(channel())
+    const patched = patchChannel(base, { id: 'qq-main', markdown: true })
+    expect(patched.markdown).toBe(true)
+    const view = redactChannel(patched, { ...base, channels: [patched] })
+    expect(view.markdown).toBe(true)
+  })
+
+  it('补丁里没带这个字段时保持原值（别的字段照样改）', () => {
+    const base = configWith(channel({ markdown: true }))
+    const patched = patchChannel(base, { id: 'qq-main', label: '主机器人' })
+    expect(patched.markdown).toBe(true)
+    expect(patched.label).toBe('主机器人')
+  })
+
+  it('非布尔值被拒', () => {
+    const base = configWith(channel())
+    const result = applyPatch(base, { channels: [{ id: 'qq-main', markdown: 'yes' }] })
+    expect(result.ok).toBe(false)
+  })
+})

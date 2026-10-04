@@ -18,6 +18,7 @@
 // 早上才长按引用回复。
 
 import { createHash } from 'node:crypto'
+import { toPlainText } from './markdown.js'
 import type { ActionValue, RouteEntry, RouteState } from './types.js'
 
 /** 显式前缀：短会话 id（4-12 位十六进制）或完整 `session-<uuid>`，后跟正文。 */
@@ -25,6 +26,20 @@ const PREFIX_RE = /^(?:session-)?([0-9a-fA-F]{4,12})[\s:：,，]+([\s\S]+)$/
 
 /** 内存里保留多少条最近发出的通知正文，供引用正文的模糊反查。 */
 const RECENT_TEXT_LIMIT = 120
+
+/**
+ * 引用正文反查用的规范化。
+ *
+ * 两边对不上的原因有两个，都必须抹掉：
+ *   1. 我们登记的是**自己拼出来的**文本，平台回传的是**它渲染出来的**文本——
+ *      QQ 现在发的是 `msg_type: 2` 原生 Markdown（`**标题**\n\n正文`），飞书发的是
+ *      `标题\n正文`，而登记的只有一份。
+ *   2. 平台会把长引用截断，换行也可能被并掉。
+ * 所以比较之前先各自压成纯文本、再把所有空白折成一个空格。
+ */
+function normalizeForMatch(text: string): string {
+  return toPlainText(text).replace(/\s+/g, ' ').trim()
+}
 
 export interface RouteRecordInput {
   messageId: string
@@ -151,10 +166,14 @@ export class RouteTable {
     if (input.refIdx) this.#state.byRefIdx[input.refIdx] = entry
     if (input.threadId) this.#state.byThread[input.threadId] = entry
     if (input.text) {
-      const hash = hashText(input.text)
-      this.#state.byContent[hash] = entry
-      this.#recent.push({ sessionId: input.sessionId, text: input.text, time })
-      if (this.#recent.length > RECENT_TEXT_LIMIT) this.#recent.shift()
+      // 登记与反查用同一套规范化（见 normalizeForMatch），否则两边永远对不上。
+      const normalized = normalizeForMatch(input.text)
+      if (normalized) {
+        const hash = hashText(normalized)
+        this.#state.byContent[hash] = entry
+        this.#recent.push({ sessionId: input.sessionId, text: normalized, time })
+        if (this.#recent.length > RECENT_TEXT_LIMIT) this.#recent.shift()
+      }
     }
     this.#state.latest = entry
     if (input.intervention) this.#state.lastIntervention = entry
@@ -247,10 +266,13 @@ export class RouteTable {
       if (byThread) return this.#hit(byThread, 'quoted-id')
     }
     if (quotedText) {
-      const exact = this.#liveEntry(this.#state.byContent[hashText(quotedText)], now)
+      // 平台回传的引用正文可能是渲染后的纯文本，也可能是原始 Markdown（QQ 的
+      // `msg_type: 2` 就是原文），所以两边都先规范化再比。
+      const normalizedQuoted = normalizeForMatch(quotedText)
+      const exact = this.#liveEntry(this.#state.byContent[hashText(normalizedQuoted)], now)
       if (exact) return this.#hit(exact, 'quoted-text')
       // 平台会把长引用截断，所以再做一次前缀匹配（从新到旧，优先最近发的）。
-      const normalized = quotedText.trim().slice(0, 80)
+      const normalized = normalizedQuoted.slice(0, 80)
       if (normalized.length >= 8) {
         for (let i = this.#recent.length - 1; i >= 0; i -= 1) {
           const entry = this.#recent[i]!

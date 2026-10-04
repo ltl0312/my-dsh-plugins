@@ -170,6 +170,9 @@ const ZH = {
   historyFollowGlobal: '跟随全局：当前 {n} 轮。',
   groupChatId: '群 ID',
   groupChatIdHint: '可选。填了之后这个群也会收到通知（飞书用 chat_id，QQ 用群 openid）。',
+  markdown: 'QQ 原生 Markdown',
+  markdownHint:
+    '开启后正文走 QQ 的 Markdown 卡片（有加粗标题）；但卡片宽度由 QQ 客户端写死，电脑上比普通消息窄一截。关掉发纯文本，观感与普通消息一致。',
 
   wizard: '接入向导',
   wizardHint: '四步走完就能用。每一步都可以跳过——跳过不会丢掉已经保存的东西。',
@@ -374,6 +377,9 @@ const EN: Dict = {
   historyFollowGlobal: 'Following global: {n} turns.',
   groupChatId: 'Group id',
   groupChatIdHint: 'Optional. When set, that group is notified too (chat_id on Feishu, group openid on QQ).',
+  markdown: 'QQ native Markdown',
+  markdownHint:
+    'Sends the body as a QQ Markdown card (bold title). The card width is hard-coded by the QQ client, so it looks narrower than a normal message on desktop. Turn it off to send plain text.',
 
   wizard: 'Setup guide',
   wizardHint: 'Four steps and you are done. Every step can be skipped — skipping never discards what is saved.',

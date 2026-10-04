@@ -155,6 +155,11 @@ export interface PendingSettlement {
   reason?: string
   /** 结算后要回给用户的确认文案。 */
   echo?: string
+  /**
+   * true = **还没**结算，只是进了「等你说自定义答案」的状态（用户回了「N+1. 自定义
+   * 回答」那个序号）。调用方照常把 `reason` 回给用户，但别清等待记录。
+   */
+  armed?: boolean
 }
 
 interface PendingBase {
@@ -181,6 +186,13 @@ interface PendingQuestion extends PendingBase {
   labels: string[]
   /** 宿主说这题可以多选。文本作答时用来把「1 3」拆成两个选项。 */
   multiSelect?: boolean
+  /**
+   * 用户已经回了「自定义回答」那个序号，正等着他把答案发过来。
+   *
+   * 这条路径存在的理由：QQ 单聊的按钮不一定渲染，而「自定义回答」不是一个真选项——
+   * 它得两段式（先回序号，再发文本），中间那句「4」不能被当成答案。
+   */
+  awaitingCustom?: boolean
   resolve: (answer: AskUserQuestionAnswerLike) => void
 }
 
@@ -343,16 +355,64 @@ export class InteractionBridge {
     this.#announced.clear()
   }
 
+  /**
+   * 这个按钮该结算哪一条 pending。
+   *
+   * 先用按钮自带的 `requestId`（两条生产者路径算出同一个 id 时就是它）。对不上时再用
+   * **两条路都认得的身份**找一次：先按「会话 + 题目 id」（`#liveQuestions`，精确），再退化到
+   * 「这个会话里唯一一条同种类的 pending」（审批没有题目 id）。
+   *
+   * 为什么必须有这一层：同一个提问会从 `session/event` 的 `tool/call`（带真实 callId）和
+   * `user-questions/request` waterfall（宿主没给 callId 时桥自己合成 `question-<n>-<时间戳>`）
+   * 各来一次，而**通知可能是任意一条投递的**——日志兜底那条先跑时，通知里的按钮带的就是
+   * `call_00_…`，`#pending` 里却只有桥合成的那个 id，点下去只会得到「这个请求已经结束或
+   * 过期了」（现场 05:20:40 那条「等待我回答」，用户点了没反应）。文本作答不受影响，因为它
+   * 本来就是按「会话 + 最新一条」找的（`settleText`）。
+   *
+   * 唯一性判据是必要的：同种类有两条以上等待时宁可拒绝，也不能拿一个旧按钮去结算新请求。
+   */
+  #resolvePending(value: ActionValue): Pending | undefined {
+    const requestId = value.requestId
+    if (requestId) {
+      const exact = this.#pending.get(requestId)
+      if (exact) return exact
+    }
+
+    if (value.questionId) {
+      const live = this.#liveQuestions.get(`${value.sessionId}|${value.questionId}`)
+      const byQuestion = live === undefined ? undefined : this.#pending.get(live)
+      if (byQuestion) return byQuestion
+    }
+
+    const wanted: Pending['kind'] | undefined =
+      value.kind === 'approval' ? 'approval' : value.kind === 'plan' ? 'plan' : value.kind === 'question' ? 'question' : undefined
+    if (wanted === undefined) return undefined
+
+    let found: Pending | undefined
+    for (const pending of this.#pending.values()) {
+      if (pending.sessionId !== value.sessionId) continue
+      if (pending.kind !== wanted) continue
+      if (found) return undefined
+      found = pending
+    }
+    return found
+  }
+
   /** 按钮 / 文本回复结算一个等待中的请求。 */
   settle(value: ActionValue): PendingSettlement {
     const requestId = value.requestId
-    if (!requestId) return { ok: false, reason: '这个按钮没有携带请求 id' }
-    const pending = this.#pending.get(requestId)
+    if (!requestId && !value.questionId) return { ok: false, reason: '这个按钮没有携带请求 id' }
+    const pending = this.#resolvePending(value)
     if (!pending) return { ok: false, reason: '这个请求已经结束或过期了' }
+    const key = pending.requestId
+    if (requestId && requestId !== key) {
+      // 留 info：这就是「按钮点了没反应」的直接证据（通知由另一条生产者路径投递）。
+      this.#options.log?.(`按钮带的 id（${requestId}）不是注册的那条（${key}），按会话身份结算`)
+    }
 
     if (pending.kind === 'approval') {
       const allow = value.choice === 'allow'
-      this.#finish(requestId, pending)
+      this.#finish(key, pending)
       pending.resolve(allow ? 'allowed-once' : 'rejected')
       return { ok: true, echo: allow ? '已允许' : '已拒绝' }
     }
@@ -360,7 +420,7 @@ export class InteractionBridge {
     // question / plan
     const chosen = this.#pickOption(pending, value)
     if (!chosen.ok) return { ok: false, reason: chosen.reason }
-    this.#finish(requestId, pending)
+    this.#finish(key, pending)
     pending.resolve({ answers: [{ id: pending.questionId, selected: [chosen.label] }] })
     return { ok: true, echo: `已选择「${chosen.label}」` }
   }
@@ -375,6 +435,12 @@ export class InteractionBridge {
    *
    * 返回 `undefined` 表示「这条消息不是答案」（没有等待中的请求，或者文本明显是别的
    * 意思），调用方照常把它当普通发言注入会话。
+   *
+   * 单选提问还多一条**两段式**的自定义作答：正文里那行「N+1. 自定义回答」（见
+   * `render.ts#questionBody`）回过来时只把这道题标成 `awaitingCustom` 并返回
+   * `{ok:false, armed:true}`——**不结算**，等下一句话原样当答案（`custom` 字段）。
+   * 不这样的话「4」会被 `readOneOption` 当成越界序号，然后掉进自由文本兜底，直接把
+   * 数字「4」当成用户想要的答案。
    */
   settleText(sessionId: string, text: string): PendingSettlement | undefined {
     const trimmed = text.trim()
@@ -396,10 +462,45 @@ export class InteractionBridge {
       return { ok: true, echo: allow ? '已允许' : '已拒绝' }
     }
 
-    const chosen = readOptionAnswer(newest, trimmed)
+    // 到这儿只剩提问 / 计划。收进一个 const：闭包里用 `newest` 会把窄化丢掉。
+    const question = newest
+
+    // 已经进了「等你说自定义答案」的状态：这一句原样就是答案，不再当选项解析
+    // （否则用户答「2」会被当成选了第二个选项）。
+    if (question.awaitingCustom) {
+      question.awaitingCustom = false
+      this.#finish(requestId, question)
+      question.resolve({ answers: [{ id: question.questionId, selected: [], custom: trimmed }] })
+      return { ok: true, echo: `已按自定义答案「${trimmed}」作答` }
+    }
+
+    // 「N+1. 自定义回答」：只是**进入**等待状态，这一句本身不是答案。
+    if (readCustomRequest(question, trimmed)) {
+      question.awaitingCustom = true
+      return {
+        ok: false,
+        armed: true,
+        reason: '好，把你要自定义的答案发过来（下一条消息就是答案）。',
+      }
+    }
+
+    const chosen = readOptionAnswer(question, trimmed)
     if (!chosen || chosen.length === 0) return undefined
-    this.#finish(requestId, newest)
-    newest.resolve({ answers: [{ id: newest.questionId, selected: chosen }] })
+    this.#finish(requestId, question)
+    // 不在候选里的就是自由文本。宿主的形状是 `selected: [] + custom: <文本>`，GUI 的
+    // 输入框回传的也是 `custom`——把自由文本塞进 `selected` 会让模型以为用户点了某个
+    // 名字很奇怪的选项。
+    const selected = chosen.filter((item) => question.labels.includes(item))
+    const custom = chosen.filter((item) => !question.labels.includes(item))
+    question.resolve({
+      answers: [
+        {
+          id: question.questionId,
+          selected,
+          ...(custom.length > 0 ? { custom: custom.join(' ') } : {}),
+        },
+      ],
+    })
     return { ok: true, echo: `已选择「${chosen.join('、')}」` }
   }
 
@@ -661,7 +762,30 @@ export interface AnswerTarget {
  */
 export function matchAnswer(target: AnswerTarget, text: string): boolean {
   if (target.kind === 'approval') return readApprovalAnswer(text) !== undefined
+  // 「自定义回答」也得算「像作答」：它落在候选之外，`readOptionAnswer` 认不出来，可它
+  // 确实是作答（只是还要再等一句话），不然那句「4」会被当普通发言注进会话。
+  if (readCustomRequest(target, text)) return true
   return readOptionAnswer(target, text) !== undefined
+}
+
+/**
+ * 「自定义回答」那一行的序号＝候选数 + 1（`render.ts#questionBody` 就是这么编的）。
+ *
+ * 它**不是**宿主的选项，所以只有单选提问才有：多选的作答按空格拆 token，塞不进这套
+ * 两段式；plan-review 只认「批准 / 不批准」和序号，也不该多出一个自定义口子。
+ */
+function customSlotIndex(target: AnswerTarget): number | undefined {
+  if (target.kind !== 'question') return undefined
+  if (target.multiSelect === true) return undefined
+  return target.labels.length + 1
+}
+
+/** 这句文本是不是「我要自己写答案」？（只认那个序号） */
+function readCustomRequest(target: AnswerTarget, text: string): boolean {
+  const slot = customSlotIndex(target)
+  if (slot === undefined) return false
+  const index = /^(\d{1,2})\s*[.、)）]?$/.exec(text.trim())
+  return index !== null && Number(index[1]) === slot
 }
 
 /**

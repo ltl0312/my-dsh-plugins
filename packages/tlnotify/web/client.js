@@ -2420,6 +2420,7 @@ window.__ModuleLoader__.load({
           sessionFilter: formatSessionFilter(channel.sessionFilter),
           historyTurns: typeof channel.historyTurns === "number" ? channel.historyTurns : null,
           bindUrl: channel.bindUrl ?? "",
+          markdown: channel.markdown === true,
           overrideEvents: channel.overrideEvents,
           // 即使没开覆盖也照抄生效值：用户点开「自定义」的那一刻，看到的应该是
           // **当前正在生效的那份**，而不是内置默认——否则一开开关行为就变了。
@@ -2450,6 +2451,7 @@ window.__ModuleLoader__.load({
           // 三态原样送出：`null`＝回到跟随全局，`0`＝这台机器人不带历史。
           historyTurns: draft.historyTurns,
           bindUrl: draft.bindUrl.trim(),
+          markdown: draft.markdown,
           overrideEvents: draft.overrideEvents,
           events: draft.overrideEvents ? { ...draft.events } : null,
           overrideContent: draft.overrideContent,
@@ -2489,6 +2491,7 @@ window.__ModuleLoader__.load({
           // 新机器人跟随全局的历史轮数：不替用户做「带不带历史」这个决定。
           historyTurns: null,
           bindUrl: "",
+          markdown: false,
           overrideEvents: false,
           events: { ...global.events },
           overrideContent: false,
@@ -2990,7 +2993,15 @@ window.__ModuleLoader__.load({
             disabled: props.busy,
             onCommit: (value) => props.onChange({ groupChatId: value })
           }
-        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy || props.isDefault, onClick: () => props.onDefault(draft.id) }, t("setDefault")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "danger", disabled: props.busy, onClick: props.onRemove }, t("remove"))));
+        )), draft.type === "qq" ? /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("markdown"), hint: t("markdownHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.markdown,
+            disabled: props.busy,
+            label: draft.markdown ? t("on") : t("off"),
+            onChange: (next) => props.onChange({ markdown: next })
+          }
+        )) : null, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy || props.isDefault, onClick: () => props.onDefault(draft.id) }, t("setDefault")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "danger", disabled: props.busy, onClick: props.onRemove }, t("remove"))));
       }
       function ProvisionBlock(props) {
         const { t, state } = props;
@@ -3747,6 +3758,8 @@ window.__ModuleLoader__.load({
         historyFollowGlobal: "\u8DDF\u968F\u5168\u5C40\uFF1A\u5F53\u524D {n} \u8F6E\u3002",
         groupChatId: "\u7FA4 ID",
         groupChatIdHint: "\u53EF\u9009\u3002\u586B\u4E86\u4E4B\u540E\u8FD9\u4E2A\u7FA4\u4E5F\u4F1A\u6536\u5230\u901A\u77E5\uFF08\u98DE\u4E66\u7528 chat_id\uFF0CQQ \u7528\u7FA4 openid\uFF09\u3002",
+        markdown: "QQ \u539F\u751F Markdown",
+        markdownHint: "\u5F00\u542F\u540E\u6B63\u6587\u8D70 QQ \u7684 Markdown \u5361\u7247\uFF08\u6709\u52A0\u7C97\u6807\u9898\uFF09\uFF1B\u4F46\u5361\u7247\u5BBD\u5EA6\u7531 QQ \u5BA2\u6237\u7AEF\u5199\u6B7B\uFF0C\u7535\u8111\u4E0A\u6BD4\u666E\u901A\u6D88\u606F\u7A84\u4E00\u622A\u3002\u5173\u6389\u53D1\u7EAF\u6587\u672C\uFF0C\u89C2\u611F\u4E0E\u666E\u901A\u6D88\u606F\u4E00\u81F4\u3002",
         wizard: "\u63A5\u5165\u5411\u5BFC",
         wizardHint: "\u56DB\u6B65\u8D70\u5B8C\u5C31\u80FD\u7528\u3002\u6BCF\u4E00\u6B65\u90FD\u53EF\u4EE5\u8DF3\u8FC7\u2014\u2014\u8DF3\u8FC7\u4E0D\u4F1A\u4E22\u6389\u5DF2\u7ECF\u4FDD\u5B58\u7684\u4E1C\u897F\u3002",
         stepLabel: "\u7B2C {n} \u6B65",
@@ -3929,6 +3942,8 @@ window.__ModuleLoader__.load({
         historyFollowGlobal: "Following global: {n} turns.",
         groupChatId: "Group id",
         groupChatIdHint: "Optional. When set, that group is notified too (chat_id on Feishu, group openid on QQ).",
+        markdown: "QQ native Markdown",
+        markdownHint: "Sends the body as a QQ Markdown card (bold title). The card width is hard-coded by the QQ client, so it looks narrower than a normal message on desktop. Turn it off to send plain text.",
         wizard: "Setup guide",
         wizardHint: "Four steps and you are done. Every step can be skipped \u2014 skipping never discards what is saved.",
         stepLabel: "Step {n}",

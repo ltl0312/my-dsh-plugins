@@ -951,6 +951,16 @@ function AdvancedTab(props: BotSettingsPageProps): React.ReactElement {
           onCommit={(value) => props.onChange({ groupChatId: value })}
         />
       </Row>
+      {draft.type === 'qq' ? (
+        <Row label={t('markdown')} hint={t('markdownHint')}>
+          <Check
+            checked={draft.markdown}
+            disabled={props.busy}
+            label={draft.markdown ? t('on') : t('off')}
+            onChange={(next) => props.onChange({ markdown: next })}
+          />
+        </Row>
+      ) : null}
       <div className="tln-actions">
         <Btn size="sm" disabled={props.busy || props.isDefault} onClick={() => props.onDefault(draft.id)}>
           {t('setDefault')}

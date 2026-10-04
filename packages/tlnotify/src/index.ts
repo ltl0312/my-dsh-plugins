@@ -1465,7 +1465,21 @@ class Tlnotify {
     const held = this.#freshWaiting(event.sessionId)
     if (!held || held.text === undefined) return false
     const settlement = this.#bridge.settleText(event.sessionId, held.text)
-    if (!settlement?.ok) return false
+    if (!settlement) return false
+    if (!settlement.ok && settlement.armed) {
+      // 他抢在 pending 就绪前回的是「自定义回答」那个序号：桥已经进入等待状态，这句
+      // 「4」本身不是答案——清掉攥住的记录，别让它 60 秒后被当普通发言补投出去。
+      // 通知他早就收到过（攥住的前提就是发过等待通知），所以这里不再补发。
+      this.#clearWaiting(event.sessionId)
+      this.#log.info(
+        `抢在提问就绪前选了「自定义回答」（${this.#label(event.sessionId)}），等他把答案发过来`,
+      )
+      if (held.channelId) {
+        await this.#echo(held.channelId, settlement.reason ?? '好，把你要自定义的答案发过来。')
+      }
+      return true
+    }
+    if (!settlement.ok) return false
     this.#clearWaiting(event.sessionId)
     this.#log.info(
       `抢在提问就绪前回过来的作答已经生效（${this.#label(event.sessionId)}）：${settlement.echo ?? ''}`,
@@ -1761,6 +1775,11 @@ class Tlnotify {
       const settlement = this.#bridge.settleText(sessionId, text)
       if (!settlement) continue
       if (!settlement.ok) {
+        if (settlement.armed) {
+          this.#log.info(
+            `用户选了「自定义回答」（${channelId} → ${this.#label(sessionId)}），等他把答案发过来`,
+          )
+        }
         await this.#echo(channelId, settlement.reason ?? '这条回复没能对上等待中的请求')
         return true
       }

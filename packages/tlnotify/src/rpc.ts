@@ -99,6 +99,8 @@ export function redactChannel(
     events: { ...effective.events },
     overrideContent: config.overrideContent === true,
     content: { ...effective.content },
+    // 缺省 = 纯文本（QQ 的 markdown 卡片宽度是客户端写死的，比普通气泡窄）。
+    markdown: config.markdown === true,
     ...(config.appId ? { appId: config.appId } : {}),
     ...(config.targetChatId ? { targetChatId: config.targetChatId } : {}),
     ...(config.groupChatId ? { groupChatId: config.groupChatId } : {}),
@@ -382,6 +384,7 @@ const CHANNEL_PATCH_KEYS: readonly string[] = Object.freeze([
   'appSecret',
   'targetChatId',
   'groupChatId',
+  'markdown',
   'feishuAppId',
   'feishuAppSecret',
   'feishuReceiveId',
@@ -477,6 +480,10 @@ function applyChannelPatch(base: ChannelConfig | undefined, raw: unknown, index:
       if (typeof item !== 'string') reject(`${prefix}sessionFilter[${i}]`, '字符串')
       return item
     })
+  }
+  // QQ 原生 Markdown 卡片开关；缺省（不发这个字段）= 保持原值，新通道解析成纯文本。
+  if (patch.markdown !== undefined) {
+    next.markdown = requireBoolean(patch.markdown, `${prefix}markdown`)
   }
 
   const textFields = [

@@ -159,6 +159,17 @@ export interface ActionValue {
   sessionId: string
   /** 审批 id / 提问 callId。 */
   requestId?: string
+  /**
+   * 提问的题目 id（`questions[0].id`）。
+   *
+   * 按钮上的 `requestId` 是**投递这条通知的那条生产者路径**算出来的：`session/event` 的
+   * `tool/call` 带真实 callId，而 `user-questions/request` waterfall 在宿主没给 callId 时
+   * 会自己合成 `question-<n>-<时间戳>`。两条路都可能抢到投递权（现场 05:20:39 是日志兜底
+   * 先跑），于是通知里的 id 和桥注册 pending 用的键对不上，点按钮就是「这个请求已经结束
+   * 或过期了」。题目 id 是两条路都认得的身份，`InteractionBridge#resolvePending` 拿它做
+   * 兜底匹配（见 inject.ts）。
+   */
+  questionId?: string
   /** 审批：'allow' | 'reject'；提问：选项 label。 */
   choice?: string
   /** 提问：选项下标（label 可能重复，下标不会）。 */
@@ -187,7 +198,16 @@ export type NotificationKind = EventKind | 'echo'
 export interface Notification {
   /** 标题：`DSH · <项目> · <短id> · <事件>` */
   title: string
+  /** 纯文本正文：Markdown 已经压平，给飞书这类只认 `text` / `lark_md` 的通道用。 */
   body: string
+  /**
+   * 原生 Markdown 正文，与 `body` 同源、同长度上限。
+   *
+   * QQ 现在发 `msg_type: 2`（原生 Markdown，见 `channels/qq.ts`），助手回复里的
+   * `##`、`**`、表格、代码块都能真的渲染出来；飞书没有这个能力，所以两版正文一起
+   * 产出，由通道自己挑（`notification.markdown ?? notification.body`）。
+   */
+  markdown?: string
   actions: readonly NotificationAction[]
   level: NotificationLevel
   sessionId: string
@@ -309,6 +329,15 @@ export interface ChannelConfig {
   targetChatId?: string
   /** 群聊 openid；填了就投递到群，否则投到 targetChatId 的单聊。 */
   groupChatId?: string
+  /**
+   * QQ 用原生 Markdown（`msg_type: 2`）发正文，默认 **false**。
+   *
+   * 为什么默认关：QQ 客户端把 markdown 消息画在一张**固定宽度**的卡片里（实测
+   * 桌面端约 600px，而同一窗口里普通文本气泡约 850px），且不随窗口自适应；
+   * 关掉之后正文走纯文本（`msg_type: 0`），观感与普通消息一致。见 README
+   * 「QQ 原生 Markdown」一节。
+   */
+  markdown?: boolean
   // ---- 飞书 ----
   /** 飞书自建应用 App ID。 */
   feishuAppId?: string

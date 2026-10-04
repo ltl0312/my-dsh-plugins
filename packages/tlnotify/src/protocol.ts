@@ -165,6 +165,13 @@ export interface RedactedChannel {
   overrideContent: boolean
   content: ContentConfig
   /**
+   * QQ 是否用原生 Markdown 卡片发正文（默认 false = 纯文本）。
+   *
+   * 卡片宽度是 QQ 客户端写死的（桌面端实测约 600px，普通文本气泡约 850px），
+   * 所以默认关掉；设置页把它渲染成一个开关。
+   */
+  markdown: boolean
+  /**
    * 正文附带该会话最近几轮历史。
    *
    * **缺省（`undefined`）表示跟随全局** `config.session.context.previousTurns`；
@@ -282,6 +289,8 @@ export interface ChannelPatch {
   /** 单会话模式绑定的会话 id；空串 / `null` = 清空（清空后单会话模式谁都不推）。 */
   sessionId?: string | null
   sessionFilter?: string[]
+  /** QQ 原生 Markdown 卡片开关；省略 = 保持原值。 */
+  markdown?: boolean
   /**
    * 正文附带的历史轮数。`null` = 回到「跟随全局」，`0` = 这台机器人不带历史。
    */

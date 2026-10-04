@@ -112,6 +112,23 @@ describe('第二层：长按引用回复', () => {
     expect(hit.source).toBe('quoted-text')
   })
 
+  it('QQ 发的 Markdown 正文（标题加粗 + 空行）也能反查回会话', () => {
+    // QQ 通道发出去的是 `**标题**\n\n正文`（见 composeQqText），而登记用的是
+    // `标题\n正文`。两边不规范化的话，长按引用这条消息就反查不到会话了。
+    const routes = table()
+    routes.record({
+      messageId: 'm1',
+      sessionId: A,
+      text: 'DSH · proj · 519cc141 · 任务完成\n已改完 3 个文件',
+    })
+    const hit = routes.resolve({
+      text: '继续',
+      quotedText: '**DSH · proj · 519cc141 · 任务完成**\n\n已改完 3 个文件',
+    })
+    expect(hit.sessionId).toBe(A)
+    expect(hit.source).toBe('quoted-text')
+  })
+
   it('引用正文被平台截断时按前缀匹配，且优先最近发出的一条', () => {
     const routes = table()
     const older = 'DSH · proj · 519cc141 · 任务完成\n很久以前的那条正文，后面还有很多字'

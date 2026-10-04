@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { InteractionBridge, matchAnswer, type AnswerTarget } from '../src/inject.js'
-import type { RawEvent } from '../src/types.js'
+import type { ActionValue, RawEvent } from '../src/types.js'
 
 interface Harness {
   bridge: InteractionBridge
@@ -130,7 +130,11 @@ describe('InteractionBridge 文本作答', () => {
       ok: true,
       echo: '已选择「用你自己的判断」',
     })
-    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['用你自己的判断'] }] })
+    // 自由文本走宿主的 `custom` 字段（GUI 的输入框回传的就是它），不塞进 `selected`——
+    // 塞进去模型会以为用户点了一个名字很奇怪的选项。
+    await expect(answer).resolves.toEqual({
+      answers: [{ id: 'q1', selected: [], custom: '用你自己的判断' }],
+    })
   })
 
   it('多选按空格 / 逗号 / 顿号拆成多个选项', async () => {
@@ -269,8 +273,16 @@ describe('matchAnswer：提问还没就绪时的判读', () => {
     expect(matchAnswer(multi, '')).toBe(false)
   })
 
+  it('「自定义回答」那个序号也算「像作答」（否则那句「4」会被当普通发言注进会话）', () => {
+    expect(matchAnswer(question, '4')).toBe(true)
+    expect(matchAnswer({ kind: 'question', labels: ['甲', '乙'] }, '3')).toBe(true)
+    // 多选和 plan 没有这个入口：越界就是越界。
+    expect(matchAnswer({ kind: 'question', labels: ['甲', '乙', '丙'], multiSelect: true }, '4')).toBe(false)
+    expect(matchAnswer(plan, '4')).toBe(false)
+  })
+
   it('与 settleText 的判读一致：matchAnswer 说命中，有 pending 时就必须能结算', async () => {
-    const words = ['1', '2.', '方案甲', '方案乙', '9', '', '我选第一个', '这个计划还行']
+    const words = ['1', '2.', '4', '方案甲', '方案乙', '9', '', '我选第一个', '这个计划还行']
     for (const word of words) {
       const h = makeHarness()
       void h.ask(questionRequest({ callId: 'req-x' }))
@@ -279,6 +291,54 @@ describe('matchAnswer：提问还没就绪时的判读', () => {
       expect(settled, `「${word}」的判读两边必须一致`).toBe(matched)
       h.bridge.dispose()
     }
+  })
+})
+
+/**
+ * 「N+1. 自定义回答」那条两段式的路（用户 m00524）。
+ *
+ * 它不是宿主给的选项，所以正文里那一行的序号一定落在候选之外——不特殊处理的话
+ * `readOneOption` 会判它越界，然后掉进自由文本兜底，直接把数字「4」当成用户想要的
+ * 答案。所以：先回序号 = 进入等待状态（不结算），下一句话原样当答案。
+ */
+describe('自定义回答（先回序号，再发文本）', () => {
+  it('回「4」只进入等待状态，下一句话才是答案', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest())
+    expect(h.bridge.settleText('sess-1', '4')).toEqual({
+      ok: false,
+      armed: true,
+      reason: '好，把你要自定义的答案发过来（下一条消息就是答案）。',
+    })
+    expect(h.bridge.pendingCount).toBe(1)
+
+    // 答案原样收下——哪怕它长得像序号（这正是两段式的意义：不再解析）。
+    expect(h.bridge.settleText('sess-1', '2')).toEqual({ ok: true, echo: '已按自定义答案「2」作答' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: [], custom: '2' }] })
+    expect(h.bridge.pendingCount).toBe(0)
+  })
+
+  it('序号跟着候选数走：两个候选时「3」才是自定义', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ labels: ['甲', '乙'] }))
+    expect(h.bridge.settleText('sess-1', '2')?.echo).toBe('已选择「乙」')
+
+    const other = makeHarness()
+    void other.ask(questionRequest({ labels: ['甲', '乙'] }))
+    expect(other.bridge.settleText('sess-1', '3')).toMatchObject({ ok: false, armed: true })
+    expect(other.bridge.pendingCount).toBe(1)
+  })
+
+  it('多选与 plan 都没有这个入口：越界序号既不结算也不进入等待', async () => {
+    const multi = makeHarness()
+    void multi.ask(questionRequest({ labels: ['甲', '乙'], multiSelect: true }))
+    expect(multi.bridge.settleText('sess-1', '3')).toBeUndefined()
+    expect(multi.bridge.pendingCount).toBe(1)
+
+    const plan = makeHarness()
+    void plan.ask(questionRequest({ plan: true }))
+    expect(plan.bridge.settleText('sess-1', '4')).toBeUndefined()
+    expect(plan.bridge.pendingCount).toBe(1)
   })
 })
 
@@ -340,6 +400,91 @@ describe('同一个问题被重复投递', () => {
     await Promise.resolve()
     expect(h.pending).toHaveLength(2)
     h.bridge.dispose()
+  })
+})
+
+/**
+ * 按钮那条路：通知里的 `requestId` 由**投递这条通知的生产者路径**决定，而注册 pending 的是
+ * waterfall 桥。两条路的 id 可能不是一套——宿主不给 callId 时桥自己合成
+ * `question-<n>-<时间戳>`，而日志兜底那条带的是真实 `call_00_…`，现场 05:20:40 那条通知
+ * 就是这么发出去的：点按钮回「这个请求已经结束或过期了」。所以结算必须能靠「会话 + 题目 id」
+ * 或「同种类唯一一条等待」把 pending 找回来（见 `InteractionBridge#resolvePending`）。
+ */
+describe('按钮带的 id 和注册的 id 不是一套时', () => {
+  const questionButton = (requestId: string, choice: string, questionId?: string): ActionValue => ({
+    v: 1,
+    kind: 'question',
+    sessionId: 'sess-1',
+    requestId,
+    choice,
+    ...(questionId === undefined ? {} : { questionId }),
+  })
+
+  it('按「会话 + 题目 id」找回来结算（日志兜底先投递的现场）', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest({ callId: 'question-1-1791091239330' }))
+    expect(h.bridge.pendingCount).toBe(1)
+
+    expect(h.bridge.settle(questionButton('call_00_hqeXp7iU4Ko93c9gj2vr4685', '方案乙', 'q1'))).toEqual({
+      ok: true,
+      echo: '已选择「方案乙」',
+    })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案乙'] }] })
+    expect(h.bridge.pendingCount).toBe(0)
+  })
+
+  it('没有题目 id 时退化成「这个会话里唯一一条同种类等待」', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest({ callId: 'question-1-1791091239330' }))
+    expect(h.bridge.settle(questionButton('call_00_other', '方案甲'))).toEqual({ ok: true, echo: '已选择「方案甲」' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案甲'] }] })
+  })
+
+  it('审批也一样：没有题目 id，只能靠唯一性', async () => {
+    const h = makeHarness()
+    const answer = h.approve(approvalRequest({ callId: 'approval-1-1791091239330' }))
+    expect(
+      h.bridge.settle({ v: 1, kind: 'approval', sessionId: 'sess-1', requestId: 'call_00_appr', choice: 'allow' }),
+    ).toEqual({ ok: true, echo: '已允许' })
+    await expect(answer).resolves.toBe('allowed-once')
+    expect(h.bridge.pendingCount).toBe(0)
+  })
+
+  it('同种类有两条等待时拒绝：不能拿旧按钮去结算新请求', async () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ callId: 'question-1-1' }))
+    void h.ask(questionRequest({ callId: 'question-2-2' }))
+    expect(h.bridge.pendingCount).toBe(2)
+
+    expect(h.bridge.settle(questionButton('call_00_stale', '方案甲'))).toEqual({
+      ok: false,
+      reason: '这个请求已经结束或过期了',
+    })
+    expect(h.bridge.pendingCount).toBe(2)
+    h.bridge.dispose()
+  })
+
+  it('id 对得上时照旧精确匹配', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest({ callId: 'req-1' }))
+    expect(h.bridge.settle(questionButton('req-1', '方案丙'))).toEqual({ ok: true, echo: '已选择「方案丙」' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案丙'] }] })
+  })
+
+  it('两条都不是：照旧说「已经结束或过期了」', () => {
+    const h = makeHarness()
+    expect(h.bridge.settle(questionButton('call_00_none', '方案甲'))).toEqual({
+      ok: false,
+      reason: '这个请求已经结束或过期了',
+    })
+  })
+
+  it('一个 id 都没有的按钮照旧拒绝（载荷坏了）', () => {
+    const h = makeHarness()
+    expect(h.bridge.settle({ v: 1, kind: 'question', sessionId: 'sess-1' })).toEqual({
+      ok: false,
+      reason: '这个按钮没有携带请求 id',
+    })
   })
 })
 

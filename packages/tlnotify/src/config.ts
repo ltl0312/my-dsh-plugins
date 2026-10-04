@@ -294,6 +294,9 @@ const ChannelSchema = Schema.object({
   appSecret: Schema.string().role('secret').default('').description('QQ 机器人 AppSecret'),
   targetChatId: Schema.string().default('').description('QQ 单聊目标 openid（你自己）'),
   groupChatId: Schema.string().default('').description('QQ 群 openid（填了就投到群）'),
+  markdown: Schema.boolean()
+    .default(false)
+    .description('QQ 用原生 Markdown 卡片发（更窄、不随窗口自适应）；关掉则发纯文本'),
   feishuAppId: Schema.string().default('').description('飞书自建应用 App ID'),
   feishuAppSecret: Schema.string().role('secret').default('').description('飞书自建应用 App Secret'),
   feishuReceiveId: Schema.string().default('').description('飞书接收方 id'),

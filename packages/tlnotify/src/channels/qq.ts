@@ -9,8 +9,10 @@
 //
 // ── 两个必须记住的坑 ────────────────────────────────────────────────────────
 //
-// 1. 构造时一定要 `markdownSupport: false`。否则 SDK 会自动把 `msg_type` 改成 2
-//    并注入它自己的 `message_reference`，我们就失去了对消息形态的控制权。
+// 1. 消息形态**完全由我们指定**：`send()` 显式给 `msgType`，构造时 `markdownSupport`
+//    只影响 SDK 自己的 `sendText`。现在发的是原生 Markdown（`msg_type: 2` +
+//    `markdown.content`，标题与正文之间空一行），所以构造里给 `true` 保持一致；
+//    但真正决定形态的是 `send()` 里那对分支，别把两者搞混。
 //
 // 2. **`C2CMessageEvent` 类型里根本没有 `message_reference` 字段。** QQ 的「长按
 //    引用回复」在入站侧只能靠 `message_scene.ext` 里的 `ref_msg_idx` 还原，而
@@ -40,16 +42,18 @@ interface InlineKeyboardLike {
   content: { rows: { buttons: KeyboardButtonLike[] }[] }
 }
 
-interface ReplyTargetLike {
+export interface ReplyTargetLike {
   scope: 'c2c' | 'group'
   targetId: string
   msgId?: string
 }
 
-interface SendMessageOptionsLike {
+export interface SendMessageOptionsLike {
   target: ReplyTargetLike
   msgType?: number
   content?: string
+  /** 原生 Markdown 正文（`msgType: 2` 时用）。给了 `content` 就必须不给它，反之亦然。 */
+  markdown?: { content: string }
   keyboard?: InlineKeyboardLike
   extra?: Record<string, unknown>
 }
@@ -147,8 +151,9 @@ export class QqChannel implements Channel {
     const bot = new QQBot({
       appId,
       appSecret,
-      // 关掉 markdown 自动处理：否则 SDK 会替我们决定 msg_type 与 message_reference。
-      markdownSupport: false,
+      // SDK 的 `sendText()` 会按它决定 msg_type；我们自己的 `send()` 显式给，所以这里
+      // 只是别让 SDK 的默认值和实际形态对不上（默认 false 会发纯文本）。
+      markdownSupport: true,
       transport: 'websocket',
       tokenPrefetch: 'sync',
       logger: this.#sdkLogger(),
@@ -209,20 +214,15 @@ export class QqChannel implements Channel {
     const bot = this.#bot
     if (!bot) throw new Error(`QQ 通道「${this.id}」尚未连接`)
 
-    const text = `${notification.title}\n${notification.body}`.trim()
-    const keyboard = buildKeyboard(notification.actions)
     const target = this.#outboundTarget()
-
-    const response = await bot.send({
-      target,
-      msgType: 0, // 纯文本
-      content: text,
-      ...(keyboard ? { keyboard } : {}),
-      ...(target.msgId ? { extra: { msg_seq: this.#nextSeq(target.msgId) } } : {}),
-    })
+    // 通道没开 `markdown` 时把通知降级成纯文本（见 `applyMarkdownPolicy`）。
+    const effective = applyMarkdownPolicy(notification, this.#config.markdown)
+    const response = await bot.send(
+      buildSendPayload(effective, target, target.msgId ? { msg_seq: this.#nextSeq(target.msgId) } : undefined),
+    )
 
     const messageId = String(response?.id ?? '')
-    if (messageId) this.#sentText.set(messageId, text)
+    if (messageId) this.#sentText.set(messageId, composeQqText(effective))
     const refIdx = response?.ext_info?.ref_idx
     return refIdx ? { messageId, refIdx } : { messageId }
   }
@@ -432,6 +432,61 @@ export function inboundText(msg: Pick<InboundMessageLike, 'content' | 'msgElemen
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…（共 ${text.length} 字）` : text
+}
+
+/**
+ * 标题 + 正文的最终文本。
+ *
+ * 有 Markdown 正文（`notification.markdown`，见 `render.ts` 的双版正文）时给标题加粗、
+ * 与正文之间**空一行**：Markdown 里单个换行是「软换行」，会被并进同一段，标题就和正文
+ * 糊在一起了。没有 Markdown 版时退回纯文本，换行照旧单行。
+ */
+export function composeQqText(notification: Notification): string {
+  const markdown = notification.markdown
+  return markdown
+    ? `**${notification.title}**\n\n${markdown}`.trim()
+    : `${notification.title}\n${notification.body}`.trim()
+}
+
+/**
+ * 通道配置决定这次发送要不要用原生 Markdown。
+ *
+ * 抽成模块级函数是为了能直接单测。缺省（`markdown` 未设置 / false）= **纯文本**：
+ * QQ 客户端把 `msg_type: 2` 的消息画在一张固定宽度的卡片里（桌面端实测约
+ * 600px，而同一窗口里普通文本气泡约 850px），在电脑上看着像「只有手机宽」，
+ * 所以卡片改成显式开启。
+ *
+ * 降级方式是摘掉 `notification.markdown`——`buildSendPayload` / `composeQqText`
+ * 都只看这个字段，摘掉就等于「不许用卡片」。
+ */
+export function applyMarkdownPolicy(notification: Notification, markdown: boolean | undefined): Notification {
+  if (markdown === true || !notification.markdown) return notification
+  return { ...notification, markdown: undefined }
+}
+
+/**
+ * 拼出 QQ 的发送载荷。
+ *
+ * 抽成模块级函数是为了能直接单测（同 `buildKeyboard`）：纯文本（`msg_type: 0` +
+ * `content`）与原生 Markdown（`msg_type: 2` + `markdown.content`）是**互斥**的两种
+ * 载荷，发 Markdown 时多带一个外层 `content` 就会让 QQ 按纯文本处理（甚至报错），
+ * 而这种错误在宿主里完全静默。
+ */
+export function buildSendPayload(
+  notification: Notification,
+  target: ReplyTargetLike,
+  extra?: Record<string, unknown>,
+): SendMessageOptionsLike {
+  const text = composeQqText(notification)
+  const keyboard = buildKeyboard(notification.actions)
+  return {
+    target,
+    ...(notification.markdown
+      ? { msgType: 2, markdown: { content: text } }
+      : { msgType: 0, content: text }),
+    ...(keyboard ? { keyboard } : {}),
+    ...(extra ? { extra } : {}),
+  }
 }
 
 /**

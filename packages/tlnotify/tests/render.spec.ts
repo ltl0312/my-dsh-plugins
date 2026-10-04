@@ -186,9 +186,32 @@ describe('提问与审批正文', () => {
       options(),
     )
     expect(notification.body).toContain('要选哪个方案？')
-    expect(notification.body).toContain('可选：方案甲 / 方案乙')
+    // 选项编号分行（用户 m00524 要的），单选再补一行「自定义回答」——它的序号是
+    // 候选数 + 1，正好是文本作答时要回的那个数字。
+    expect(notification.body).toContain(
+      '可选：\n1. 方案甲\n2. 方案乙\n3. 自定义回答（先输入序号再输入文本）',
+    )
     // 按钮在 QQ 桌面端 / 老版本上不渲染，正文里这句提示才是可用的作答入口。
     expect(notification.body).toContain('回复序号或选项文字即可作答。')
+  })
+
+  it('多选时不出现「自定义回答」那一行（多选按空格拆 token，塞不进两段式）', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: {
+          project: 'DSH',
+          text: '选几个',
+          requestId: 'call-1',
+          options: [{ label: '甲' }, { label: '乙' }],
+          multiSelect: true,
+        },
+      }),
+      undefined,
+      options(),
+    )
+    expect(notification.body).toContain('可选：\n1. 甲\n2. 乙\n（可多选）')
+    expect(notification.body).not.toContain('自定义回答')
   })
 
   it('多选时加标注，并说明多个答案怎么隔开', () => {
@@ -217,6 +240,7 @@ describe('提问与审批正文', () => {
     )
     expect(notification.body).toContain('1. 甲 —— 最快')
     expect(notification.body).toContain('2. 乙')
+    expect(notification.body).toContain('3. 自定义回答（先输入序号再输入文本）')
   })
 
   it('审批正文点名工具与原因', () => {
@@ -581,7 +605,7 @@ describe('正文里的 Markdown 一律压成纯文本', () => {
       options(),
     )
     expect(notification.body).toContain('选哪个？')
-    expect(notification.body).toContain('可选：甲 / 乙')
+    expect(notification.body).toContain('可选：\n1. 甲\n2. 乙\n3. 自定义回答（先输入序号再输入文本）')
   })
 
   it('代码块内容原样保留：注释里的井号不是标题', () => {
@@ -598,5 +622,70 @@ describe('正文里的 Markdown 一律压成纯文本', () => {
     expect(notification.body).toContain('pnpm install')
     expect(notification.body).not.toContain('【安装依赖】')
     expect(notification.body).not.toContain('```')
+  })
+})
+
+describe('原生 Markdown 正文（给 QQ）', () => {
+  // 用户 m00673：QQ 其实能原生渲染 Markdown，前提是发 `msg_type: 2`。于是正文要出两
+  // 版——`body`（纯文本，给飞书与兜底）与 `markdown`（原样，给 QQ）。两版**必须同
+  // 源**，否则两边内容会各自漂移；这一组盯的就是「同一个事件的两版各自长什么样」。
+  const markdownReport = ['## 入库结果', '', '| 分类 | 条目 |', '|---|---|', '| 架构 | x |'].join('\n')
+
+  it('同一个事件：markdown 版保留标记，body 版压成纯文本', () => {
+    const notification = renderNotification(event(), snapshot({ assistantText: markdownReport }), options())
+    expect(notification.markdown).toContain('## 入库结果')
+    expect(notification.markdown).toContain('| 架构 | x |')
+    expect(notification.body).toContain('【入库结果】')
+    expect(notification.body).not.toContain('##')
+    expect(notification.body).not.toContain('|')
+  })
+
+  it('详细模式下 markdown 版同样保留标记', () => {
+    const notification = renderNotification(
+      event(),
+      snapshot({ assistantText: markdownReport }),
+      options({ mode: 'session' }),
+    )
+    expect(notification.markdown).toContain('## 入库结果')
+    expect(notification.body).toContain('【入库结果】')
+  })
+
+  it('提问：markdown 版也是编号分行，并带「自定义回答」那一行', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: {
+          project: 'DSH',
+          text: '选**哪个**？',
+          requestId: 'call-1',
+          options: [{ label: '**甲**' }, { label: '乙' }],
+        },
+      }),
+      undefined,
+      options(),
+    )
+    expect(notification.markdown).toContain('可选：\n1. **甲**\n2. 乙\n3. 自定义回答（先输入序号再输入文本）')
+  })
+
+  it('两版都受 maxBodyChars 截断（上限是内容上限，不是纯文本上限）', () => {
+    const notification = renderNotification(
+      event(),
+      snapshot({ assistantText: 'x'.repeat(500) }),
+      options({ content: { ...content, maxBodyChars: 100 } }),
+    )
+    expect(notification.body).toHaveLength(100)
+    expect(notification.markdown).toHaveLength(100)
+  })
+
+  it('分片时两版各自切分；短的那边用另一版的同一片兜底，不丢内容', () => {
+    const base = renderNotification(event(), snapshot(), options())
+    const notification = { ...base, body: 'x'.repeat(1000), markdown: 'y'.repeat(500) }
+    const shards = shardNotification(notification, 200)
+    // body 5 片、markdown 3 片 → 取大者 5 片。
+    expect(shards).toHaveLength(5)
+    expect(shards[0]!.markdown).toContain('y'.repeat(50))
+    // 第 4、5 片的 markdown 已经切完，退回 body 的同一片（纯文本是合法 Markdown）。
+    expect(shards[4]!.markdown).toContain('x'.repeat(50))
+    for (const shard of shards) expect(shard.body).toContain('x'.repeat(50))
   })
 })
