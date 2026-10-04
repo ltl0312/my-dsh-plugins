@@ -5,8 +5,6 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  BRIEF_MAX_CHARS,
-  BRIEF_MAX_LINES,
   DEFAULT_SHARD_CHARS,
   MAX_ACTION_BUTTONS,
   renderNotification,
@@ -497,32 +495,38 @@ describe('shardNotification', () => {
   })
 })
 
-describe('精简正文只留开头一段', () => {
-  it('行数超过上限就截断，并告诉用户怎么拿全文', () => {
-    const lines = Array.from({ length: BRIEF_MAX_LINES + 4 }, (_, i) => `第 ${i + 1} 行`)
+describe('精简正文一个字都不截', () => {
+  it('行数再多也整段保留，不加「回复 detail」提示', () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `第 ${i + 1} 行`)
     const notification = renderNotification(event(), snapshot({ assistantText: lines.join('\n') }), options())
     const body = notification.body.split('耗时 5.0s\n\n')[1] ?? ''
-    // 上限是按行算的：多出来的行整行丢掉，不留半句。
-    expect(body.split('\n').length).toBe(BRIEF_MAX_LINES + 1)
-    expect(body).toContain(`第 ${BRIEF_MAX_LINES} 行`)
-    expect(body).not.toContain(`第 ${BRIEF_MAX_LINES + 1} 行`)
-    expect(body).toContain('回复 detail 可看全文')
+    expect(body.split('\n')).toEqual(lines)
+    expect(notification.body).not.toContain('回复 detail 可看全文')
   })
 
-  it('没超上限时不加提示，也不动原文', () => {
-    const notification = renderNotification(event(), snapshot({ assistantText: '第一行\n第二行' }), options())
-    expect(notification.body).toBe('耗时 5.0s\n\n第一行\n第二行')
-    expect(notification.body).not.toContain('detail')
-  })
-
-  it('一整段没有换行时按字符数截断', () => {
-    const long = '啊'.repeat(BRIEF_MAX_CHARS + 200)
+  it('一整段上千字也不截断（长度上限只由 maxBodyChars 决定）', () => {
+    // 1200 字：超过旧版 800 字的上限，仍在用例的 maxBodyChars（1500）之内。
+    const long = '啊'.repeat(1200)
     const notification = renderNotification(event(), snapshot({ assistantText: long }), options())
-    const body = notification.body.split('耗时 5.0s\n\n')[1] ?? ''
-    expect(body).toContain('回复 detail 可看全文')
-    // 正文一行 + 提示一行
-    expect(body.split('\n').length).toBe(2)
-    expect(body.length).toBeLessThan(BRIEF_MAX_CHARS + 60)
+    expect(notification.body).toBe(`耗时 5.0s\n\n${long}`)
+  })
+
+  it('三个以上连续换行收成一个空行，行尾空白去掉', () => {
+    const notification = renderNotification(
+      event(),
+      snapshot({ assistantText: '第一段\n\n\n\n第二段   \n第三段' }),
+      options(),
+    )
+    expect(notification.body).toBe('耗时 5.0s\n\n第一段\n\n第二段\n第三段')
+  })
+
+  it('行首缩进原样保留', () => {
+    const notification = renderNotification(
+      event(),
+      snapshot({ assistantText: '1. 第一项\n   · 缩进子项\n   · 另一个子项' }),
+      options(),
+    )
+    expect(notification.body).toContain('1. 第一项\n   · 缩进子项\n   · 另一个子项')
   })
 })
 
@@ -539,7 +543,7 @@ describe('正文里的 Markdown 一律压成纯文本', () => {
     expect(notification.body).not.toContain('|')
     expect(notification.body).not.toContain('##')
     // 精简模式不再折行：标题、空行、列表项各留在自己的段落里。表格必须在
-    // `digestText()` **之前**压平——折平之后表头与数据行会被折到一起，谁都认不出来。
+    // `structuredText()` **之前**压平——折平之后表头与数据行会被折到一起，谁都认不出来。
     expect(notification.body).toContain('【入库结果】\n\n· 架构：x')
   })
 
