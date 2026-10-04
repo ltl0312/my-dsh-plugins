@@ -47,8 +47,13 @@ function normalizeCommandText(text: string): string {
 /**
  * 解析一条 IM 文本是否是控制命令。
  *
- * 只认**整条消息**就是命令的情况。用户在正文里写「顺便说下 detail」不该触发
+ * 基本规则是「整条消息就是命令」。用户在正文里写「顺便说下 detail」不该触发
  * 任何东西——IM 里没有「命令模式」，误判的代价是把用户的话吃掉。
+ *
+ * 唯一的例外是 detail 家族的开关：通知里给出的提示就是「回复 detail off 恢复
+ * 精简」，用户整句复制回来时后半句只是解释，不该让命令失效（用户 m01934 就
+ * 这么踩空过一次）。所以 `detail` 后面只认开关词 on/off（及「开/关」），其后的
+ * 解释文字忽略；第二个词不是开关词时仍按普通正文处理，不会被吃掉。
  */
 export function parseCommand(text: string): ModeCommand | undefined {
   const raw = normalizeCommandText(text)
@@ -74,9 +79,16 @@ export function parseCommand(text: string): ModeCommand | undefined {
     return { kind: 'help' }
   }
 
-  if (lower === 'detail' || lower === '详细') return { kind: 'detail', on: true }
   if (lower === 'undetail' || lower === 'brief' || lower === '精简') {
     return { kind: 'detail', on: false }
+  }
+
+  // `detail` / `详细` 可带开关词，后面允许跟解释（通知提示的原文就是整句）。
+  if (head === 'detail' || head === '详细') {
+    const sub = parts[1]?.toLowerCase()
+    if (!sub || sub === 'on' || sub === '开') return { kind: 'detail', on: true }
+    if (sub === 'off' || sub === '关') return { kind: 'detail', on: false }
+    return undefined
   }
   if (lower === 'stop' || lower === '中止' || lower === '停止') return { kind: 'stop' }
 
@@ -213,7 +225,7 @@ export function helpText(): string {
     '· `/mode global` —— 这台机器人改为关心全部会话（默认）',
     '· `/mode session <短会话id>` —— 这台机器人只关心绑定的那一个会话',
     '· `detail` —— 把当前会话升到详细模式（对所有机器人有效）',
-    '· `/undetail` —— 取消详细模式',
+    '· `/undetail` —— 取消详细模式（`detail off` 等价）',
     '· `/stop` —— 中止当前会话正在跑的任务',
     '',
     '其它回复都会当作消息发给目标会话。长按通知引用回复最稳；也可以写 `<短会话id> 你的话` 定向。',

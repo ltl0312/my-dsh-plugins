@@ -48,6 +48,18 @@ describe('parseCommand', () => {
     expect(parseCommand('精简')).toEqual({ kind: 'detail', on: false })
   })
 
+  it('detail on / off：整句复制通知提示也不失效', () => {
+    expect(parseCommand('detail on')).toEqual({ kind: 'detail', on: true })
+    expect(parseCommand('/detail off')).toEqual({ kind: 'detail', on: false })
+    expect(parseCommand('detail 开')).toEqual({ kind: 'detail', on: true })
+    expect(parseCommand('detail 关')).toEqual({ kind: 'detail', on: false })
+    // 通知里的提示原文就是「回复 detail off 恢复精简」，整句复制回来必须仍然生效。
+    expect(parseCommand('detail off 恢复精简')).toEqual({ kind: 'detail', on: false })
+    // 第二个词不是开关词 ⇒ 不当命令，正文照常投递。
+    expect(parseCommand('detail 是什么')).toBeUndefined()
+    expect(parseCommand('详细 说说这个方案')).toBeUndefined()
+  })
+
   it('stop 与中文别名', () => {
     expect(parseCommand('/stop')).toEqual({ kind: 'stop' })
     expect(parseCommand('中止')).toEqual({ kind: 'stop' })
