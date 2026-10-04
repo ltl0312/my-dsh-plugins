@@ -9,8 +9,15 @@
 //
 // 例：`DSH · DSH · 519cc141 · 权限请求`
 //
-// 正文才随模式变。全局模式默认「精简」——一行讲清楚发生了什么，因为一台手机上
-// 同时开着好几个项目的会话时，正文越长越没人看。单会话模式默认给全上下文。
+// 正文才随模式变。全局模式默认「精简」——只留开头一段，因为一台手机上同时开着
+// 好几个项目的会话时，正文越长越没人看。
+//
+// 但「短」不等于「折成一行」。以前精简模式会把整段正文 `oneLine()` 折平，助手回复
+// 动辄上千字，折完就是一堵没有换行、没有分节的墙——现场反馈「没有任何格式可言，
+// 完全不能快速定位重要信息」。行结构（段落、`【标题】`、`· 列表`）本身就是 IM 里
+// 最有用的格式，所以现在只截长度、不折行，见 `digestText`。
+//
+// 单会话模式默认给全上下文。
 
 import { formatDuration, summarizeTools } from './aggregate.js'
 import { shortSessionId } from './events.js'
@@ -60,9 +67,63 @@ function truncate(text: string, limit: number): string {
   return `${text.slice(0, Math.max(0, limit - 1))}…`
 }
 
-/** 折叠空白，把多行正文压成一行（精简模式用）。 */
+/** 折叠空白，把多行压成一行（列表项、按钮标签这类必须单行的位置用）。 */
 function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 精简模式正文最多留几行。压平的 Markdown 里标题、段落之间都会留空行，所以行数
+ * 上限要放得比「想给几段」宽一些，真正的闸门是下面的字符数。
+ */
+export const BRIEF_MAX_LINES = 20
+/** 精简模式正文最多留几个字符。QQ 一条纯文本能放下，再长就该让用户回 detail 了。 */
+export const BRIEF_MAX_CHARS = 800
+
+/**
+ * 精简模式的正文：**保留行结构**，只留开头一段。
+ *
+ * 这里原来是把整段 `oneLine()` 折成一行，理由是「一行讲清楚」。但助手回复动辄上千
+ * 字，折平之后用户收到的就是一大段没有换行、没有分节的文字。段落、`【标题】`、
+ * `· 列表` 这些结构本身就是最有用的格式，所以现在只做两件事：把开头留住，把超出
+ * 的部分折成一句提示。
+ *
+ * `text` 必须是已经过 `toPlainText` 的纯文本：表格要靠「表头 + 分隔行」相邻才能
+ * 认出来，`primaryText` 是那个唯一的 choke point，别挪。
+ */
+function digestText(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return ''
+
+  const kept: string[] = []
+  let used = 0
+  let cut = false
+  for (const line of trimmed.split('\n')) {
+    if (kept.length >= BRIEF_MAX_LINES) {
+      cut = true
+      break
+    }
+    if (used + line.length > BRIEF_MAX_CHARS) {
+      // 还留得下小半行就截断收尾：正文里经常有很长的单行，整行丢掉太浪费。
+      const room = BRIEF_MAX_CHARS - used
+      if (room >= 24) kept.push(truncate(line, room))
+      cut = true
+      break
+    }
+    kept.push(line)
+    used += line.length + 1
+  }
+  // 第一行就超预算（整段没有换行）时上面会一行都不留，退化成硬截断。
+  if (kept.length === 0) {
+    kept.push(truncate(trimmed, BRIEF_MAX_CHARS))
+    cut = trimmed.length > BRIEF_MAX_CHARS
+  }
+
+  const body = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  if (!cut) return body
+  const rest = trimmed.length - body.length
+  if (rest <= 0) return body
+  return `${body}\n…（还有约 ${rest} 字，回复 detail 可看全文）`
 }
 
 function metadataLine(snapshot: TurnSnapshot | undefined, includeTiming: boolean): string {
@@ -86,33 +147,37 @@ function primaryText(event: RawEvent, snapshot: TurnSnapshot | undefined): strin
 function failedTools(snapshot: TurnSnapshot | undefined): string[] {
   if (!snapshot) return []
   // 工具报错是外部程序吐出来的自由文本，里面出现 `##`、代码围栏、表格都不稀奇。
+  // 这里只压平标记、不折行：折行交给调用方——详细模式要把它塞进 `· ` 项目符号
+  // （必须单行），精简模式要留住行结构（见 `digestText`）。
   return snapshot.tools
     .filter((tool) => !tool.ok)
-    .map((tool) => oneLine(toPlainText(`${tool.name}: ${tool.error ?? '失败'}`)))
+    .map((tool) => toPlainText(`${tool.name}: ${tool.error ?? '失败'}`))
 }
 
-/** 精简正文：一行。 */
+/** 精简正文：元信息一行，正文另起一段，正文只留开头一段（行结构保留）。 */
 function briefBody(event: RawEvent, snapshot: TurnSnapshot | undefined, options: RenderOptions): string {
   const meta = options.content.includeMetadata ? metadataLine(snapshot, true) : ''
-  const primary = oneLine(primaryText(event, snapshot))
+  // 元信息必须单独占一行。以前是 `耗时 5.0s — 正文` 挤在一行里，那行既是数据又是
+  // 正文，扫一眼分不清哪是哪，正文一长就彻底糊在一起。
+  const withMeta = (text: string): string => [meta, text].filter(Boolean).join('\n\n')
+  const primary = digestText(primaryText(event, snapshot))
 
   switch (event.kind) {
     case 'completed':
       // `meta` 可能因为关掉 includeMetadata 或没有快照而为空——那时不能留下
-      // 「已完成 — 正文」这种前后半截重复的正文，也不能因为 primary 为空就
+      // 「已完成\n\n正文」这种前后半截重复的正文，也不能因为 primary 为空就
       // 整条通知没有正文，所以兜底只作用在整串上。
-      return [meta, primary].filter(Boolean).join(' — ') || '已完成'
+      return withMeta(primary) || '已完成'
     case 'error':
     case 'blocked':
     case 'interrupted': {
       const failures = failedTools(snapshot)
-      const detail = primary || failures[0] || ''
-      return [meta, detail].filter(Boolean).join(' — ') || EVENT_LABELS[event.kind]
+      return withMeta(primary || digestText(failures[0] ?? '')) || EVENT_LABELS[event.kind]
     }
     case 'aborted':
-      return [meta, primary || '已被中止'].filter(Boolean).join(' — ')
+      return withMeta(primary || '已被中止')
     case 'max-tokens':
-      return [meta, '达到输出上限，可能需要说「继续」'].filter(Boolean).join(' — ')
+      return withMeta('达到输出上限，可能需要说「继续」')
     case 'question':
       return questionBody(event, false)
     case 'approval':
@@ -180,7 +245,7 @@ function detailedBody(event: RawEvent, snapshot: TurnSnapshot | undefined, optio
     const failures = failedTools(snapshot)
     if (failures.length > 0) {
       lines.push('', '失败的工具：')
-      for (const failure of failures.slice(0, 5)) lines.push(`· ${truncate(failure, 200)}`)
+      for (const failure of failures.slice(0, 5)) lines.push(`· ${truncate(oneLine(failure), 200)}`)
     }
   }
 

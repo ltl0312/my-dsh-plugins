@@ -4,7 +4,15 @@
 // 正文才随模式变。按钮的数量与顺序也有硬上限。
 
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SHARD_CHARS, MAX_ACTION_BUTTONS, renderNotification, renderTitle, shardNotification } from '../src/render.js'
+import {
+  BRIEF_MAX_CHARS,
+  BRIEF_MAX_LINES,
+  DEFAULT_SHARD_CHARS,
+  MAX_ACTION_BUTTONS,
+  renderNotification,
+  renderTitle,
+  shardNotification,
+} from '../src/render.js'
 import type { GlobalModeConfig, RawEvent, SessionModeConfig, TurnSnapshot } from '../src/types.js'
 
 const S = 'session-519cc141-4fdd-4ba7-82d1-441b071ab878'
@@ -90,16 +98,16 @@ describe('renderTitle', () => {
 })
 
 describe('全局精简正文', () => {
-  it('完成事件压成一行，带耗时与结果', () => {
+  it('完成事件：元信息与正文各占一行，不再粘成一行', () => {
     const notification = renderNotification(event(), snapshot(), options())
-    expect(notification.body).toBe('耗时 5.0s — 改完了 3 个文件。')
+    expect(notification.body).toBe('耗时 5.0s\n\n改完了 3 个文件。')
     expect(notification.kind).toBe('completed')
     expect(notification.level).toBe('info')
   })
 
-  it('多行助手正文被折叠成一行', () => {
+  it('多行助手正文保留段落结构，只把连续空行收成一个', () => {
     const notification = renderNotification(event(), snapshot({ assistantText: '第一行\n\n第二行  第三行' }), options())
-    expect(notification.body).toBe('耗时 5.0s — 第一行 第二行 第三行')
+    expect(notification.body).toBe('耗时 5.0s\n\n第一行\n\n第二行  第三行')
   })
 
   it('没有快照时退回「已完成」而不是空正文', () => {
@@ -112,7 +120,7 @@ describe('全局精简正文', () => {
       snapshot(),
       options(),
     )
-    expect(notification.body).toBe('耗时 5.0s — 连接超时')
+    expect(notification.body).toBe('耗时 5.0s\n\n连接超时')
     expect(notification.level).toBe('error')
   })
 
@@ -489,21 +497,50 @@ describe('shardNotification', () => {
   })
 })
 
+describe('精简正文只留开头一段', () => {
+  it('行数超过上限就截断，并告诉用户怎么拿全文', () => {
+    const lines = Array.from({ length: BRIEF_MAX_LINES + 4 }, (_, i) => `第 ${i + 1} 行`)
+    const notification = renderNotification(event(), snapshot({ assistantText: lines.join('\n') }), options())
+    const body = notification.body.split('耗时 5.0s\n\n')[1] ?? ''
+    // 上限是按行算的：多出来的行整行丢掉，不留半句。
+    expect(body.split('\n').length).toBe(BRIEF_MAX_LINES + 1)
+    expect(body).toContain(`第 ${BRIEF_MAX_LINES} 行`)
+    expect(body).not.toContain(`第 ${BRIEF_MAX_LINES + 1} 行`)
+    expect(body).toContain('回复 detail 可看全文')
+  })
+
+  it('没超上限时不加提示，也不动原文', () => {
+    const notification = renderNotification(event(), snapshot({ assistantText: '第一行\n第二行' }), options())
+    expect(notification.body).toBe('耗时 5.0s\n\n第一行\n第二行')
+    expect(notification.body).not.toContain('detail')
+  })
+
+  it('一整段没有换行时按字符数截断', () => {
+    const long = '啊'.repeat(BRIEF_MAX_CHARS + 200)
+    const notification = renderNotification(event(), snapshot({ assistantText: long }), options())
+    const body = notification.body.split('耗时 5.0s\n\n')[1] ?? ''
+    expect(body).toContain('回复 detail 可看全文')
+    // 正文一行 + 提示一行
+    expect(body.split('\n').length).toBe(2)
+    expect(body.length).toBeLessThan(BRIEF_MAX_CHARS + 60)
+  })
+})
+
 describe('正文里的 Markdown 一律压成纯文本', () => {
   // 通知正文最常放的就是助手回复原文，而助手回复几乎必然是 Markdown。QQ 只发纯
   // 文本、飞书的 lark_md 只认内联子集，不压平的话用户看到的就是 `| 分类 | 条目 |`
   // 这种源码。这一组用例盯的就是「用户看到什么」。
   const markdownReport = ['## 入库结果', '', '| 分类 | 条目 |', '|---|---|', '| 架构 | x |'].join('\n')
 
-  it('精简模式：折成一行之后仍然不带标记', () => {
+  it('精简模式：保留段落结构，但一个标记都不剩', () => {
     const notification = renderNotification(event(), snapshot({ assistantText: markdownReport }), options())
     expect(notification.body).toContain('【入库结果】')
     expect(notification.body).toContain('· 架构：x')
     expect(notification.body).not.toContain('|')
     expect(notification.body).not.toContain('##')
-    // 精简模式只有一行——表格必须在 `oneLine()` **之前**压平，否则表头与数据行
-    // 会被折到一起，谁都认不出来。
-    expect(notification.body).not.toContain('\n')
+    // 精简模式不再折行：标题、空行、列表项各留在自己的段落里。表格必须在
+    // `digestText()` **之前**压平——折平之后表头与数据行会被折到一起，谁都认不出来。
+    expect(notification.body).toContain('【入库结果】\n\n· 架构：x')
   })
 
   it('详细模式：块结构保留，但没有竖线与井号', () => {
