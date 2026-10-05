@@ -65,6 +65,14 @@ dsh plugin --profile web add dsh-plugin-tlmemory
 > 请直接在桌面端的插件管理界面安装 / 启用 `dsh-plugin-tlmemory` —— 它同样只按
 > `dsh.bundle` 归类，因此 0.7.0 起可以被正常识别为可激活的插件层。
 
+> **桌面端看板仍显示「服务未启动」？（0.8.1 的修复）**：桌面端主窗口文档来自
+> `dsh-app://app/…`（Electron 自有协议），渲染层 Origin 是 `dsh-app://app`，属**非回环 HTTP**。
+> 0.8.0 及更早的 CORS 白名单只回写 127.0.0.1 / localhost，于是外壳对看板的跨源探针被
+> CORS policy 拦掉、读不到响应，被误判成离线 —— 但宿主侧其实**已经起来了**（可自行验证：
+> `curl http://127.0.0.1:4890/api/health` 返回 `{"ok":true,"service":"tlmemory"}`）。
+> 0.8.1 起白名单一并放行 `dsh-app:` 协议；`null` / `file:` / 其它自定义协议仍然拒绝。
+> 升级后请**重启桌面应用**。
+
 > `--profile` 必须紧跟 `dsh plugin`，且只能出现一次：`dsh plugin --profile web add --profile=1`
 > 这类写法会**显式报错**并拒绝执行（旧版会静默丢弃参数、同时把整条命令改道到另一个 profile）。
 > 命令的失败以稳定退出码分类：`0` 成功 / `1` 用法或前置条件不满足 / `2` pnpm 缺失 /

@@ -2,13 +2,17 @@
 // 轻量内嵌服务与实时通信中继层（阶段三生产版）。
 // 安全基线（CVE-2026-82533 回环穿透防御）：
 // 1. listen 严格显式绑定 IPv4 回环 127.0.0.1，严禁监听 0.0.0.0；
-// 2. WebSocket upgrade 握手强校验 Host 与 Origin 双头，仅放行 127.0.0.1 / localhost；
+// 2. WebSocket upgrade 握手强校验 Host 与 Origin 双头，仅放行 127.0.0.1 / localhost
+//    与 DSH 桌面端外壳自有协议 `dsh-app:`（见 isAllowedOrigin 的说明）；
 // 3. 静态资源经 path.normalize 归一化并强制锚定 dist 根内，拦截目录穿越逃逸；
-// 4. CORS 白名单回复（非通配符）：仅当请求头携带的 Origin 通过回环白名单校验时，
+// 4. CORS 白名单回复（非通配符）：仅当请求头携带的 Origin 通过白名单校验时，
 //    才回写 Access-Control-Allow-Origin=<该具体 Origin>。宿主页面（如
 //    http://127.0.0.1:3080）与看板服务端（http://127.0.0.1:4890）天然不同源，
 //    缺失 ACAO 会让浏览器的跨源探针 fetch 被 CORS policy 直接拦截，宿主据此误判
 //    服务离线并弹出遮罩 —— 白名单回复既修复该误判，又不向公网/未授权域名开口子。
+//    桌面端（Electron carrier）的主窗口文档由 `dsh-app://app/…` 提供，同样不在回环
+//    HTTP 白名单里，因此 2026-10-05 起一并放行 `dsh-app:` 协议（否则桌面端看板
+//    永远停在「服务未启动」）。
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -49,17 +53,37 @@ function isAllowedHost(hostHeader: string | undefined): boolean {
 
 /**
  * Origin 头白名单校验：阻断跨站 WebSocket 劫持（CSWSH）。
- * 浏览器连接强制携带 Origin 且 JS 无法伪造，非回环 Origin 一律销毁；
+ * 浏览器连接强制携带 Origin 且 JS 无法伪造，非白名单 Origin 一律销毁；
  * 本地非浏览器客户端（如 ws 库）不携带 Origin，属合法本地调用，放行（Host 校验仍在）。
  * 安全基线（P0-2）：必须用 URL 解析后取 hostname 做严格相等比较，
  * 严禁子串包含判断 —— `http://evil-127.0.0.1.attacker.com` 这类伪造 Origin
  * 能绕过 includes 校验，但对 hostname 严格匹配无效。
+ *
+ * 白名单含两类来源：
+ *   1) 回环 HTTP（127.0.0.1 / localhost 的任意端口）—— 宿主页面与本地开发端口；
+ *   2) `dsh-app:` 协议 —— DSH 桌面端（Electron carrier）的自有外壳协议。
+ *
+ * 为什么必须放行 (2)（2026-10-05 桌面端事故）：桌面端主窗口文档由
+ * `protocol.handle('dsh-app', …)` 的 hostname `app` 提供（宿主侧权威证据见
+ * resources/app.asar：`dsh-app://app/` → 前端 dist，其余路径 forwardWebRequest 转发给宿主），
+ * 因此渲染层 Origin 是 `dsh-app://app`。外壳对看板服务端的在线探针是跨源 fetch：
+ * 服务端若只对回环 HTTP 回写 ACAO，探针读不到响应，会把「服务在岗」判成离线并弹遮罩
+ * —— 这正是「桌面版一直显示服务未启动」的真身（宿主侧其实已经起来了）。
+ *
+ * 为什么不构成新风险：Origin 由浏览器如实上报，公网网页无法把自己伪装成自定义协议来源；
+ * 而本机非浏览器客户端本来就不带 Origin（上一段已放行），因此放行该协议不新增任何通道。
+ * `null` / `file:` / 其它自定义协议仍一律拒绝（`null` 是沙箱 iframe 与 data: 页面会带的值，
+ * 放行它才是真的开口子）。
  */
 function isAllowedOrigin(originHeader: string | undefined): boolean {
   if (!originHeader) return true
   try {
-    const hostname = new URL(originHeader).hostname.toLowerCase()
-    return hostname === '127.0.0.1' || hostname === 'localhost'
+    const parsed = new URL(originHeader)
+    const hostname = parsed.hostname.toLowerCase()
+    if (hostname === '127.0.0.1' || hostname === 'localhost') return true
+    // 桌面端外壳：只认 `dsh-app://<host>` 形态（主窗口是 app、辅助窗是 shell，同一信任域）；
+    // 裸 `dsh-app:`（无 host）不是任何文档的来源，按畸形 Origin 处理
+    return parsed.protocol === 'dsh-app:' && parsed.hostname !== ''
   } catch {
     // 畸形 Origin（非合法 URL）一律拒绝
     return false

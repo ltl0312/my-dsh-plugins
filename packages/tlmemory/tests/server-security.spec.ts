@@ -1,7 +1,8 @@
 // packages/tlmemory/tests/server-security.spec.ts
 // P0 安全回归门禁（2026-09-15 代码评审 P0-1 / P0-2）：
-// 1. CORS 白名单：仅回环白名单 Origin 回写具体 ACAO 值，绝不出现通配符 `*`；
-//    无 Origin 与白名单外 Origin 一律不回写 —— 任意公网网页不得跨源读写删记忆库；
+// 1. CORS 白名单：仅回环白名单 Origin（与 DSH 桌面端外壳协议 `dsh-app:`）回写具体
+//    ACAO 值，绝不出现通配符 `*`；无 Origin 与白名单外 Origin 一律不回写
+//    —— 任意公网网页不得跨源读写删记忆库；
 // 2. HTTP Host 白名单：普通 HTTP 请求同样执行 DNS rebinding 防御；
 // 3. WS Origin 严格解析：伪造 Origin（evil-127.0.0.1.attacker.com）不得通过子串包含绕过；
 // 4. 未知 /api/* 路径不得回落 SPA index.html。
@@ -9,6 +10,8 @@
 // CORS 白名单层（2026-09-16）补充动机：宿主页面在 http://127.0.0.1:3080，与看板服务端
 // 4890 端口天然不同源，缺失 ACAO 会让宿主在线探针的 fetch 被浏览器 CORS policy 拦截，
 // 进而把「服务在岗」误判为离线并弹遮罩。
+// 桌面端外壳层（2026-10-05）补充动机：桌面端主窗口文档的 Origin 是 `dsh-app://app`
+// （非回环 HTTP），同样必须回写 ACAO，否则桌面端看板永远停在「服务未启动」。
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { IncomingHttpHeaders } from 'node:http'
 import { MemoryDB } from '../src/db.js'
@@ -139,6 +142,26 @@ describe('dsh-plugin-tlmemory 服务端安全回归（P0-1 / P0-2）', () => {
     expect(headerValue(res.headers['access-control-allow-headers'])).toBe('Content-Type')
   })
 
+  it('CORS 白名单: 桌面端外壳 Origin dsh-app://app 必须回写该具体 Origin（否则桌面看板永远离线）', async () => {
+    for (const origin of ['dsh-app://app', 'dsh-app://shell']) {
+      const res = await rawProbe(port, { path: '/api/memories', headers: { origin } })
+      expect(res.status).toBe(200)
+      expect(headerValue(res.headers['access-control-allow-origin'])).toBe(origin)
+      expect(headerValue(res.headers['access-control-allow-origin'])).not.toBe('*')
+      expect(headerValue(res.headers.vary)).toContain('Origin')
+    }
+  })
+
+  it('CORS 预检: 桌面端外壳 Origin 的 OPTIONS 返回 204 且携带 ACAO', async () => {
+    const res = await rawProbe(port, {
+      method: 'OPTIONS',
+      path: '/api/nodes',
+      headers: { origin: 'dsh-app://app' },
+    })
+    expect(res.status).toBe(204)
+    expect(headerValue(res.headers['access-control-allow-origin'])).toBe('dsh-app://app')
+  })
+
   it('CORS 白名单外 Origin: GET 不回写 ACAO（跨源读写删通道依旧封死）', async () => {
     for (const origin of [
       'http://evil-127.0.0.1.attacker.com',
@@ -146,6 +169,11 @@ describe('dsh-plugin-tlmemory 服务端安全回归（P0-1 / P0-2）', () => {
       'http://192.168.1.10:3080',
       'null',
       'not-a-url',
+      // 桌面端外壳协议的近似伪造形态必须一律拒绝（只有精确的 `dsh-app:` 才放行）
+      'dsh-app-evil://app',
+      'dsh-app:',
+      'file://',
+      'chrome-extension://abcdefghijklmnop',
     ]) {
       const res = await rawProbe(port, { path: '/api/memories', headers: { origin } })
       expect(res.status).toBe(200)
@@ -230,6 +258,21 @@ describe('dsh-plugin-tlmemory 服务端安全回归（P0-1 / P0-2）', () => {
     // 实测在 0.9s（单跑）～6.0s（并行高负载）之间波动约 7 倍，默认 5s 会在高负载
     // 下偶发地把一次正常握手判为超时（同一批次的其他 12 个用例均通过）。
     // 其余用例保持默认 5s，真正的挂起仍然会快速失败。
+  }, 15_000)
+
+  it('P0-2: WS upgrade 携带桌面端外壳 Origin（dsh-app://app）必须正常建立', async () => {
+    const { WebSocket } = await import('ws')
+    const outcome = await new Promise<string>((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`, {
+        headers: { origin: 'dsh-app://app' },
+      })
+      ws.on('open', () => {
+        ws.close()
+        resolve('open')
+      })
+      ws.on('error', (err: Error) => resolve(`error:${err.message}`))
+    })
+    expect(outcome).toBe('open')
   }, 15_000)
 
   it('P0-1: 未知 /api/* 路径返回 404 而非 SPA index.html', async () => {
