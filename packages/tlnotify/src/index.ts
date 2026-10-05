@@ -45,7 +45,7 @@ import { INTERVENTION_KINDS } from './types.js'
 import { Config, configPath, ensureDir, mergeConfig, persistEffectiveConfig, readConfigFile, readJsonFile, resolveChannelSettings, resolveDataDir, saveConfigFile, statePath, writeJsonFile } from './config.js'
 import { FileLogger, joinLog, type HostLogger } from './log.js'
 import {
-  extractToolCallEvent,
+  extractToolCallEvents,
   extractTurnEnd,
   isSubagent,
   projectName,
@@ -1296,8 +1296,12 @@ class Tlnotify {
    * 根本没跑）时，才轮到这条路径。
    */
   #maybePending(session: SessionLike, event: SessionEventLike): void {
-    const raw = extractToolCallEvent(session, event)
-    if (!raw) return
+    // 一次 `ask_user_question` 可能带多个问题：每个问题各自走一遍判断（每条有自己的
+    // requestId / questionId / seq），否则第 2..N 问永远不会产生通知。
+    for (const raw of extractToolCallEvents(session, event)) this.#maybePendingOne(raw)
+  }
+
+  #maybePendingOne(raw: RawEvent): void {
     const requestId = raw.detail.requestId
     if (requestId && this.#claimedRequests.has(requestId)) return
     if (requestId && this.#deliveredRequests.has(requestId)) {

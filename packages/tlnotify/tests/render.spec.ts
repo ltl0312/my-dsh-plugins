@@ -195,6 +195,30 @@ describe('提问与审批正文', () => {
     expect(notification.body).toContain('回复序号或选项文字即可作答。')
   })
 
+  it('一次请求带多个问题时，正文里标出「第几问 / 共几问」', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: {
+          project: 'DSH',
+          text: '领域怎么落盘？',
+          requestId: 'call-1#1',
+          questionId: 'domain',
+          questionIndex: 1,
+          questionTotal: 3,
+          options: [{ label: '移目录' }, { label: '存字段' }],
+        },
+      }),
+      undefined,
+      options(),
+    )
+    expect(notification.body).toContain('（本次共 3 问 · 这是第 2 问，按顺序作答即可）')
+    expect(notification.body).toContain('领域怎么落盘？')
+    expect(notification.body).toContain(
+      '可选：\n1. 移目录\n2. 存字段\n3. 自定义回答（先输入序号再输入文本）',
+    )
+  })
+
   it('多选时不出现「自定义回答」那一行（多选按空格拆 token，塞不进两段式）', () => {
     const notification = renderNotification(
       event({

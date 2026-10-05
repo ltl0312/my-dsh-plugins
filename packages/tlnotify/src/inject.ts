@@ -180,6 +180,13 @@ interface PendingQuestion extends PendingBase {
   questionId: string
   /** 认「这是同一个问题」用的键（会话 + 题目 id），用于压掉重复通知。 */
   questionKey?: string
+  /**
+   * 这一条属于哪一次请求（一次 `ask_user_question`）。
+   *
+   * 一次请求可以带多个问题，那时会话里会同时有好几条 pending。文本作答要按「最新那次
+   * 请求优先、同一次请求内按题目顺序」挑，所以得知道每条 pending 属于哪一组。
+   */
+  group?: string
   /** 批准选项的 label（plan-review 才有）。 */
   approveLabel?: string
   /** 所有候选 label，用于校验按钮回传的 choice。 */
@@ -375,7 +382,11 @@ export class InteractionBridge {
     const requestId = value.requestId
     if (requestId) {
       const exact = this.#pending.get(requestId)
-      if (exact) return exact
+      // 同一条请求带多个问题时每问各一条 pending。按钮若同时带了题目 id，就以题目 id 为准
+      // ——id 派生规则将来变了，也不会把第 3 问的点击算到第 1 问头上。
+      if (exact && (exact.kind === 'approval' || !value.questionId || exact.questionId === value.questionId)) {
+        return exact
+      }
     }
 
     if (value.questionId) {
@@ -426,44 +437,88 @@ export class InteractionBridge {
   }
 
   /**
-   * 文本作答：按会话找**最新一条**等待中的请求，把「1」「允许」「选项文字」翻成答案。
+   * 文本作答：按会话找等待中的请求，把「1」「允许」「选项文字」翻成答案。
    *
    * 为什么必须有这条路径：QQ 单聊的按钮只在手机端新版本才渲染（桌面端 / 老版本会显示
    * 我们写的 `unsupport_tips`），而宿主那边只要没人结算就会一直等。用户 m04327 报的
    * 正是这个——「QQ 没有弹出选项，我回复文本，DSH 却还在等我选择，那段文本被当成了
    * 补充语句」。文本作答不依赖任何客户端能力，所以它才是兜底的那条路。
    *
-   * 返回 `undefined` 表示「这条消息不是答案」（没有等待中的请求，或者文本明显是别的
-   * 意思），调用方照常把它当普通发言注入会话。
+   * **多条等待时挑哪一条**（一次请求带多个问题就会有多条）：① 已经 armed 的那条——用户
+   * 刚回了「N+1. 自定义回答」，这一句就是它的答案；② 文本正好等于某一问的候选 label
+   * （大小写无关），那他大概率就是照着那条通知回的；③ 都不中则「最新那次请求优先、同一次
+   * 请求内按题目顺序」——一次请求带 3 个问题时用户回「1」是在答第 1 问，跨请求时用户回的
+   * 则多半是刚收到的那条通知。
    *
-   * 单选提问还多一条**两段式**的自定义作答：正文里那行「N+1. 自定义回答」（见
-   * `render.ts#questionBody`）回过来时只把这道题标成 `awaitingCustom` 并返回
-   * `{ok:false, armed:true}`——**不结算**，等下一句话原样当答案（`custom` 字段）。
-   * 不这样的话「4」会被 `readOneOption` 当成越界序号，然后掉进自由文本兜底，直接把
-   * 数字「4」当成用户想要的答案。
+   * 返回 `undefined` 表示「这条消息不是答案」（没有等待中的请求，或者文本明显是别的
+   * 意思），调用方照常把它当普通发言注入会话。`{ok:false, armed:true}` 是第三态：已经
+   * 进入等自定义答案的状态，调用方别清等待记录。
    */
   settleText(sessionId: string, text: string): PendingSettlement | undefined {
     const trimmed = text.trim()
     if (trimmed.length === 0) return undefined
 
-    let newest: Pending | undefined
+    const candidates: Pending[] = []
     for (const pending of this.#pending.values()) {
       if (pending.sessionId !== sessionId) continue
-      if (!newest || pending.createdAt > newest.createdAt) newest = pending
+      candidates.push(pending)
     }
-    if (!newest) return undefined
+    if (candidates.length === 0) return undefined
+    // 排列顺序：**最新的一次请求优先，同一次请求里的多个问题按题目顺序（最早在前）**。
+    //
+    // 不能简单地「取最新一条」：一次请求带 3 个问题时，用户回「1」通常是在答第 1 问，
+    // 按「最新一条」会把答案算到第 3 问头上（这正是这次要修的那个 bug 的另一半）。而跨
+    // 请求时（两个提问前后脚进来）用户回的多半是刚收到的那条通知，所以仍然是「先看最新
+    // 那一组」——这也保住了老行为。
+    const keyOf = (pending: Pending): string =>
+      pending.kind === 'approval' ? pending.requestId : (pending.group ?? pending.requestId)
+    const groupStart = new Map<string, number>()
+    for (const pending of candidates) {
+      const key = keyOf(pending)
+      const at = groupStart.get(key)
+      if (at === undefined || pending.createdAt < at) groupStart.set(key, pending.createdAt)
+    }
+    candidates.sort((a, b) => {
+      const byGroup = (groupStart.get(keyOf(b)) ?? 0) - (groupStart.get(keyOf(a)) ?? 0)
+      return byGroup !== 0 ? byGroup : a.createdAt - b.createdAt
+    })
 
-    const requestId = newest.requestId
-    if (newest.kind === 'approval') {
+    const armed = candidates.find(
+      (pending): pending is PendingQuestion => pending.kind !== 'approval' && pending.awaitingCustom === true,
+    )
+    if (armed) return this.#settleTextOne(armed, trimmed)
+
+    const needle = trimmed.toLowerCase()
+    const byLabel = candidates.filter(
+      (pending): pending is PendingQuestion =>
+        pending.kind !== 'approval' &&
+        pending.labels.some((label) => label.trim().toLowerCase() === needle),
+    )
+    if (byLabel.length === 1) {
+      const settled = this.#settleTextOne(byLabel[0]!, trimmed)
+      if (settled) return settled
+    }
+
+    for (const pending of candidates) {
+      const settled = this.#settleTextOne(pending, trimmed)
+      if (settled) return settled
+    }
+    return undefined
+  }
+
+  /** 把一句话当作**这一条**等待的回答来判读（该挑哪一条见 `settleText`）。 */
+  #settleTextOne(pending: Pending, trimmed: string): PendingSettlement | undefined {
+    const requestId = pending.requestId
+    if (pending.kind === 'approval') {
       const allow = readApprovalAnswer(trimmed)
       if (allow === undefined) return undefined
-      this.#finish(requestId, newest)
-      newest.resolve(allow ? 'allowed-once' : 'rejected')
+      this.#finish(requestId, pending)
+      pending.resolve(allow ? 'allowed-once' : 'rejected')
       return { ok: true, echo: allow ? '已允许' : '已拒绝' }
     }
 
-    // 到这儿只剩提问 / 计划。收进一个 const：闭包里用 `newest` 会把窄化丢掉。
-    const question = newest
+    // 到这儿只剩提问 / 计划。收进一个 const：闭包里用 `pending` 会把窄化丢掉。
+    const question = pending
 
     // 已经进了「等你说自定义答案」的状态：这一句原样就是答案，不再当选项解析
     // （否则用户答「2」会被当成选了第二个选项）。
@@ -603,27 +658,41 @@ export class InteractionBridge {
     const hostPromise = typeof proceed === 'function' ? proceed() : Promise.resolve({ answers: [] })
 
     const sessionId = req.agent?.session?.id
-    const first = req.questions?.[0]
+    const items = (req.questions ?? []).filter((item): item is AskUserQuestionItemLike => Boolean(item))
+    const first = items[0]
     if (!sessionId || !first) return hostPromise
 
-    const requestId = req.wait?.callId ?? first.intent?.callId ?? `question-${++this.#counter}-${this.#now()}`
+    // 宿主没给 callId 时自己合成一个。多问题时每条 pending 的 id 由它派生（第 0 问用 base、
+    // 第 i 问用 `${base}#${i}`）：`#pending` 里每条唯一，按钮带的 id 只会命中它自己那一问；
+    // 日志兜底那条路的派生规则与这里一致（见 `events.ts#extractToolCallEvents`）。
+    const baseRequestId = req.wait?.callId ?? first.intent?.callId ?? `question-${++this.#counter}-${this.#now()}`
     const isPlan = first.intent?.kind === 'plan-review'
-    const labels = (first.options ?? []).map((option) => option.label)
+    const total = items.length
 
-    // 宿主的同一个问题会从两条路各投一次（`tool/call` 那条带 callId，waterfall 那条
-    // 不带），于是算出两个 requestId、注册两个 pending，用户就收到两条一模一样的
-    // 「等待我回答」（现场：08:54:58.419 与 .430 相隔 11 毫秒）。他回的那句话只会
-    // 结算其中一条，另一条看上去就像「没生效」。所以按「会话 + 题目 id」认重：
-    // pending 照旧注册（哪条路上来的解答都要能结算），只是第二条通知不再发。
-    const questionKey = `${sessionId}|${first.id}`
-    // 同一个问题被本桥投递两次（宿主的 `tool/call` 那条带 callId、waterfall 那条不带）时，
-    // pending 照旧注册，只是第二条通知不再发。跨路径（日志兜底 vs 本桥）的去重由
-    // `index.ts#deliver` 里那道 `announceQuestion` 闸统一负责——顺序不定，只能放在真正
-    // 投递的那一刻判断。
-    const duplicated = this.#liveQuestions.has(questionKey)
-    this.#liveQuestions.set(questionKey, requestId)
-
+    // 一次请求可能带多个问题（模型的 `ask_user_question` 支持 `questions: [...]`，宿主自己的
+    // UI 是一问一答走完再一起提交）。**每个问题各登记一条 pending、各发一条通知**——只处理
+    // 第一个会让第 2..N 问在 IM 上完全看不见（现场 `session-5bc7441e`：一次问了
+    // engine/domain/surface 三个，只有 engine 到了 QQ，模型只好反复重问，任务卡住）。
+    // 全部答完才把 N 个答案一起回给宿主，形状就是 `{ answers: [...] }`，一问一个元素。
+    // 每题一个槽位：答案按**题目顺序**回给宿主（与宿主自己的 UI 一致），不受用户点按顺序影响。
+    const slots: (AskUserQuestionAnswerLike['answers'][number] | undefined)[] = new Array(total)
+    let remaining = total
+    let settleGroup!: (answer: AskUserQuestionAnswerLike) => void
     const imPromise = new Promise<AskUserQuestionAnswerLike>((resolve) => {
+      settleGroup = resolve
+    })
+    const registered: string[] = []
+
+    for (const [index, item] of items.entries()) {
+      const requestId = index === 0 ? baseRequestId : `${baseRequestId}#${index}`
+      // 同一个问题被两条路（宿主的 `tool/call` 与 waterfall）各投一次时，按「会话 + 题目 id」
+      // 认重：pending 照旧注册（哪条路上来的解答都要能结算），只是第二条通知不再发。
+      const questionKey = `${sessionId}|${item.id}`
+      const labels = (item.options ?? []).map((option) => option.label)
+      const duplicated = this.#liveQuestions.has(questionKey)
+      this.#liveQuestions.set(questionKey, requestId)
+      registered.push(requestId)
+
       const expireTimer = setTimeout(() => {
         this.#pending.delete(requestId)
         if (this.#liveQuestions.get(questionKey) === requestId) this.#liveQuestions.delete(questionKey)
@@ -635,20 +704,28 @@ export class InteractionBridge {
         kind: isPlan ? 'plan' : 'question',
         createdAt: this.#now(),
         expireTimer,
-        questionId: first.id,
+        questionId: item.id,
         questionKey,
+        group: baseRequestId,
         labels,
-        resolve,
+        // 每答一问填一个槽位；最后一问也答完时，整组（按题目顺序）一起交给宿主。
+        resolve: (answer) => {
+          slots[index] = answer.answers?.[0]
+          remaining -= 1
+          if (remaining <= 0) {
+            settleGroup({ answers: slots.filter((slot): slot is NonNullable<typeof slot> => slot !== undefined) })
+          }
+        },
       }
-      if (first.intent?.approve) pending.approveLabel = first.intent.approve
-      if (first.multiSelect === true) pending.multiSelect = true
+      if (item.intent?.approve) pending.approveLabel = item.intent.approve
+      if (item.multiSelect === true) pending.multiSelect = true
       this.#pending.set(requestId, pending)
-    })
 
-    if (duplicated) {
-      this.#options.log?.(`同一个问题又被投递了一次（${questionKey}），不再发第二条等待通知`)
-    } else {
-      const event = this.#questionEvent(req, first, sessionId, requestId, isPlan)
+      if (duplicated) {
+        this.#options.log?.(`同一个问题又被投递了一次（${questionKey}），不再发第二条等待通知`)
+        continue
+      }
+      const event = this.#questionEvent(req, item, sessionId, requestId, isPlan, index, total)
       try {
         await this.#options.onPending(event)
       } catch (error) {
@@ -659,8 +736,11 @@ export class InteractionBridge {
     try {
       return await Promise.race([hostPromise, imPromise])
     } finally {
-      const still = this.#pending.get(requestId)
-      if (still) this.#finish(requestId, still)
+      // 整组一起收尾：宿主要么自己答完（那我们这边整组作废），要么由我们答完。
+      for (const requestId of registered) {
+        const still = this.#pending.get(requestId)
+        if (still) this.#finish(requestId, still)
+      }
       // 这次交互结束了（不管是谁答的），让宿主给浏览器发 cancel 帧，把那张卡片收掉。
       release()
     }
@@ -668,26 +748,33 @@ export class InteractionBridge {
 
   #questionEvent(
     req: AskUserQuestionRequestLike,
-    first: AskUserQuestionItemLike,
+    item: AskUserQuestionItemLike,
     sessionId: string,
     requestId: string,
     isPlan: boolean,
+    index = 0,
+    total = 1,
   ): RawEvent {
     const kind: EventKind = isPlan ? 'plan' : 'question'
     const detail: EventDetail = {
       project: projectName(req.agent?.session),
       requestId,
       toolName: isPlan ? EXIT_PLAN_MODE_TOOL : ASK_USER_QUESTION_TOOL,
-      text: first.question,
+      text: item.question,
     }
-    if (first.detail) {
-      if (isPlan) detail.plan = first.detail
-      else detail.text = first.detail
+    if (item.detail) {
+      if (isPlan) detail.plan = item.detail
+      else detail.text = item.detail
     }
-    if (first.options && first.options.length > 0) detail.options = first.options
-    detail.multiSelect = first.multiSelect === true
+    if (item.options && item.options.length > 0) detail.options = item.options
+    detail.multiSelect = item.multiSelect === true
     // 日志兜底那条路（`extractToolCallEvent`）也会填这个字段，两条路靠它认重。
-    if (first.id) detail.questionId = first.id
+    if (item.id) detail.questionId = item.id
+    // 一次请求多个问题时，正文里要写清「第几问 / 共几问」，否则用户不知道后面还有没有。
+    if (total > 1) {
+      detail.questionIndex = index
+      detail.questionTotal = total
+    }
     return { kind, sessionId, seq: this.#syntheticSeq(requestId), time: this.#now(), detail }
   }
 

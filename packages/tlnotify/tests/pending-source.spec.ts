@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { extractToolCallEvent } from '../src/events.js'
+import { extractToolCallEvent, extractToolCallEvents } from '../src/events.js'
 import type { SessionEventLike, SessionLike } from '../src/events.js'
 
 const session: SessionLike = { id: 'sess-1', header: { cwd: 'D:\\demo\\proj' } }
@@ -67,5 +67,30 @@ describe('日志兜底路径认得出「这是哪一道题」', () => {
   it('别的工具完全不产生等待事件', () => {
     expect(extractToolCallEvent(session, toolCall('pwsh', { command: 'ls' }))).toBeUndefined()
     expect(extractToolCallEvent(session, { type: 'turn/end', seq: 1, time: 1 })).toBeUndefined()
+  })
+
+  it('一次带多个问题时逐条出事件：id / seq 都区分开，并标出第几问', () => {
+    const raws = extractToolCallEvents(
+      session,
+      toolCall('ask_user_question', {
+        questions: [
+          { id: 'engine', question: '谁判定？' },
+          { id: 'domain', question: '怎么落盘？' },
+          { id: 'surface', question: '入口放哪？' },
+        ],
+      }),
+    )
+    expect(raws.map((raw) => raw.detail.questionId)).toEqual(['engine', 'domain', 'surface'])
+    expect(raws.map((raw) => raw.detail.requestId)).toEqual([
+      'call_00_dGHQUzZz9ZWpxg1gDB906158',
+      'call_00_dGHQUzZz9ZWpxg1gDB906158#1',
+      'call_00_dGHQUzZz9ZWpxg1gDB906158#2',
+    ])
+    expect(raws.map((raw) => raw.detail.questionIndex)).toEqual([0, 1, 2])
+    expect(raws.map((raw) => raw.detail.questionTotal)).toEqual([3, 3, 3])
+    // 第 0 条沿用调用本身的 seq，其余是稳定的负数序号——index.ts 的 Dedupe 按
+    // (sessionId, seq) 认重，共用 seq 会让第 2、3 条被当成重复事件丢掉。
+    expect(raws[0]!.seq).toBe(408)
+    expect(new Set(raws.map((raw) => raw.seq)).size).toBe(3)
   })
 })

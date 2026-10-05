@@ -193,6 +193,13 @@ const CUSTOM_ANSWER_LABEL = '自定义回答（先输入序号再输入文本）
  */
 function questionBody(event: RawEvent, withOptions: boolean, text: TextMode): string {
   const lines: string[] = []
+  // 一次请求带了多个问题：写清这是第几问。否则用户不知道后面还有没有、也不知道该按什么
+  // 顺序答（文本作答按「最早一条」落位，见 `InteractionBridge.settleText`）。
+  const total = event.detail.questionTotal
+  if (typeof total === 'number' && total > 1) {
+    const index = typeof event.detail.questionIndex === 'number' ? event.detail.questionIndex : 0
+    lines.push(`（本次共 ${total} 问 · 这是第 ${index + 1} 问，按顺序作答即可）`)
+  }
   // 问题和选项都是模型写的，照样可能是 Markdown。选项标签一律 `oneLine`——它要
   // 跟在「1. 」后面，折行会把这个前缀冲掉。
   if (event.detail.text) lines.push(text(event.detail.text))

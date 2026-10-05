@@ -751,3 +751,113 @@ describe('同一条等待只发一次通知：两条生产者路径共用一道�
     expect(h.bridge.announceQuestion('sess-1', 'q1')).toBe(true)
   })
 })
+
+/**
+ * 一次请求带多个问题（`questions: [q1, q2, q3]`）。
+ *
+ * 现场 `session-5bc7441e`：模型一次问了 engine / domain / surface 三个，插件只渲染了第一个，
+ * 用户在 QQ 上只能看到第 1 问，宿主只拿到一个答案，模型只好反复重问——任务就卡在那儿。
+ */
+describe('InteractionBridge 一次请求带多个问题', () => {
+  const batch = (options: { callId?: string } = {}): unknown => ({
+    agent: { session: { id: 'sess-1', cwd: 'D:\\demo\\proj' } },
+    questions: [
+      { id: 'engine', question: '谁判定领域？', options: [{ label: '大模型' }, { label: '人工' }] },
+      { id: 'domain', question: '领域怎么落盘？', options: [{ label: '移目录' }, { label: '存字段' }] },
+      { id: 'surface', question: '入口放哪？', options: [{ label: '/admin' }, { label: '导入后自动' }] },
+    ],
+    wait: { callId: options.callId ?? 'call_batch' },
+  })
+
+  const click = (questionId: string, requestId: string, choice: string): ActionValue => ({
+    v: 1,
+    kind: 'question',
+    sessionId: 'sess-1',
+    requestId,
+    questionId,
+    choice,
+  })
+
+  /** 三条通知要走完 `#handleQuestion` 里那几次 await，用一次宏任务把它们排干净。 */
+  const drain = flush
+
+  it('每问各发一条通知，id / seq 逐条区分，并标出「第几问 / 共几问」', async () => {
+    const h = makeHarness()
+    void h.ask(batch())
+    await drain()
+    expect(h.pending.map((event) => event.detail.questionId)).toEqual(['engine', 'domain', 'surface'])
+    expect(h.pending.map((event) => event.detail.requestId)).toEqual(['call_batch', 'call_batch#1', 'call_batch#2'])
+    expect(h.pending.map((event) => event.detail.questionIndex)).toEqual([0, 1, 2])
+    expect(h.pending.map((event) => event.detail.questionTotal)).toEqual([3, 3, 3])
+    // seq 必须互不相同：index.ts 的 Dedupe 按 (sessionId, seq) 认重，共用 seq 会让第 2、3 条
+    // 通知被当成重复事件丢掉。
+    expect(new Set(h.pending.map((event) => event.seq)).size).toBe(3)
+    expect(h.bridge.pendingCount).toBe(3)
+    h.bridge.dispose()
+  })
+
+  it('答完一问不结账，全部答完才把三条答案一起交给宿主', async () => {
+    let tick = 0
+    const h = makeHarness({ now: () => (tick += 1) })
+    const answer = h.ask(batch())
+    await drain()
+    expect(h.bridge.settleText('sess-1', '1')).toEqual({ ok: true, echo: '已选择「大模型」' })
+    expect(h.bridge.settleText('sess-1', '1')).toEqual({ ok: true, echo: '已选择「移目录」' })
+
+    let settled = false
+    void answer.then(() => {
+      settled = true
+    })
+    await drain()
+    expect(settled).toBe(false)
+
+    expect(h.bridge.settleText('sess-1', '2')).toEqual({ ok: true, echo: '已选择「导入后自动」' })
+    await expect(answer).resolves.toEqual({
+      answers: [
+        { id: 'engine', selected: ['大模型'] },
+        { id: 'domain', selected: ['移目录'] },
+        { id: 'surface', selected: ['导入后自动'] },
+      ],
+    })
+    h.bridge.dispose()
+  })
+
+  it('文本正好等于某一问的标签时，落到那一问（不必按顺序）', async () => {
+    let tick = 0
+    const h = makeHarness({ now: () => (tick += 1) })
+    void h.ask(batch())
+    await drain()
+    expect(h.bridge.settleText('sess-1', '存字段')).toEqual({ ok: true, echo: '已选择「存字段」' })
+    // 第二问结算掉之后，剩下的按「最早一条」继续走。
+    expect(h.bridge.settleText('sess-1', '1')).toEqual({ ok: true, echo: '已选择「大模型」' })
+    h.bridge.dispose()
+  })
+
+  it('按钮带的 id 与题目不符时，以题目 id 为准', async () => {
+    let tick = 0
+    const h = makeHarness({ now: () => (tick += 1) })
+    const answer = h.ask(batch())
+    await drain()
+    expect(h.bridge.settle(click('surface', 'call_batch', '导入后自动'))).toEqual({
+      ok: true,
+      echo: '已选择「导入后自动」',
+    })
+    expect(h.bridge.settle(click('engine', 'call_batch#0', '人工'))).toEqual({ ok: true, echo: '已选择「人工」' })
+    expect(h.bridge.settle(click('domain', 'call_batch#1', '移目录'))).toEqual({ ok: true, echo: '已选择「移目录」' })
+    await expect(answer).resolves.toMatchObject({ answers: [{ id: 'engine' }, { id: 'domain' }, { id: 'surface' }] })
+    h.bridge.dispose()
+  })
+
+  it('整组结算干净：三问都答过之后不再命中，也不留残项', async () => {
+    let tick = 0
+    const h = makeHarness({ now: () => (tick += 1) })
+    void h.ask(batch({ callId: 'call_clean' }))
+    await drain()
+    expect(h.bridge.settleText('sess-1', '1')?.ok).toBe(true)
+    expect(h.bridge.settleText('sess-1', '1')?.ok).toBe(true)
+    expect(h.bridge.settleText('sess-1', '2')?.ok).toBe(true)
+    expect(h.bridge.settleText('sess-1', '1')).toBeUndefined()
+    expect(h.bridge.pendingCount).toBe(0)
+    h.bridge.dispose()
+  })
+})

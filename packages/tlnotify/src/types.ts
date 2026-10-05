@@ -104,9 +104,13 @@ export interface EventDetail {
   toolArguments?: unknown
   /** 提问的选项列表。 */
   options?: readonly QuestionOption[]
-  /** 提问里第一题的 id（`ask_user_question` 的 `questions[0].id`）。
+  /** 提问里这一题的 id（`ask_user_question` 的 `questions[i].id`）。
    *  两条生产者路径（`tool/call` 兜底与 waterfall）都拿得到它，用来认「这是同一个提问」。 */
   questionId?: string
+  /** 一次请求带多个问题时，这是第几问（0 起）。只在 `questionTotal > 1` 时填。 */
+  questionIndex?: number
+  /** 一次请求带了多少个问题。只在 `> 1` 时填（单问题事件的形状与以前完全一致）。 */
+  questionTotal?: number
   /** 是否允许多选。 */
   multiSelect?: boolean
   /** 计划正文（exit_plan_mode 的 plan markdown）。 */

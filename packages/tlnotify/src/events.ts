@@ -192,17 +192,40 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * 宿主的工具参数形如 `{ questions: [{ id, question, header, options:[{label,description}], multiSelect }] }`；
  * 但模型偶尔会写 `options: ["A","B"]` 这种简写，所以两种都吃。
  */
-export function extractQuestions(args: unknown): {
+/** 一条提问（`questions[i]`）里我们关心的那几样。 */
+export interface ParsedQuestion {
   text?: string
   options: { label: string; description?: string }[]
   multiSelect: boolean
   questionId?: string
-} {
+}
+
+/**
+ * 抽出**全部**问题。
+ *
+ * 一次 `ask_user_question` 可以带多个问题（模型传 `questions: [...]`，宿主自己的 UI 是
+ * 一问一答走完再一起提交）。调用方必须逐个渲染、逐个结算——只取第一个会让第 2..N 问在
+ * IM 上完全不可见（现场：`session-5bc7441e` 一次问了 engine/domain/surface 三个，只有
+ * 第一个到了 QQ，模型只好反复重问，任务卡住）。
+ */
+export function extractQuestionList(args: unknown): ParsedQuestion[] {
   const root = asRecord(args)
   const questions = root?.questions
   const list = Array.isArray(questions) ? (questions as unknown[]) : []
-  const first = asRecord(list[0]) ?? root
-  if (!first) return { options: [], multiSelect: false }
+  const source = list.length > 0 ? list : [root]
+  const out: ParsedQuestion[] = []
+  for (const entry of source) {
+    const one = parseQuestion(entry)
+    if (one) out.push(one)
+  }
+  // 解析不出任何东西时也给一条空壳，保持老行为（事件照发，正文退回 EVENT_LABELS）。
+  if (out.length === 0) out.push({ options: [], multiSelect: false })
+  return out
+}
+
+function parseQuestion(entry: unknown): ParsedQuestion | undefined {
+  const first = asRecord(entry)
+  if (!first) return undefined
 
   const questionText =
     typeof first.question === 'string'
@@ -233,7 +256,15 @@ export function extractQuestions(args: unknown): {
 
   const questionId = typeof first.id === 'string' ? first.id : undefined
   const multiSelect = first.multiSelect === true
-  return questionText ? { text: questionText, options, multiSelect, questionId } : { options, multiSelect, questionId }
+  const parsed: ParsedQuestion = { options, multiSelect }
+  if (questionText) parsed.text = questionText
+  if (questionId) parsed.questionId = questionId
+  return parsed
+}
+
+/** 兼容旧调用：只关心第一个问题的地方（既有的单问题测试）用这个。 */
+export function extractQuestions(args: unknown): ParsedQuestion {
+  return extractQuestionList(args)[0] ?? { options: [], multiSelect: false }
 }
 
 /** 从 `exit_plan_mode` 的参数里抽计划正文。 */
@@ -253,35 +284,68 @@ export function extractPlan(args: unknown): string | undefined {
  * 只在 InteractionBridge 的 waterfall 没有先认领同一个 callId 时才应该被使用，
  * 由调用方（index.ts）通过 `seenRequestIds` 判定。
  */
-export function extractToolCallEvent(
-  session: SessionLike,
-  event: SessionEventLike,
-): RawEvent | undefined {
-  if (event.type !== 'tool/call') return undefined
+/**
+ * 兜底路径：把一次 pending 类 `tool/call` 变成 RawEvent（**一个调用可能出多条**）。
+ *
+ * 只在 InteractionBridge 的 waterfall 没有先认领同一个 callId 时才应该被使用，
+ * 由调用方（index.ts）通过 `seenRequestIds` 判定。一次 `ask_user_question` 可以带多个
+ * 问题，每个问题都要有自己的通知，所以这里返回数组：第 0 条沿用调用本身的 `seq`，其余
+ * 各给一个由 `callId#i` 算出的稳定负数 `seq`——`Dedupe` 按 `(sessionId, seq)` 认重，共用
+ * `seq` 会让第 2..N 条被当成重复事件丢掉；`requestId` 也逐条区分，否则按钮 / 文本结算
+ * 会全部落到第 0 问上。
+ */
+export function extractToolCallEvents(session: SessionLike, event: SessionEventLike): RawEvent[] {
+  if (event.type !== 'tool/call') return []
   const data = (event.data ?? {}) as ToolCallLike
   const name = data.name
-  if (name !== ASK_USER_QUESTION_TOOL && name !== EXIT_PLAN_MODE_TOOL) return undefined
+  if (name !== ASK_USER_QUESTION_TOOL && name !== EXIT_PLAN_MODE_TOOL) return []
   const args = parseToolArguments(data.arguments)
-  const detail: EventDetail = {
+  const base: EventDetail = {
     project: projectName(session),
     requestId: data.callId,
     toolName: name,
     toolArguments: args,
   }
-  let kind: EventKind
   if (name === EXIT_PLAN_MODE_TOOL) {
-    kind = 'plan'
+    const detail: EventDetail = { ...base }
     const plan = extractPlan(args)
     if (plan) detail.plan = plan
-  } else {
-    kind = 'question'
-    const parsed = extractQuestions(args)
-    if (parsed.text) detail.text = parsed.text
-    if (parsed.options.length > 0) detail.options = parsed.options
-    if (parsed.questionId) detail.questionId = parsed.questionId
-    detail.multiSelect = parsed.multiSelect
+    return [{ kind: 'plan', sessionId: session.id, seq: event.seq, time: event.time, detail }]
   }
-  return { kind, sessionId: session.id, seq: event.seq, time: event.time, detail }
+
+  const parsed = extractQuestionList(args)
+  return parsed.map((item, index) => {
+    const detail: EventDetail = { ...base }
+    if (index > 0) detail.requestId = `${data.callId}#${index}`
+    if (item.text) detail.text = item.text
+    if (item.options.length > 0) detail.options = item.options
+    if (item.questionId) detail.questionId = item.questionId
+    detail.multiSelect = item.multiSelect
+    if (parsed.length > 1) {
+      detail.questionIndex = index
+      detail.questionTotal = parsed.length
+    }
+    const raw: RawEvent = {
+      kind: 'question',
+      sessionId: session.id,
+      seq: index === 0 ? event.seq : syntheticSeq(`${data.callId}#${index}`),
+      time: event.time,
+      detail,
+    }
+    return raw
+  })
+}
+
+/** 兼容旧调用：只要第一条。 */
+export function extractToolCallEvent(session: SessionLike, event: SessionEventLike): RawEvent | undefined {
+  return extractToolCallEvents(session, event)[0]
+}
+
+/** 稳定的负数序号：等待类事件没有真实 seq 时占位（去重仍按 requestId）。 */
+function syntheticSeq(seed: string): number {
+  let hash = 0
+  for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) | 0
+  return -Math.abs(hash || 1)
 }
 
 // ---------------------------------------------------------------------------
