@@ -36,15 +36,26 @@ profile 的 `cordis.patch.yml` 写任何挂载条目。
 > 归并时也只会把它当成「普通依赖」而不写进 `dsh.profile.bundles`。
 > 0.6.x 及更早版本只声明 `dsh.client`，在桌面端**根本无法被挂载**。
 
+> **为什么换掉 better-sqlite3（0.8.0 的修复）**：桌面宿主是用 Electron 自带的 Node
+> 跑起来的（`process.execPath` + `ELECTRON_RUN_AS_NODE=1`，实测 Node v24.18.1 /
+> `NODE_MODULE_VERSION 149`），而 pnpm 是在系统 Node（v24.12.0 / ABI 137）下编译
+> 原生模块的 —— 于是宿主挂载插件时 `dlopen` 直接失败：
+> `was compiled against a different Node.js version using NODE_MODULE_VERSION 137.
+> This version of Node.js requires NODE_MODULE_VERSION 149.`；
+> 插件激活不了、4890 端口没人监听、看板一直显示「服务未启动」。
+> 0.8.0 起持久层改用 Node 内置的 `node:sqlite`（零原生依赖，跨 Node / Electron 稳定），
+> 因此 **运行需 Node >= 22.13**（`node:sqlite` 自 v22.13.0 / v23.4.0 起不再需要
+> `--experimental-sqlite`），安装时也**不再需要** `allowBuilds` 放行原生模块。
+
 ### 方式一：一条命令安装并自动挂载（推荐）
 
 ```powershell
 dsh plugin --profile web add dsh-plugin-tlmemory
 ```
 
-`dsh plugin add` 会自动完成：装依赖 → 放行原生模块（`pnpm-workspace.yaml` 的
-`allowBuilds`）→ 把包名归并进 `dsh.profile.bundles`（幂等）。因为是 bundle 形态，
-**不会**再往 `cordis.patch.yml` 追加挂载条目。
+`dsh plugin add` 会自动完成：装依赖 → 把包名归并进 `dsh.profile.bundles`（幂等）。
+因为是 bundle 形态，**不会**再往 `cordis.patch.yml` 追加挂载条目；0.8.0 起包内已无原生
+模块，安装过程不会再有 `Ignored build scripts` 需要放行。
 另外 `dsh plugin --profile web list` 可查看挂载状态，`dsh plugin --profile web remove <包名>`
 可一键卸载。
 
@@ -86,19 +97,9 @@ cd ~/.dsh/profiles/web
 pnpm add dsh-plugin-tlmemory
 ```
 
-若安装过程中 pnpm 提示 `Ignored build scripts`（例如 `better-sqlite3`），
-在 `~/.dsh/profiles/web/pnpm-workspace.yaml` 中放行该原生模块后重新安装：
-
-```yaml
-allowBuilds:
-  better-sqlite3: true
-```
-
-> 注意键名：pnpm 11 用的是 `allowBuilds`（映射），不是 pnpm 10 的
-> `onlyBuiltDependencies`（数组）。pnpm 拦下构建时会自己往这里写一行
-> `better-sqlite3: set this to true or false` 占位，改成 `true` 即可。
-
-最后把包名加进该 profile 的 `package.json` —— **只装依赖、不写这一行是不会生效的**：
+0.8.0 起持久层走 Node 内置的 `node:sqlite`，没有原生模块需要编译，也不需要放行
+`allowBuilds`；请确保宿主 Node >= 22.13。装完直接把包名加进该 profile 的
+`package.json` —— **只装依赖、不写这一行是不会生效的**：
 
 ```json
 "dsh": { "profile": { "bundles": ["…", "dsh-plugin-tlmemory"] } }
@@ -152,8 +153,9 @@ allowBuilds:
 dsh web
 ```
 
-> Node 版本：运行需 Node >= 22；由于 `better-sqlite3` 是原生模块，**建议统一用 Node 24**
-> （原生二进制的 ABI 必须与运行它的 Node 匹配，混用会报 `NODE_MODULE_VERSION` 不匹配）。
+> Node 版本：运行需 **Node >= 22.13** —— 0.8.0 起持久层用 Node 内置的 `node:sqlite`
+> （v22.13.0 / v23.4.0 起不再需要 `--experimental-sqlite`，v24.2.0 起不再 experimental），
+> 因此不再有原生二进制，也就不再有 `NODE_MODULE_VERSION` 不匹配这类问题。
 
 ### 2. 访问记忆看板
 

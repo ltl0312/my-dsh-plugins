@@ -38,8 +38,8 @@ dsh plugin --profile web add dsh-plugin-tlsearch
 
 ### 手工安装（等价三步）
 
-`dsh plugin add` 自动做的就是这三件事：装依赖 → 放行原生模块
-（`pnpm-workspace.yaml` 的 `allowBuilds`）→ 把包归并进 `dsh.profile.bundles`（幂等）。
+`dsh plugin add` 自动做的就是这两件事：装依赖 → 把包归并进 `dsh.profile.bundles`（幂等）；
+若依赖闭包里出现原生模块，它还会顺手在 `pnpm-workspace.yaml` 的 `allowBuilds` 里放行。
 手工等价步骤如下（以 tlmemory 为例，另外两个包同理换包名）：
 
 1. 进入 profile 目录：`cd ~/.dsh/profiles/web`
@@ -50,8 +50,9 @@ dsh plugin --profile web add dsh-plugin-tlsearch
 "dsh": { "profile": { "bundles": ["…", "dsh-plugin-tlmemory"] } }
 ```
 
-> 只装依赖、不进 `dsh.profile.bundles` 是**不会生效**的。装 tlmemory 时若 pnpm 提示
-> `Ignored build scripts`（`better-sqlite3`），需要按该包 README 放行 `allowBuilds`。
+> 只装依赖、不进 `dsh.profile.bundles` 是**不会生效**的。0.8.0 起的 tlmemory 用 Node 内置
+> `node:sqlite`（需 Node >= 22.13），包内已无原生模块，安装时不会再出现
+> `Ignored build scripts`；其它包若出现，按下面「手工安装」一节的说明放行 `allowBuilds`。
 
 ### 查看与摘除
 
@@ -145,17 +146,18 @@ cd ~/.dsh/profiles/web
 pnpm add dsh-plugin-tlmemory
 ```
 
-若安装过程中 pnpm 提示 `Ignored build scripts`（例如 `better-sqlite3`），
-在 `~/.dsh/profiles/web/pnpm-workspace.yaml` 中放行该原生模块后重新安装：
+0.8.0 起 tlmemory 的持久层是 Node 内置的 `node:sqlite`（**无需任何编译**），装完直接
+把包名加进该 profile 的 `package.json` 即可。若所用版本仍提示 `Ignored build scripts`
+（依赖闭包里出现原生模块），在 `~/.dsh/profiles/web/pnpm-workspace.yaml` 里放行后重装：
 
 ```yaml
 allowBuilds:
-  better-sqlite3: true
+  包名: true
 ```
 
 > 注意键名：pnpm 11 用的是 `allowBuilds`（映射），不是 pnpm 10 的
 > `onlyBuiltDependencies`（数组）。pnpm 拦下构建时会自己往这里写一行
-> `better-sqlite3: set this to true or false` 占位，改成 `true` 即可。
+> `包名: set this to true or false` 占位，改成 `true` 即可。
 
 ---
 
@@ -199,8 +201,9 @@ allowBuilds:
 dsh web
 ```
 
-> Node 版本：运行需 Node >= 22；由于 `better-sqlite3` 是原生模块，**建议统一用 Node 24**
-> （原生二进制的 ABI 必须与运行它的 Node 匹配，混用会报 `NODE_MODULE_VERSION` 不匹配）。
+> Node 版本：运行需 **Node >= 22.13** —— 0.8.0 起 tlmemory 用 Node 内置的 `node:sqlite`
+> （v22.13.0 / v23.4.0 起不再需要 `--experimental-sqlite`），不再有原生二进制，
+> 也就不会再出现 `NODE_MODULE_VERSION` 不匹配。
 
 #### 2. 访问记忆看板
 

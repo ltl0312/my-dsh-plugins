@@ -208,9 +208,10 @@ describe('迁移与保真', () => {
 
   it('旧库（无 last_injected_at 列）打开后自动补列，默认 0 而非伪造时间戳', () => {
     legacyFile = path.join(os.tmpdir(), `tlmemory-indicator-${Date.now()}.db`)
+    // 用**驱动之外**的 node:sqlite 原生入口手工搭建旧库（不使用本包的 MemoryDB）
     const require = createRequire(import.meta.url)
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3')
-    const legacy = new Database(legacyFile)
+    const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite')
+    const legacy = new DatabaseSync(legacyFile)
     // 整改前的 schema：已有 source/status，但**没有** last_injected_at
     legacy.exec(`
       CREATE TABLE nodes (

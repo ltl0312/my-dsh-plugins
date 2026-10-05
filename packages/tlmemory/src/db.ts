@@ -7,7 +7,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
 import crypto from 'node:crypto'
-import Database from 'better-sqlite3'
+import { openDatabase, type SqlDatabase } from './sqlite.js'
 import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './types.js'
 
 /** 工程清单自愈维护的改动明细（供日志与测试断言） */
@@ -141,7 +141,7 @@ function parsePathSegments(input: unknown): string[] {
 }
 
 export class MemoryDB {
-  private db: Database.Database
+  private db: SqlDatabase
 
   constructor(dbPath?: string) {
     // 显式 ':memory:' 必须直达 SQLite 内存库，禁止落入默认磁盘路径分支
@@ -149,11 +149,11 @@ export class MemoryDB {
     if (resolvedPath !== ':memory:') {
       fs.mkdirSync(path.dirname(resolvedPath), { recursive: true })
     }
-    this.db = new Database(resolvedPath)
+    this.db = openDatabase(resolvedPath)
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
     // P1-2 多宿主共享同一 SQLite 文件（GUI 宿主 + 常驻服务宿主）时的并发写保护：
-    // better-sqlite3 默认 busy_timeout 为 0，另一宿主持有写锁时本侧立刻抛 SQLITE_BUSY，
+    // 驱动默认不设忙等（busy_timeout = 0），另一宿主持有写锁时本侧立刻抛 SQLITE_BUSY，
     // 静默沉淀链路会因此丢记忆。设 5s 忙等重试；synchronous=NORMAL 是 WAL 模式下的
     // 推荐搭配（事务提交不再强制 fsync 全量 WAL，兼顾性能与崩溃安全）。
     this.db.pragma('busy_timeout = 5000')
@@ -241,10 +241,10 @@ export class MemoryDB {
 
   /**
    * P1-7 事务包裹辅助：多语句写序列（建目录链 + 建叶子 + 后代重写 + 剪枝）必须是
-   * 单一原子单元 —— better-sqlite3 单条语句原子，但语句序列不原子，
+   * 单一原子单元 —— 单条语句原子，但语句序列不原子，
    * 「自身已改 path、后代未重写」的间隙崩溃会永久断裂物化路径链且无自愈手段。
-   * 仅顶层写入口（upsertLeaf / createLeaf / updateNode）使用，内部辅助方法
-   * 不得再套用（better-sqlite3 事务不允许嵌套）。
+   * 仅顶层写入口（upsertLeaf / createLeaf / updateNode）使用；驱动层的 transaction
+   * 用 SAVEPOINT 支持嵌套（见 sqlite.ts），内部辅助方法即使误套也不会毁掉外层原子性。
    */
   private withTransaction<T>(fn: () => T): T {
     return this.db.transaction(fn)()
@@ -1117,8 +1117,9 @@ export class MemoryDB {
   /**
    * 人工剪枝：删除指定节点并级联移除其全部后代（沿 parent_id 外键链递归收敛），
    * 每行删除均经 trg_nodes_ad 触发器同步清理 FTS5 索引，杜绝孤立句柄残留。
-   * P2-8：非法 id（非整数 / 非正数）直接返回 false —— 此前 Number('abc') 为
-   * NaN，better-sqlite3 绑定 NaN 抛异常被服务端转成 500，错误语义失真。
+   * P2-8：非法 id（非整数 / 非正数）直接返回 false —— 此前 Number('abc') 得到 NaN
+   * 并被当作参数绑定，驱动抛错后被服务端转成 500，错误语义失真。校验先于驱动执行，
+   * 与底层引擎对 NaN 的具体绑定策略无关。
    */
   public deleteNode(id: string): boolean {
     const numericId = Number(id)

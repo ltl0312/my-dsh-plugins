@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlmemory",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
@@ -15,7 +15,7 @@
     }
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -79,12 +79,10 @@
     "cordis": "^3.0.0"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/node": "^20.0.0",
+    "@types/node": "^24.0.0",
     "@types/ws": "^8.5.14",
     "cordis": "^3.0.0",
     "esbuild": "^0.27.7",

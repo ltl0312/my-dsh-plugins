@@ -46,10 +46,10 @@ describe('M1：schema 增量迁移与待确认区隔离', () => {
 
   it('旧库（无 source/status 列）打开后自动补列，存量节点回填 manual/confirmed', () => {
     legacyFile = path.join(os.tmpdir(), `tlmemory-m1-${Date.now()}.db`)
-    // 手工搭建 schema v1 旧表（无 source/status）
+    // 用**驱动之外**的 node:sqlite 原生入口手工搭建旧库（不使用本包的 MemoryDB）
     const require = createRequire(import.meta.url)
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3')
-    const legacy = new Database(legacyFile)
+    const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite')
+    const legacy = new DatabaseSync(legacyFile)
     legacy.exec(`
       CREATE TABLE nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

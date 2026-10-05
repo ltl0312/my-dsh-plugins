@@ -9,7 +9,8 @@
 - 单包操作：`pnpm --filter <pkg> <cmd>`（不要 `npm --workspace`）
 - 新增依赖：`pnpm add` / `pnpm add -D` / `pnpm -r add`（不要 `npm i`）
 - 临时执行包内命令：`pnpm exec <bin>`（不要 `npx`）
-- workspace 结构由 `pnpm-workspace.yaml` 定义；原生模块放行由 `allowBuilds` 控制（如 `better-sqlite3`、`esbuild`、`vue-demi`）
+- workspace 结构由 `pnpm-workspace.yaml` 定义；原生模块放行由 `allowBuilds` 控制（如 `esbuild`、`vue-demi`）
+- SQLite 一律走 Node 内置的 `node:sqlite`（`packages/tlmemory/src/sqlite.ts` 是唯一边界）：**不得**再引入 `better-sqlite3` 这类按 `NODE_MODULE_VERSION` 编译的驱动 —— 桌面宿主跑在 Electron 的 Node 上，与安装期的系统 Node ABI 不同，装上也加载不了
 
 唯一锁文件是 `pnpm-lock.yaml`。不得引入 `package-lock.json` / `yarn.lock`；若因误操作产生，删除并回到 pnpm。
 
