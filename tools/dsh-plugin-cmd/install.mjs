@@ -14,6 +14,18 @@
 //   node tools/dsh-plugin-cmd/install.mjs --uninstall   # 还原 bin.js 并移除 lib/commands
 //   node tools/dsh-plugin-cmd/install.mjs --dsh <路径>  # 指定 dsh 包目录
 //   node tools/dsh-plugin-cmd/install.mjs --dry-run     # 只报告将做的改动
+//
+// 支持的上游版本（2026-10-01 扩展）：
+//   * dsh 0.1.x —— 原始锚点集。
+//   * dsh 0.2.0-rc.2 —— bin.js 结构有四处变化，已各自加锚点/守卫：
+//       1) plugin 的 `--profile` 变成 `.requiredOption(..., selectProfile)`；
+//       2) action 里的守卫改成 `if (!manageDesktopProfile) rejectElectronProfile(...)`
+//          （移植时必须原样保留 manageDesktopProfile 这层判断）；
+//       3) 无参数报错语句多了一层缩进；
+//       4) 分发调用变成 `process.exit(await runPlugin(profile, args, options.packageManager))`，
+//          且 action 里新增了 `options.profile.toLowerCase()`（`--profile` 可选后会对
+//          undefined 解引用，被 commander 静默吞成「零输出 + exit 1」——已加 typeof 守卫）。
+//     对 0.1.x 输入的输出与扩展前逐字节一致（有回归脚本比对）。
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -52,13 +64,20 @@ const PLUGIN_ARGUMENT_CALL = `.argument("[args...]", ${PLUGIN_ARGS_DESCRIPTION})
 const PLUGIN_PASSTHROUGH =
   '.passThroughOptions().enablePositionalOptions().argument("[args...]", ' + PLUGIN_ARGS_DESCRIPTION + ')'
 
-/** `--profile` 选项的三种形态：上游原始 / 增强层 v1 / 增强层 v2（当前目标） */
+/** `--profile` 选项的形态：上游原始 / 增强层 v1 / 增强层 v2（当前目标） / 上游 0.2.0-rc.2 */
 const PROFILE_OPTION_UPSTREAM =
   '.requiredOption("--profile <name>", "the profile whose plugins to manage (initialized on first use)")'
 const PROFILE_OPTION_V1 =
   '.option("--profile <name>", "the profile whose plugins to manage (default: web; initialized on first use)")'
 const PROFILE_OPTION_V2 =
   '.option("--profile <name>", "the profile whose plugins to manage (default: web; initialized on first use)", collectProfile)'
+/**
+ * 0.2.0-rc.2 的上游原文：仍是 `requiredOption`，但已经带上上游自己的 `selectProfile`
+ * 收集器（重复给值会抛 InvalidArgumentError）。因此锚点比 {@link PROFILE_OPTION_UPSTREAM}
+ * 多一截 `, selectProfile`；替换掉整段后由增强层的 collectProfile + 守卫接管。
+ */
+const PROFILE_OPTION_UPSTREAM_RC2 =
+  '.requiredOption("--profile <name>", "the profile whose plugins to manage (initialized on first use)", selectProfile)'
 
 /** `--profile` 为可选后，官方那句 `rejectElectronProfile(plugin, options.profile)` 会因
  *  undefined.toLowerCase() 抛错并被 commander 的 catch 静默吞成 exit 1 —— 于是
@@ -71,6 +90,8 @@ const PROFILE_GUARD =
 
 /** 守卫已就位的判据（用于幂等/迁移判断） */
 const PROFILE_GUARD_MARKER = 'if (options.profile !== void 0) rejectElectronProfile(plugin, options.profile);'
+/** 两种守卫形态（0.1.x 无 manageDesktopProfile / 0.2.x 带它）共有的判据：重复 --profile 的显式报错 */
+const PROFILE_GUARD_DUPLICATE_MARKER = '--profile was given more than once'
 
 /** 注入的收集器定义：让「`--profile` 给两次」变成可判定的错误而不是静默覆盖（P1-3） */
 const PROFILE_COLLECTOR = [
@@ -153,7 +174,7 @@ export function patchBinJs(source, help) {
 
   apply({
     name: 'profile 选项改为可选且重复即报错（P1-3）',
-    from: [PROFILE_OPTION_UPSTREAM, PROFILE_OPTION_V1],
+    from: [PROFILE_OPTION_UPSTREAM_RC2, PROFILE_OPTION_UPSTREAM, PROFILE_OPTION_V1],
     to: PROFILE_OPTION_V2,
     already: (value) => value.includes(PROFILE_OPTION_V2),
   })
@@ -171,9 +192,21 @@ export function patchBinJs(source, help) {
   })
   apply({
     name: '重复/缺省 --profile 的处理（P1-3）',
-    from: '\t\trejectElectronProfile(plugin, options.profile);\n',
-    to: PROFILE_GUARD,
-    already: (value) => value.includes(PROFILE_GUARD_MARKER),
+    from: [
+      '\t\trejectElectronProfile(plugin, options.profile);\n',
+      '\t\t\tif (!manageDesktopProfile) rejectElectronProfile(plugin, options.profile);\n',
+    ],
+    to: (matched) => {
+      const indent = (matched.match(/^[ \t]*/) ?? [''])[0]
+      // 0.2.x 的原文带 `manageDesktopProfile`（只有 Electron 宿主才允许管理 desktop
+      // profile）—— 移植时必须原样保留这层判断，否则会悄悄放宽该限制。
+      const desktopGuard = matched.includes('manageDesktopProfile') ? ' && !manageDesktopProfile' : ''
+      return (
+        `${indent}if (Array.isArray(options.profile)) program.error("error: --profile was given more than once: " + options.profile.map((value) => JSON.stringify(value)).join(", ") + " — it must appear once, before the pnpm arguments");\n` +
+        `${indent}if (options.profile !== void 0${desktopGuard}) rejectElectronProfile(plugin, options.profile);\n`
+      )
+    },
+    already: (value) => value.includes(PROFILE_GUARD_MARKER) || value.includes(PROFILE_GUARD_DUPLICATE_MARKER),
   })
   apply({
     name: '注入 plugin 子命令帮助',
@@ -185,9 +218,22 @@ export function patchBinJs(source, help) {
   })
   apply({
     name: '无参数时改为打印帮助',
-    from: '\t\tif (args.length === 0) program.error("error: plugin needs pnpm arguments to forward (e.g. add <package>)");\n',
+    from: [
+      '\t\tif (args.length === 0) program.error("error: plugin needs pnpm arguments to forward (e.g. add <package>)");\n',
+      '\t\t\tif (args.length === 0) program.error("error: plugin needs pnpm arguments to forward (e.g. add <package>)");\n',
+    ],
     to: '',
     already: (value) => !value.includes('plugin needs pnpm arguments to forward'),
+  })
+  apply({
+    // 0.2.x 的 action 里对 `options.profile` 直接 `.toLowerCase()`。`--profile` 变可选后
+    // 缺省就是 undefined —— 抛出的 TypeError 会被 commander 的 catch 静默吞成
+    // 「零输出 + exit 1」，正是 P1-3 要修的现场。这里收进 typeof 判断。
+    name: '缺省 --profile 不再解引用 undefined（0.2.x 的 .toLowerCase()）',
+    from: 'profile: options.profile.toLowerCase() === "desktop" ? "desktop" : options.profile',
+    to: 'profile: typeof options.profile === "string" && options.profile.toLowerCase() === "desktop" ? "desktop" : options.profile',
+    // 上游 0.1.x 本来就是 `profile: options.profile`，没有这一句 —— 因此「不存在」即视为已满足
+    already: (value) => !value.includes('profile: options.profile.toLowerCase() === "desktop"'),
   })
 
   if (text.includes(DISPATCH_MARKER)) {
@@ -200,8 +246,13 @@ export function patchBinJs(source, help) {
     } else {
       missing.push('替换分发模块导入')
     }
-    const callPattern = 'process.exit(runPlugin(invocation.profile, invocation.args));'
-    if (text.includes(callPattern)) {
+    // 分发调用：0.1.x 是 `process.exit(runPlugin(...))`，0.2.x 多了 await 与第三个
+    // 参数（安装提供的 packageManager）；增强层自己定位 pnpm，因此都收敛到同一个目标。
+    const callPattern = [
+      'process.exit(runPlugin(invocation.profile, invocation.args));',
+      'process.exit(await runPlugin(invocation.profile, invocation.args, options.packageManager));',
+    ].find((candidate) => text.includes(candidate))
+    if (callPattern !== undefined) {
       text = text.replace(
         callPattern,
         'process.exit(await runPluginCommand(invocation.profile, invocation.args));',
