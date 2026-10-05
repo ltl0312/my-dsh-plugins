@@ -1,0 +1,29 @@
+# dsh-plugin-tlmemory bundle declaration: mount the memory runtime into the host
+# composite. 被列进 profile 的 dsh.profile.bundles 即激活本文件，因此
+# **不需要**在 profile 的 cordis.patch.yml 里再写挂载条目。
+#
+# 为什么必须是 bundle（而不是普通插件）：桌面端（Electron carrier）与
+# @deepseek-ai/dsh-plugin-manager 只认 dsh.bundle.patch 这一条激活通道 ——
+#   1. 安装时：`not-a-bundle` (`<包名> declares no dsh.bundle`) 直接拒绝；
+#   2. 归并时：`<包名> declares no dsh.bundle — installed as a plain dependency,
+#      not a profile layer`，永远不写进 dsh.profile.bundles。
+# 只声明 dsh.client 的普通插件在桌面端因此**根本无法被挂载**。
+#
+# 配置方式（三选一）：
+#   1. 宿主 GUI：Settings > Plugins > Plugin configuration > dsh-plugin-tlmemory
+#   2. 在自己的 profile 补丁层里**按 id 覆盖**（不要再写 - insert:，否则会挂载两次）：
+#        - id: dsh-plugin-tlmemory
+#          config:
+#            serverPort: 4890           # 看板服务端口（默认 4890）
+#            maxRecallCount: 5          # 单轮最多注入系统提示词的记忆条数
+#            enableAutoReflection: true # 会话结束异步自动反思提炼
+#            compactionInterval: 20     # 每累计 N 次沉淀触发一轮强化衰减 + 矛盾检测
+#   3. 完全不写 config，全部走插件 schema 的默认值。
+#
+# ⚠️ 从 0.6.x 升级上来的用户：旧的手工挂载条目用的是别的 id（例如
+# `tlmemory-runtime`）。Cordis 按 **id** 去重，不按 name —— 两处并存会让同一个包
+# 被挂载两次（两个数据库句柄、两个 4890 监听）。请先删掉旧的 `- insert:` 条目，
+# 再把包名加进 dsh.profile.bundles。
+- insert:
+    - id: dsh-plugin-tlmemory
+      name: dsh-plugin-tlmemory

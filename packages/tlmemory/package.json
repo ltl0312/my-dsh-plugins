@@ -1,7 +1,10 @@
 {
   "name": "dsh-plugin-tlmemory",
-  "version": "0.6.11",
+  "version": "0.7.0",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "description": "Cross-session and cross-project memory manager for dsh (silent turn-end sedimentation + native web client embedding)",
   "type": "module",
   "packageManager": "pnpm@12.4.2",
@@ -10,6 +13,9 @@
       "name": "pnpm",
       "onFail": "error"
     }
+  },
+  "engines": {
+    "node": ">=20"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -24,6 +30,9 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": []
@@ -32,16 +41,40 @@
   "files": [
     "dist",
     "web/dist",
-    "web/client.js"
+    "web/client.js",
+    "cordis.patch.yml"
   ],
   "scripts": {
     "build": "tsup && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
     "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json",
     "test": "vitest run",
     "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
-    "smoke:client": "node scripts/smoke-client.mjs"
+    "smoke:client": "node scripts/smoke-client.mjs",
+    "prepublishOnly": "pnpm run build"
   },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "memory",
+    "long-term-memory",
+    "agent",
+    "llm",
+    "sqlite",
+    "fts5"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ltl0312/my-dsh-plugins.git",
+    "directory": "packages/tlmemory"
+  },
+  "bugs": {
+    "url": "https://github.com/ltl0312/my-dsh-plugins/issues"
+  },
+  "homepage": "https://github.com/ltl0312/my-dsh-plugins/tree/main/packages/tlmemory#readme",
   "peerDependencies": {
     "cordis": "^3.0.0"
   },

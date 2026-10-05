@@ -11,7 +11,7 @@
 
 | 插件 | 版本 | 一句话 | 详细文档 |
 |---|---|---|---|
-| `dsh-plugin-tlmemory` | 0.6.11 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
+| `dsh-plugin-tlmemory` | 0.7.0 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
 | `dsh-plugin-tlnotify` | 0.2.0 | 把 DSH 会话事件聚合到一个 IM 通道推到 QQ / 飞书，并且能直接回话 | [`packages/tlnotify/README.md`](packages/tlnotify/README.md) |
 | `dsh-plugin-tlsearch` | 0.3.2 | 低 Token 消耗的联网搜索，只返回清洗过的标题 / URL / 摘要 | [`packages/tlsearch/README.md`](packages/tlsearch/README.md) |
 
@@ -29,6 +29,12 @@ dsh plugin --profile web add dsh-plugin-tlsearch
 
 三个包都是 **bundle 形态**，只要被列进 profile 的 `dsh.profile.bundles` 就会自动激活，
 **不需要**再往 profile 的 `cordis.patch.yml` 写挂载条目（补丁已随包发布）。
+
+> **DSH 桌面应用**：profile `desktop` 由 Electron 应用独占管理，`dsh --profile desktop …`
+> 与 `dsh plugin --profile desktop …` 都会被拒绝（`error: profile "desktop" is managed
+> exclusively by the Electron application`）。桌面端请在应用内的插件管理界面安装 /
+> 启用 —— `@deepseek-ai/dsh-plugin-manager` 只认 `dsh.bundle.patch` 这一条激活通道
+> （没有它会被 `not-a-bundle` 拒绝，或被当成普通依赖而不写进 `bundles`），三个包现在都满足。
 
 ### 手工安装（等价三步）
 
@@ -153,21 +159,25 @@ allowBuilds:
 
 ---
 
-### ⚙️ 配置与挂载
+### ⚙️ 配置
 
-编辑 Profile 目录下的补丁文件 `~/.dsh/profiles/web/cordis.patch.yml`，挂载插件即可
-（看板服务随宿主**零配置自启**，无需任何开关声明）：
+看板服务随宿主**零配置自启**，无需任何开关声明。要改配置就在**自己的 profile 补丁层**
+`~/.dsh/profiles/web/cordis.patch.yml` 里**按 id 覆盖**（写 `- id:` 覆写行，**不要**再写
+`- insert:`）：
 
 ```yaml
-- insert:
-    - id: tlmemory-runtime
-      name: "dsh-plugin-tlmemory"
-      config:
-        serverPort: 4890           # 看板服务端口（默认 4890）
-        maxRecallCount: 5          # 单轮最多注入系统提示词的记忆条数
-        enableAutoReflection: true # 会话结束异步自动反思提炼
-        compactionInterval: 20     # 每累计 N 次沉淀触发一轮强化衰减 + 矛盾检测
+- id: dsh-plugin-tlmemory
+  config:
+    serverPort: 4890           # 看板服务端口（默认 4890）
+    maxRecallCount: 5          # 单轮最多注入系统提示词的记忆条数
+    enableAutoReflection: true # 会话结束异步自动反思提炼
+    compactionInterval: 20     # 每累计 N 次沉淀触发一轮强化衰减 + 矛盾检测
 ```
+
+> ⚠️ **从 0.6.x 升级**：0.6.x 不是 bundle，只能靠手写的 `- insert:` 挂载（当时文档给的 id 是
+> `tlmemory-runtime`）。Cordis 按 **id** 去重而**不按 name**，旧条目与新 bundle 条目会同时生效
+> —— 同一个包被挂载两次。升级时请先删掉那段旧的 `- insert:`，再把包名留给
+> `dsh.profile.bundles` 托管。
 
 > 端口冲突自愈：4890 被前序 tlmemory 实例占用时，新实例会经健康探测确认同名进程
 > 后自动复用（多宿主并存无需手工分工）；被无关进程占用时自动顺延端口；连续顺延

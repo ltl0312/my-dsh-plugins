@@ -26,16 +26,33 @@
 
 ## 📦 安装方式
 
+本包是 DSH 原生 **bundle** 形态：`package.json` 的 `dsh.bundle.patch` 指向包内自带的
+`cordis.patch.yml`。**被列进 profile 的 `dsh.profile.bundles` 即自动激活**，不需要再往
+profile 的 `cordis.patch.yml` 写任何挂载条目。
+
+> **为什么必须是 bundle（0.7.0 的修复）**：桌面端（Electron carrier）与
+> `@deepseek-ai/dsh-plugin-manager` 只认 `dsh.bundle.patch` 这一条激活通道 ——
+> 安装时会以 `not-a-bundle`（`<包名> declares no dsh.bundle`）直接拒绝，
+> 归并时也只会把它当成「普通依赖」而不写进 `dsh.profile.bundles`。
+> 0.6.x 及更早版本只声明 `dsh.client`，在桌面端**根本无法被挂载**。
+
 ### 方式一：一条命令安装并自动挂载（推荐）
 
 ```powershell
 dsh plugin --profile web add dsh-plugin-tlmemory
 ```
 
-`dsh plugin add` 会自动完成下面三件以前需要手工做的事：装依赖 → 放行原生模块
-（`pnpm-workspace.yaml` 的 `allowBuilds`）→ 往 `cordis.patch.yml` 追加挂载条目（幂等）。
+`dsh plugin add` 会自动完成：装依赖 → 放行原生模块（`pnpm-workspace.yaml` 的
+`allowBuilds`）→ 把包名归并进 `dsh.profile.bundles`（幂等）。因为是 bundle 形态，
+**不会**再往 `cordis.patch.yml` 追加挂载条目。
 另外 `dsh plugin --profile web list` 可查看挂载状态，`dsh plugin --profile web remove <包名>`
-可一键摘除补丁并卸载。
+可一键卸载。
+
+> **桌面端（DSH 桌面应用）**：profile `desktop` 由 Electron 应用独占管理，
+> `dsh --profile desktop …` 与 `dsh plugin --profile desktop …` 都会被拒绝
+> （`error: profile "desktop" is managed exclusively by the Electron application`）。
+> 请直接在桌面端的插件管理界面安装 / 启用 `dsh-plugin-tlmemory` —— 它同样只按
+> `dsh.bundle` 归类，因此 0.7.0 起可以被正常识别为可激活的插件层。
 
 > `--profile` 必须紧跟 `dsh plugin`，且只能出现一次：`dsh plugin --profile web add --profile=1`
 > 这类写法会**显式报错**并拒绝执行（旧版会静默丢弃参数、同时把整条命令改道到另一个 profile）。
@@ -81,23 +98,39 @@ allowBuilds:
 > `onlyBuiltDependencies`（数组）。pnpm 拦下构建时会自己往这里写一行
 > `better-sqlite3: set this to true or false` 占位，改成 `true` 即可。
 
+最后把包名加进该 profile 的 `package.json` —— **只装依赖、不写这一行是不会生效的**：
+
+```json
+"dsh": { "profile": { "bundles": ["…", "dsh-plugin-tlmemory"] } }
+```
+
 ---
 
-## ⚙️ 配置与挂载
+## ⚙️ 配置
 
-编辑 Profile 目录下的补丁文件 `~/.dsh/profiles/web/cordis.patch.yml`，挂载插件即可
-（看板服务随宿主**零配置自启**，无需任何开关声明）：
+看板服务随宿主**零配置自启**，无需任何开关声明。想改配置就在**自己的 profile 补丁层**
+`~/.dsh/profiles/web/cordis.patch.yml` 里**按 id 覆盖**（写 `- id:` 覆写行，**不要**再写
+`- insert:`）：
 
 ```yaml
-- insert:
-    - id: tlmemory-runtime
-      name: "dsh-plugin-tlmemory"
-      config:
-        serverPort: 4890           # 看板服务端口（默认 4890）
-        maxRecallCount: 5          # 单轮最多注入系统提示词的记忆条数
-        enableAutoReflection: true # 会话结束异步自动反思提炼
-        compactionInterval: 20     # 每累计 N 次沉淀触发一轮强化衰减 + 矛盾检测
+- id: dsh-plugin-tlmemory
+  config:
+    serverPort: 4890           # 看板服务端口（默认 4890）
+    maxRecallCount: 5          # 单轮最多注入系统提示词的记忆条数
+    enableAutoReflection: true # 会话结束异步自动反思提炼
+    compactionInterval: 20     # 每累计 N 次沉淀触发一轮强化衰减 + 矛盾检测
 ```
+
+> ### ⚠️ 从 0.6.x 升级：先删掉旧的手工挂载条目
+>
+> 0.6.x 不是 bundle，只能靠 profile 补丁层里的 `- insert:` 挂载，而且当时文档给的 id 是
+> `tlmemory-runtime`（不是包名）。Cordis 按 **id** 去重而**不按 name**，所以旧的
+> `tlmemory-runtime` 条目和 0.7.0 的 bundle 条目**会同时生效** —— 同一个包被挂载两次，
+> 结果是两个数据库句柄、两个抢 4890 的监听实例。升级步骤：
+>
+> 1. 在 profile 的 `cordis.patch.yml` 里删掉整段 `- insert: - id: tlmemory-runtime …`；
+> 2. 把 `dsh-plugin-tlmemory` 加进 `dsh.profile.bundles`（`dsh plugin add` 会自动做）；
+> 3. 需要自定义配置时，按上面的 `- id: dsh-plugin-tlmemory` 覆写行写。
 
 > 端口冲突自愈：4890 被前序 tlmemory 实例占用时，新实例会经健康探测确认同名进程
 > 后自动复用（多宿主并存无需手工分工）；被无关进程占用时自动顺延端口；连续顺延
