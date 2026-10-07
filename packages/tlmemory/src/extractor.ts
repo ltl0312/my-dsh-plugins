@@ -40,22 +40,58 @@ function traceExtract(line: string): void {
   }
 }
 
-const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。请审视刚才这一轮人机交互，提取长期有效的高价值信息并固化为原子断言规则。
+/**
+ * 提炼时注入的**项目身份**（v0.8.2）：让提示词里的「当前仓库」有确定的指代对象。
+ *
+ * 旧提示词只写「project：当前仓库专有…」，却从不告诉模型「当前仓库」是哪一个 ——
+ * 模型手里只有一段对话文本，于是凡是像通用经验的条目（Docker / WSL / nginx 之类的
+ * 运维细节）一律被判成 global。给出工程名与根目录后，「这条结论属于本项目吗」才有
+ * 可判定的依据。
+ */
+export interface ReflectionProjectContext {
+  /** 可读工程名（宿主工作区标题或仓库目录名） */
+  name?: string
+  /** 工程根目录（绝对路径） */
+  root?: string
+  /** 作用域 tree_type（repo:<hash>） */
+  scope?: string
+}
+
+/** 项目身份在提示词里的渲染（三项全缺时退化为「当前会话所属项目」这一泛称） */
+function renderProjectContext(project: ReflectionProjectContext): string {
+  const name = String(project.name ?? '').trim()
+  const root = String(project.root ?? '').trim()
+  const scope = String(project.scope ?? '').trim()
+  const lines = [`- 工程名：${name || '（未知）'}`]
+  if (root) lines.push(`- 根目录：${root}`)
+  if (scope) lines.push(`- 作用域：${scope}`)
+  return lines.join('\n')
+}
+
+export const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。请审视刚才这一轮人机交互，提取长期有效的高价值信息并固化为原子断言规则。
 
 【可提取的三类信息】
 1. 关键工程结论：本轮达成的架构决策、技术选型、模块划分约定、特定依赖版本规约与踩坑反思。
 2. 用户偏好：用户明确表达或反复体现的编码风格偏好、工作流习惯、工具链倾向（如"我习惯用pnpm"、"错误信息用中文回复"）。
 3. 决策规则：本轮确立的"遇到X时应该/不应该Y"式的可复用操作准则。
 
+【当前会话所属项目】
+{{PROJECT_CONTEXT}}
+
 【提炼规则】
 1. 坚决舍弃：单次临时对话、闲聊客套、简单拼写修复以及未得出明确结论的推演过程。
-2. 作用域划分标准：
-   - global：跨项目通用的用户编码偏好、通用工具链规约或通用开发习惯。
-   - project：当前仓库专有的架构设计、模块划分约定、特定依赖版本规约与特有踩坑反思。
-3. 文本压缩约束：
+2. 作用域划分标准（硬约束，宁 project 不 global）：
+   - global：**只限跨工程通用的用户偏好 / 开发习惯 / 工具链习惯**（例如「用户要求全程中文回复」「用户偏好 pnpm」）。这类结论与任何具体仓库无关。
+   - project：**本轮对话所属项目**的架构设计、部署与运维、依赖与版本规约、目录与接口约定、特定踩坑反思。**只要这条结论是在上面这个项目里得出、并服务这个项目的，即使它看起来像通用经验（Docker / WSL / nginx / 磁盘迁移等），也必须归 project。**
+   - 判断口诀：换一个完全无关的仓库，这条结论还有效吗？只有答案为「是，而且与仓库无关」时才允许 global。
+3. 每条 reflection 必须给出 tree_basis 字段：
+   - "cross-project-preference"：仅当 tree = "global" 时使用，且必须是上述「跨工程通用的用户偏好 / 习惯」；
+   - "project-specific"：tree = "project" 时使用。
+   - 系统校验：tree = "global" 但 tree_basis 缺失或不为 "cross-project-preference" 的条目，一律按 project 落库。
+4. 文本压缩约束：
    - content 字段必须是提炼后的原子断言或操作约束，严禁输出代码块或情绪化长文。
    - 字符长度严格限制在 40 至 80 个中文字符以内。
-4. 路径分段（path_segments）通常包含 2 至 3 级中文分类名（例如 ["技术选型", "构建工具"] 或 ["用户偏好", "编码风格"]）。
+5. 路径分段（path_segments）通常包含 2 至 3 级中文分类名（例如 ["技术选型", "构建工具"] 或 ["用户偏好", "编码风格"]）。
 
 【输出格式】
 必须严格输出纯 JSON 对象，严禁包裹任何代码块外的 Markdown 解释性文本：
@@ -63,6 +99,7 @@ const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。�
   "reflections": [
     {
       "tree": "global" | "project",
+      "tree_basis": "cross-project-preference" | "project-specific",
       "path_segments": ["分类一级", "分类二级"],
       "name": "规则简名",
       "content": "40到80字高度精炼的核心断言规则",
@@ -74,6 +111,11 @@ const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引擎。�
 
 【输出格式硬约束】只允许输出上述 JSON 本体：禁止输出任何分析、思考、解释、寒暄或前后缀文字，
 禁止 Markdown 代码块围栏（不要套 json 代码块、不要写语言标注），第一个字符必须是 {，最后一个字符必须是 }。`
+
+/** 按项目身份渲染提炼提示词（项目身份是 global / project 判定的唯一指代对象） */
+export function buildReflectionPrompt(project: ReflectionProjectContext = {}): string {
+  return REFLECTION_SYSTEM_PROMPT.replace('{{PROJECT_CONTEXT}}', renderProjectContext(project))
+}
 
 // P2-12：路径分段 / 规则简名净化统一复用 db.ts 导出的 sanitizeSegment
 //（白名单：字母、数字、下划线、中文与连字符），不再本地维护正则副本。
@@ -358,11 +400,18 @@ export class MemoryExtractor {
   public async extractAndConsolidate(
     turnItem: TurnTrackItem,
     projectScope: string,
-    options: { signal?: AbortSignal; route?: { provider: string; model: string }; sessionId?: string } = {},
+    options: {
+      signal?: AbortSignal
+      route?: { provider: string; model: string }
+      sessionId?: string
+      /** 当前会话所属项目身份：提示词里 global / project 判定的唯一指代对象 */
+      project?: ReflectionProjectContext
+    } = {},
   ): Promise<void> {
     const { userText, assistantText } = turnItem
     const gateOk = this.passesEitherGate(userText, assistantText)
     const routeLabel = options.route ? `${options.route.provider}/${options.route.model}` : 'missing'
+    const systemPrompt = buildReflectionPrompt(options.project ?? { scope: projectScope })
     traceExtract(`dispatch: scope=${projectScope} route=${routeLabel} userText=${userText.length}ch assistantText=${assistantText.length}ch gate=${gateOk ? 'pass' : 'reject'}`)
     if (!gateOk) return
 
@@ -391,7 +440,7 @@ export class MemoryExtractor {
                 source: { kind: 'plugin', plugin: 'dsh-plugin-tlmemory' },
               },
             ],
-            system: REFLECTION_SYSTEM_PROMPT,
+            system: systemPrompt,
             // v0.6.11：2048 太小 —— 模型先写一段推理散文就会把预算烧光，
             // 真正的 JSON 被截断（日志里大量「Expected ',' or ']' ... at position 1744」）。
             maxTokens: 4096,
@@ -401,7 +450,7 @@ export class MemoryExtractor {
           }
         : {
             messages: [
-              { role: 'system', content: REFLECTION_SYSTEM_PROMPT },
+              { role: 'system', content: systemPrompt },
               { role: 'user', content: conversationContext },
             ],
             temperature: 0.1,
@@ -463,7 +512,24 @@ export class MemoryExtractor {
     // 第三重门禁：物理级原子化硬截断，单条断言不允许超过 80 字
     const boundedContent = boundContent(item.content)
     if (boundedContent.length < 4) return
-    const targetTreeType = item.tree === 'global' ? 'global' : projectScope
+
+    // v0.8.2 写路径作用域闸门（确定性兜底，零成本）：global 是**需要证据**的例外，
+    // 安全默认永远是「归属会话自己的项目」。旧实现 `item.tree === 'global'` 直接采信
+    // 模型判词，于是项目内的部署 / 运维 / 踩坑结论被记进全局树 —— 用户侧表现为
+    // 「本应记录到本项目记忆的内容，实际被记录到了全局记忆」，且该项目因零记忆被清理出清单。
+    // 现在只有显式声明 tree_basis = 'cross-project-preference'（跨工程通用的用户偏好 /
+    // 习惯）才允许离开项目树；其余（含字段缺失、大小写不一致、自相矛盾的组合）一律回落 project。
+    const declaredGlobal = item.tree === 'global'
+    const globalBasis = typeof item.tree_basis === 'string' && item.tree_basis.trim() === 'cross-project-preference'
+    const targetTreeType = declaredGlobal && globalBasis ? 'global' : projectScope
+    if (declaredGlobal && !globalBasis) {
+      traceExtract(
+        `scope-floor: tree=global 但 tree_basis=${String(item.tree_basis ?? 'missing')} ⇒ 回落 project(${projectScope})`,
+      )
+      this.ctx.logger?.info?.(
+        `[tlmemory] 作用域兜底：条目「${String(item.name).slice(0, 24)}」声明 global 却未给出跨工程偏好依据，已落回当前工程 [${projectScope}]`,
+      )
+    }
 
     const cleanSegments = sanitizePathSegments(item.path_segments)
     const cleanName = sanitizeName(item.name)

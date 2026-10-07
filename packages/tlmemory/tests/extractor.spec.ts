@@ -181,6 +181,8 @@ describe('MemoryExtractor 静默降级', () => {
                 },
                 {
                   tree: 'global',
+                  // v0.8.2 契约：global 需要显式的跨工程偏好依据（用户偏好属于此列）
+                  tree_basis: 'cross-project-preference',
                   path_segments: ['用户偏好', '回复风格'],
                   name: '中文回复',
                   content: '用户偏好所有工程交互回复统一使用中文表达',
@@ -322,5 +324,101 @@ describe('MemoryExtractor 静默降级', () => {
 
     await expect(extractor.extractAndConsolidate(item, 'repo:test')).resolves.toBeUndefined()
     db.close()
+  })
+
+  // ── v0.8.2 作用域路由（缺陷 2 根因：项目内容被写进全局树）──────────────────
+  // 写路径的安全默认是「归属会话自己的项目」；global 是**需要证据**的例外。
+  describe('作用域路由：global 需要跨工程偏好依据', () => {
+    const CONVERSATION: TurnTrackItem = {
+      turn: 1,
+      userText: '这轮把 NewAPI 容器的 nginx 端口与 Cookie 变量理清楚了，请沉淀结论。',
+      assistantText: '已定位：容器网络与 Cookie 变量必须成组配置。',
+    }
+
+    function makeExtractor(reflections: unknown[]) {
+      const db = new MemoryDB(':memory:')
+      const llm = {
+        stream: vi.fn().mockReturnValue(
+          (async function* () {
+            yield { type: 'delta', delta: JSON.stringify({ reflections }) }
+          })(),
+        ),
+      }
+      const ctx = { logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, llm }
+      return { db, ctx, extractor: new MemoryExtractor(ctx as never, db), llm }
+    }
+
+    it('声明 global 但缺少跨工程依据 ⇒ 回落当前工程（不再污染全局树）', async () => {
+      const { db, ctx, extractor } = makeExtractor([
+        {
+          tree: 'global',
+          path_segments: ['部署运维', '容器网络'],
+          name: '双Cookie变量须成组',
+          content: 'NewAPI 部署时 SESSION_COOKIE 与另一 Cookie 变量必须成组配置',
+          keywords: ['NewAPI', 'Cookie'],
+        },
+      ])
+
+      await extractor.extractAndConsolidate(CONVERSATION, 'repo:cnws', {
+        project: { scope: 'repo:cnws', name: '炎火云服务器8c8g', root: 'D:\\Code\\DSH工作区\\炎火云服务器8c8g' },
+      })
+
+      const [leaf] = db.getAllNodes().filter((n) => n.is_leaf === 1)
+      expect(leaf?.name).toBe('双Cookie变量须成组')
+      // 归属当前工程，而非 global
+      expect(leaf?.tree_type).toBe('repo:cnws')
+      expect(db.getNodesByScope('global').length).toBe(0)
+      // 回落有可读日志，便于线上诊断
+      expect(
+        ctx.logger.info.mock.calls.some((call) =>
+          call.some((arg) => typeof arg === 'string' && arg.includes('未给出跨工程偏好依据')),
+        ),
+      ).toBe(true)
+      db.close()
+    })
+
+    it('显式给出 cross-project-preference ⇒ 允许落全局树', async () => {
+      const { db, extractor } = makeExtractor([
+        {
+          tree: 'global',
+          tree_basis: 'cross-project-preference',
+          path_segments: ['用户偏好', '回复风格'],
+          name: '中文回复',
+          content: '用户偏好所有工程交互回复统一使用中文表达',
+          keywords: ['中文'],
+        },
+      ])
+
+      await extractor.extractAndConsolidate(CONVERSATION, 'repo:cnws', { project: { scope: 'repo:cnws' } })
+
+      expect(db.getNodesByScope('global').some((n) => n.name === '中文回复')).toBe(true)
+      db.close()
+    })
+
+    it('提示词携带当前项目身份（工程名 / 根目录），让 global/project 判定有唯一指代', async () => {
+      const { db, extractor, llm } = makeExtractor([])
+      const project = { scope: 'repo:cnws', name: '炎火云服务器8c8g', root: 'D:\\Code\\DSH工作区\\炎火云服务器8c8g' }
+
+      // DSH 宿主形态（带 route）：system 走顶层字段
+      await extractor.extractAndConsolidate(CONVERSATION, 'repo:cnws', {
+        project,
+        route: { provider: 'tl', model: 'deepseek-v4.1-flash' },
+      })
+      // 兼容形态（无 route）：system 走 messages[0]
+      await extractor.extractAndConsolidate(CONVERSATION, 'repo:cnws', { project })
+
+      const routed = llm.stream.mock.calls[0]?.[0] as { system?: string }
+      const legacy = llm.stream.mock.calls[1]?.[0] as { messages?: Array<{ role: string; content: string }> }
+      const prompts = [routed.system ?? '', legacy.messages?.[0]?.content ?? '']
+      for (const prompt of prompts) {
+        expect(prompt).toContain('炎火云服务器8c8g')
+        expect(prompt).toContain('D:\\Code\\DSH工作区\\炎火云服务器8c8g')
+        expect(prompt).toContain('repo:cnws')
+        // 判定口径与依据字段都必须写进提示词，模型才可能给出可校验的输出
+        expect(prompt).toContain('cross-project-preference')
+        expect(prompt).toContain('tree_basis')
+      }
+      db.close()
+    })
   })
 })

@@ -255,10 +255,30 @@ export function apply(ctx: Context, config: Config): () => void {
         '或设置 DSH_WORKSPACE_DIR 指向目标仓库。',
     )
   }
-  const workspaceRegistry: WorkspaceRegistry | null = loadWorkspaceRegistry()
+  /**
+   * 宿主工作区白名单的**实时**读取入口（v0.8.2 根因修复：不再在装配期冻结快照）。
+   *
+   * 为什么必须实时：`workspace.json` 是宿主在**运行期间**持续改写的文件 —— 用户新建
+   * 工作区（本例是中文名工作区「磁盘清理 / 炎火云服务器8c8g」）时，宿主把新工作区追加
+   * 进去，而插件进程可能已经跑了很久。旧实现把装配那一刻的白名单缓存进闭包
+   * （`const workspaceRegistry = loadWorkspaceRegistry()`），此后新建的工作区**永远
+   * 不在名单里**：
+   *   1. 会话作用域被误判成「不属于宿主合法工作区」→ `resolveSafeScope` 把记忆
+   *      改道写入白名单首位那个**与用户当前项目毫无关系**的工程（实测落到
+   *      repo:82252c8a4eb6 / deskcraft，抽取日志与库里都留有证据）；
+   *   2. 真正的工作区一条记忆都收不到 ⇒ 被「零记忆即清理」的维护周期从看板清单里
+   *      摘掉 ⇒ 用户看到的正是「中文工作区不自动记录记忆 / 记忆列表里找不到工作区」。
+   * 读取器自身按 mtime+size 缓存，逐次调用只是一次 statSync；宿主改名 / 新增 / 删除
+   * 工作区都能立刻生效，无需重启宿主。
+   */
+  const workspaceRegistryNow = (): WorkspaceRegistry | null => loadWorkspaceRegistry()
   /** 宿主工作区白名单判定：登记表不可读时全部放行（宁可多显示，也不误删用户记忆） */
-  const isAllowedWorkspaceScope = (scope: string): boolean =>
-    workspaceRegistry === null || workspaceRegistry.has(scope)
+  const isAllowedWorkspaceScope = (scope: string): boolean => {
+    const registry = workspaceRegistryNow()
+    return registry === null || registry.has(scope)
+  }
+  /** 装配期的白名单快照：仅供启动时的一次性归并 / 维护使用，绝不参与逐事件判定 */
+  const workspaceRegistry: WorkspaceRegistry | null = workspaceRegistryNow()
   /** 当前工程是否属于宿主合法工作区 —— 决定它能否登记、能否当看板锚点 */
   const projectIsAllowed = isAllowedWorkspaceScope(projectScope)
   /**
@@ -278,9 +298,12 @@ export function apply(ctx: Context, config: Config): () => void {
 
   // v0.6.6 防漂移降级：白名单首位合法工作区（scope + 标题）。仅在「进程/会话作用域
   // 被判定为孤儿」时作为记忆写入的降落点 —— 严禁以用户主目录之类的名单外目录建工程。
+  // v0.8.2：降落点必须**实时解析**（读当前 `workspace.json`），否则宿主删掉/改名过
+  // 那个工作区后，降落点会指向一个已不存在的工程。
   const fallbackWorkspace = (): { scope: string; name: string } | null => {
-    if (workspaceRegistry === null) return null
-    for (const [scope, title] of workspaceRegistry.scopes) {
+    const registry = workspaceRegistryNow()
+    if (registry === null) return null
+    for (const [scope, title] of registry.scopes) {
       return { scope, name: title }
     }
     return null
@@ -429,6 +452,9 @@ export function apply(ctx: Context, config: Config): () => void {
 
   const dispatchExtraction = (item: TurnTrackItem, scope: string, extra: ExtractionRouteContext = {}): void => {
     const controller = new AbortController()
+    // v0.8.2：提炼提示词必须带上「当前项目是谁」—— 否则模型只能凭常识猜
+    // global / project，项目内的部署运维结论会被判成通用经验写进全局树。
+    const project = identityByScope.get(scope)
     const run = extractionChain
       .then(() => {
         if (disposed) return
@@ -440,7 +466,11 @@ export function apply(ctx: Context, config: Config): () => void {
           ctx.logger?.error?.('[tlmemory] 工程登记补录异常:', err)
         }
         return extractor
-          .extractAndConsolidate(item, scope, { signal: controller.signal, ...extra })
+          .extractAndConsolidate(item, scope, {
+            signal: controller.signal,
+            project: { scope, name: project?.name, root: project?.root },
+            ...extra,
+          })
           .then(() => server.notifyTreeChanged(scope))
           .catch((err) => ctx.logger?.error?.('[tlmemory] 后台静默沉淀任务异常:', err))
           .finally(() => {

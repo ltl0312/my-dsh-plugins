@@ -127,11 +127,20 @@ body,
    滚动条 / 表单控件这类需要 color-scheme 的地方，改为在**具体元素**上声明。 */
 html {
   height: 100%;
+  /* 页面绝不允许横向滚动（缺陷 3 的布局不变量）。
+     详情抽屉是**视口级浮层**（position: fixed + Teleport 到 body）：只要文档本身
+     不可能出现横向可滚动区域，任何入口（超长路径面包屑、超宽表格、图谱变换、
+     以及宿主侧不可预期的宽内容）都无法把整页推向一侧 —— 用户侧看到的就是
+     「打开记忆详情后界面整体向右移动约半个屏幕」。
+     看板自身的横向滚动需求全部落在内部滚动容器上（.tlm-main-inner /
+     .tlm-drawer-body / .tlm-md-pre），不需要文档级横向滚动。 */
+  overflow-x: hidden;
 }
 
 body {
   margin: 0;
   height: 100%;
+  overflow-x: hidden;
   color: var(--tlm-fg);
   font-family: var(--tlm-font);
   -webkit-font-smoothing: antialiased;

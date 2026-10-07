@@ -79,8 +79,23 @@ export interface SearchResult extends MemoryNode {
   bm25_rank: number
 }
 
+/**
+ * 提炼条目的作用域依据（v0.8.2 契约新增）。
+ *
+ * 为什么必须由模型显式声明：写路径的安全默认是「归属当前项目」，
+ * 只有**跨工程通用**的用户偏好 / 习惯才允许离开项目树进入 global。
+ * 旧契约只给了 `tree` 一个字段，模型把「看起来通用的工具链经验」直接判成
+ * global，于是项目内的部署 / 运维 / 踩坑结论被记进全局树（用户侧表现为
+ * 「本应记录到本项目记忆的内容，实际被记录到了全局记忆」）。
+ * 现在 global 需要显式证据：`tree_basis` 缺失或不等于 'cross-project-preference'
+ * 时，条目按 project 处理。
+ */
+export type ReflectionTreeBasis = 'cross-project-preference' | 'project-specific'
+
 export interface RawReflectionItem {
   tree: 'global' | 'project'
+  /** global 的必要条件（见 ReflectionTreeBasis）；缺失即按 project 落库 */
+  tree_basis?: ReflectionTreeBasis | string
   path_segments: string[]
   name: string
   content: string

@@ -73,6 +73,18 @@ dsh plugin --profile web add dsh-plugin-tlmemory
 > 0.8.1 起白名单一并放行 `dsh-app:` 协议；`null` / `file:` / 其它自定义协议仍然拒绝。
 > 升级后请**重启桌面应用**。
 
+> **记忆归属修复（0.8.2）**：三处**写入路径**的行为变更 ——
+> 1. 宿主工作区白名单改为**实时读取**（旧版在插件装配那一刻冻结快照）：宿主运行期间
+>    新建 / 改名的工作区（含中文名工作区）立刻生效，不会再被「防漂移」改道写进白名单
+>    首位那个**无关工程**，导致该工作区零记忆、随后被维护周期摘出看板清单；
+> 2. 提炼提示词携带**当前项目身份**（工程名 / 根目录 / scope），`global` 判据收窄为
+>    「跨工程通用的用户偏好 / 习惯」；`tree = "global"` 只在同时给出
+>    `tree_basis = "cross-project-preference"` 时生效，否则一律落回当前工程
+>    （`tlmemory_save(tree_scope=global)` 这条显式通道不受影响）；
+> 3. 看板 `html` / `body` 禁止横向滚动（`overflow-x: hidden`），打开记忆详情不会再出现
+>    整页横向位移。
+> 升级后请**重启宿主**；`pnpm run verify:drawer` 可用真实浏览器复测抽屉几何（PASS / FAIL）。
+
 > `--profile` 必须紧跟 `dsh plugin`，且只能出现一次：`dsh plugin --profile web add --profile=1`
 > 这类写法会**显式报错**并拒绝执行（旧版会静默丢弃参数、同时把整条命令改道到另一个 profile）。
 > 命令的失败以稳定退出码分类：`0` 成功 / `1` 用法或前置条件不满足 / `2` pnpm 缺失 /
