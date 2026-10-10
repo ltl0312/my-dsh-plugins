@@ -216,8 +216,13 @@ function questionBody(event: RawEvent, withOptions: boolean, text: TextMode): st
   if (event.detail.multiSelect) lines.push('（可多选）')
   // QQ 单聊的按钮在桌面端 / 老版本上根本不渲染，正文里的这句话才是真正可用的作答
   // 入口（文本作答由 InteractionBridge.settleText 结算）。别删。
+  //
+  // 多选的措辞把**回文字放在前面**：它不依赖任何客户端能力，任何情况下都成立；按钮
+  // 那条路要 `requestId` 与渲染出来的按钮（见 `buildActions`），只在正常那一路才有。
   lines.push(
-    event.detail.multiSelect ? '回复序号或选项文字即可作答，多个用空格隔开。' : '回复序号或选项文字即可作答。',
+    event.detail.multiSelect
+      ? '可多选：回复序号（多个用空格隔开）一次提交；也可以点选项勾选，再点「提交所选」。'
+      : '回复序号或选项文字即可作答。',
   )
   return lines.join('\n')
 }
@@ -324,7 +329,11 @@ function buildActions(event: RawEvent, options: RenderOptions): NotificationActi
       const questionId = event.detail.questionId
       const options_ = event.detail.options ?? []
       if (requestId && options_.length > 0) {
-        options_.slice(0, MAX_ACTION_BUTTONS).forEach((option, index) => {
+        // 多选要**留一个位置**给「提交所选」：选项按钮一下去只是勾选，提交是独立的一步。
+        // 原来多选也照单选发按钮，点第一个就结算了，用户点第二个只拿到「已经过期」。
+        const multiSelect = event.detail.multiSelect === true
+        const optionBudget = multiSelect ? MAX_ACTION_BUTTONS - 1 : MAX_ACTION_BUTTONS
+        options_.slice(0, optionBudget).forEach((option, index) => {
           actions.push(
             action(
               'question',
@@ -335,6 +344,15 @@ function buildActions(event: RawEvent, options: RenderOptions): NotificationActi
             ),
           )
         })
+        if (multiSelect) {
+          actions.push(
+            action('question', '提交所选', sessionId, {
+              requestId,
+              ...(questionId ? { questionId } : {}),
+              submit: true,
+            }),
+          )
+        }
       }
       break
     }

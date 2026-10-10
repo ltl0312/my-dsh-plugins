@@ -8,9 +8,14 @@
 //
 //   - 「显式配置」= 宿主传进来的 cordis config（profile 补丁里的裸 row / GUI 表单）。
 //     只有**确实写了的字段**才算显式；没写的字段不会覆盖文件。
-//   - config.json 是运行时权威存储：`/mode` 之类的 IM 命令、以及将来可能的
-//     自建设置页都写它。
+//   - config.json 是运行时权威存储：`/mode` 之类的 IM 命令、以及插件自己的
+//     设置页都写它。
 //   - 推论：想让 `/mode` 命令能改运行模式，就**不要**在 GUI/补丁里显式写 `mode`。
+//
+//   ⚠️ 「写没写」在解析后的配置里是看不出来的——宿主先跑了一遍本插件的 `Config`
+//   schema，schemastery 会把缺失字段填成默认值（见 `writtenOnly()`）。所以这里的
+//   判据是「与内置默认值不同才算写过」；少了这一步，config.json 里的设置会在每次
+//   启动被默认值覆盖掉。
 //
 // 这样两种用法都自洽：纯 GUI 用户（从不碰文件）改表单即生效；命令行用户
 // （从不碰 GUI）改文件即生效；两者都用的用户按上面的优先级推理即可。
@@ -72,8 +77,16 @@ export function defaultRouting(): RoutingConfig {
   }
 }
 
+/**
+ * 会话模式的默认值。
+ *
+ * `targetSessionId` 是遗留字段（投递已经不看它了），但**必须在这里给出默认值**：
+ * `writtenOnly()` 拿这份默认面判断「用户到底写没写」，漏掉一个键，宿主 schema 填出来
+ * 的那个空默认值就会被当成用户意图，把 config.json 里的值盖成空。
+ */
 export function defaultSessionMode(): SessionModeConfig {
   return {
+    targetSessionId: '',
     context: {
       includeAssistant: true,
       includeTools: true,
@@ -93,10 +106,19 @@ export function defaultGlobalMode(): GlobalModeConfig {
   }
 }
 
+/**
+ * 内置默认配置。
+ *
+ * ⚠️ **每一个可配置的键都要在这里出现**，包括看起来「省略就等于空串」的那几个
+ * （`defaultChannelId` / `dataDir` / `session.targetSessionId`）。这份对象同时是
+ * `writtenOnly()` 的比较基准：漏掉一个键，宿主 schema 补出来的空默认值就会被当成
+ * 「用户写过」，把 config.json 里的设置盖成空——默认通道被清掉就是这么来的。
+ */
 export function defaultConfig(): TlnotifyConfig {
   return {
     enabled: true,
     mode: 'global',
+    defaultChannelId: '',
     channels: [],
     events: defaultEvents(),
     content: defaultContent(),
@@ -104,6 +126,7 @@ export function defaultConfig(): TlnotifyConfig {
     session: defaultSessionMode(),
     global: defaultGlobalMode(),
     logLevel: 'info',
+    dataDir: '',
   }
 }
 
@@ -113,6 +136,83 @@ export function defaultConfig(): TlnotifyConfig {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** 结构相等（数组逐项、对象逐键）；`===` 之外只需要覆盖配置里的形状。 */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => sameValue(item, b[index]))
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keys = Object.keys(a)
+    if (keys.length !== Object.keys(b).length) return false
+    return keys.every((key) => key in b && sameValue(a[key], b[key]))
+  }
+  return false
+}
+
+/**
+ * 挑出「确实写过」的那部分：只保留与内置默认值**不同**的键，整棵子树都等于默认值时
+ * 整枝丢掉。
+ *
+ * ── 为什么必须这么判 ─────────────────────────────────────────────────────
+ *
+ * 宿主装载插件时会先跑一遍插件自己的 `Config` schema：cordis 的 `resolveConfig()`
+ * （`cordis/lib/index.mjs:156-165`）就是一句 `config = schema(config)`，而 schemastery
+ * 会把**没写的字段**逐个填成 `.default()`。所以 `apply(ctx, config)` 收到的对象里
+ * `content.maxBodyChars` 永远是 1800、`routing.tableTtlDays` 永远是 7——跟用户在补丁 /
+ * GUI 表单里到底写没写过毫无关系。
+ *
+ * 而本文件顶部的规则是「显式配置 > config.json > 内置默认值」，并且写明「只有**确实
+ * 写了的字段**才算显式」。两件事在解析后的配置里是矛盾的：默认值把「没写」伪装成了
+ * 「写过」。后果不只是显示不对，而是**数据被毁**——`persistEffectiveConfig()` 每次启动
+ * 都把有效配置写回 config.json，于是插件设置页里刚设好的 4000，会在下次启动被 1800
+ * 覆盖进文件（现场：用户报「设置正文上限后下次打开 DSH 又变回 1800」，而 config.json
+ * 里确实只剩 1800）。
+ *
+ * 判据只能是「与默认值不同」：解析后的配置不携带 presence 元数据，这是唯一还有信息量
+ * 的信号。
+ *
+ * ── 已知代价 ─────────────────────────────────────────────────────────────
+ *
+ * 用户在补丁 / GUI 表单里**显式写了一个恰好等于默认值的值**，会被当成没写。那个值想
+ * 覆盖的文件值只可能来自插件自己的设置页，而「用户最后在设置页里改成的值」才是他最后
+ * 表达过的意图，以文件为准反而是对的。所以这个代价可以接受，也让 `applyRuntimeOverrides()`
+ * 那条为 `mode` 打的补丁不再扩大。
+ */
+function writtenOnly(
+  source: Record<string, unknown>,
+  defaults: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (!(key in defaults)) {
+      // 默认值里没有这个键：不是默认值能解释的东西，按「写过」处理。
+      out[key] = value
+      continue
+    }
+    const fallback = defaults[key]
+    if (isPlainObject(value) && isPlainObject(fallback)) {
+      const nested = writtenOnly(value, fallback)
+      if (Object.keys(nested).length > 0) out[key] = nested
+      continue
+    }
+    if (!sameValue(value, fallback)) out[key] = value
+  }
+  return out
+}
+
+/** 把宿主传来的配置投影成「用户确实写过的那部分」；什么都没写时返回 `undefined`。 */
+function explicitOnly(
+  explicit: Partial<TlnotifyConfig> | undefined,
+): Partial<TlnotifyConfig> | undefined {
+  if (!explicit) return undefined
+  const written = writtenOnly(
+    explicit as Record<string, unknown>,
+    defaultConfig() as unknown as Record<string, unknown>,
+  )
+  return Object.keys(written).length > 0 ? (written as Partial<TlnotifyConfig>) : undefined
 }
 
 /** 逐层合并，只覆盖 source 里**确实存在**的键；数组整体替换。 */
@@ -134,14 +234,19 @@ function deepMerge<T>(base: T, source: unknown): T {
  *
  * `channels` 特殊处理：任何一侧给出了**非空数组**就整体替换，避免出现
  * 「默认空数组 + 文件里的通道」被逐项合并成半截配置的情况。
+ *
+ * 「显式」不是「宿主给了这个键」——宿主给出的对象被 schema 补满默认值，每个键都在
+ * （见 `writtenOnly()`）。只有与内置默认值不同的叶子才算用户写过，否则 config.json
+ * 说了算。少了这一步，文件里的设置会在每次启动被默认值冲掉。
  */
 export function mergeConfig(
   explicit: Partial<TlnotifyConfig> | undefined,
   fromFile: Partial<TlnotifyConfig> | undefined,
 ): TlnotifyConfig {
   let merged = deepMerge(defaultConfig(), fromFile ?? {})
-  if (explicit && Object.keys(explicit).length > 0) {
-    const { channels, ...rest } = explicit
+  const written = explicitOnly(explicit)
+  if (written) {
+    const { channels, ...rest } = written
     merged = deepMerge(merged, rest)
     if (Array.isArray(channels) && channels.length > 0) {
       merged.channels = channels as ChannelConfig[]
@@ -218,8 +323,10 @@ export function saveConfigFile(dataDir: string, config: TlnotifyConfig): boolean
 /**
  * 把「有效配置」回写到 config.json。
  *
- * 只在显式配置**没有**提供的字段上写文件版本，避免把 GUI 的意图固化成文件
- * 之后用户再也改不动 GUI。返回实际写盘的对象。
+ * 只在用户**确实写过**的字段上保留文件版本，避免把 GUI 的意图固化成文件之后用户
+ * 再也改不动 GUI。判据与 `mergeConfig()` 同源（`explicitOnly()`）——宿主给出的
+ * 默认值不算写过，否则这里会把默认值当成用户意图、把文件里的设置固化成默认值。
+ * 返回实际写盘的对象。
  */
 export function persistEffectiveConfig(
   dataDir: string,
@@ -228,7 +335,7 @@ export function persistEffectiveConfig(
 ): TlnotifyConfig {
   const onDisk = readConfigFile(dataDir) ?? {}
   const next: Partial<TlnotifyConfig> = { ...onDisk }
-  const explicitKeys = new Set(Object.keys(explicit ?? {}))
+  const explicitKeys = new Set(Object.keys(explicitOnly(explicit) ?? {}))
   for (const [key, value] of Object.entries(effective)) {
     if (key === 'channels') {
       // channels 是运行时最容易改的字段（换机器人 / 加通道），始终以有效值为准。
@@ -237,7 +344,7 @@ export function persistEffectiveConfig(
     }
     if (!explicitKeys.has(key)) (next as Record<string, unknown>)[key] = value
   }
-  // 显式配置里的字段保持文件原值（可能本来就没有）。
+  // 用户写过的字段保持文件原值（可能本来就没有），由下面的 mergeConfig 决定谁生效。
   for (const key of explicitKeys) {
     if (key === 'channels') continue
     if (onDisk[key as keyof TlnotifyConfig] !== undefined) {
@@ -259,8 +366,7 @@ export function persistEffectiveConfig(
  *
  * 注意：schema 只负责**校验与呈现**，字段是否算「显式」由 apply 时收到的对象
  * 决定。schemastery 会为缺失字段填上 default，所以插件内部拿不到「用户到底
- * 写了哪些键」——因此 index.ts 里另外读了一次原始 profile 补丁值来判定显式性
- * 见 `extractExplicitKeys`。
+ * 写了哪些键」——判定显式性只能靠「与默认值不同」，见 `writtenOnly()`。
  */
 /**
  * 事件开关。全局默认与「每机器人覆盖」共用同一份 schema——两处形状必须一致，

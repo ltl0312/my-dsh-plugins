@@ -160,6 +160,13 @@ export interface PendingSettlement {
    * 回答」那个序号）。调用方照常把 `reason` 回给用户，但别清等待记录。
    */
   armed?: boolean
+  /**
+   * true = 多选提问里**勾上 / 取消了一个候选**，作答还没提交。
+   *
+   * 调用方照常回执，但**不能**当结算处理：别清 `index.ts` 的等待记录，也别把通知
+   * 改成「原请求已结算」的样子（QQ 根本改不了消息，那条提示只会误导）。
+   */
+  partial?: boolean
 }
 
 interface PendingBase {
@@ -193,6 +200,14 @@ interface PendingQuestion extends PendingBase {
   labels: string[]
   /** 宿主说这题可以多选。文本作答时用来把「1 3」拆成两个选项。 */
   multiSelect?: boolean
+  /**
+   * 多选提问里**已经点中、还没提交**的候选 label（按点按顺序）。
+   *
+   * 多选必须两段式：QQ 的按钮是回调按钮，一次点击就是一条独立消息，没有「勾选态」。
+   * 所以第一段把点击攒在这里，第二段由「提交所选」按钮（或一次文本作答）一起交出去。
+   * 少了这一步，第一次点击就 `#finish` 了整题，用户点第二个只能拿到「已经过期」。
+   */
+  chosen?: string[]
   /**
    * 用户已经回了「自定义回答」那个序号，正等着他把答案发过来。
    *
@@ -429,11 +444,51 @@ export class InteractionBridge {
     }
 
     // question / plan
+    // 多选的「提交所选」按钮：把手里的候选一起交出去。没有候选时不结算，只提示，
+    // 免得一次误点就把这道题答成空。（审批在上面已经 return，到这儿只剩提问 / 计划。）
+    if (value.submit === true) return this.#submitChosen(key, pending)
     const chosen = this.#pickOption(pending, value)
     if (!chosen.ok) return { ok: false, reason: chosen.reason }
+    // 多选提问：这一下只是勾上 / 取消一个候选，**不结算**。
+    //
+    // 现场（用户报）：多选提问在 QQ 上「只能选择一个就提交了，选第二个显示已失效」。
+    // 原因是这里原来无论单选多选都立刻 `#finish` + `resolve`——第一次点击把整题答了，
+    // 而且 QQ 没有编辑消息的 API（`QqChannel.update()` 恒返回 undefined），那张卡片上
+    // 的按钮还留着，于是第二次点击只能撞上「这个请求已经结束或过期了」。
+    if (pending.kind === 'question' && pending.multiSelect === true) {
+      const picked = pending.chosen ?? []
+      const at = picked.indexOf(chosen.label)
+      if (at >= 0) picked.splice(at, 1)
+      else picked.push(chosen.label)
+      pending.chosen = picked
+      const stateText =
+        picked.length > 0 ? `已选「${picked.join('、')}」` : '当前什么都没选'
+      return {
+        ok: true,
+        partial: true,
+        echo: `${stateText}。可继续点选项增减，选完点「提交所选」；也可以直接回复序号（多个用空格隔开）一次提交。`,
+      }
+    }
     this.#finish(key, pending)
     pending.resolve({ answers: [{ id: pending.questionId, selected: [chosen.label] }] })
     return { ok: true, echo: `已选择「${chosen.label}」` }
+  }
+
+  /** 多选提问的「提交所选」：把攒下来的候选按题目顺序交给宿主。 */
+  #submitChosen(requestId: string, question: PendingQuestion): PendingSettlement {
+    if (question.kind === 'plan') {
+      return { ok: false, reason: '计划确认没有多选，请点「批准计划」或「不批准」' }
+    }
+    if (question.multiSelect !== true) {
+      return { ok: false, reason: '这道题是单选，直接点选项就行' }
+    }
+    const picked = question.chosen ?? []
+    if (picked.length === 0) {
+      return { ok: false, reason: '还没选任何选项：先点几个选项，再点「提交所选」' }
+    }
+    this.#finish(requestId, question)
+    question.resolve({ answers: [{ id: question.questionId, selected: [...picked] }] })
+    return { ok: true, echo: `已提交「${picked.join('、')}」` }
   }
 
   /**

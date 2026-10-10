@@ -37,10 +37,11 @@
 // `plugin.log` 一行都没有。所以「宁可写一条 warn，也不要静默降级」是本文件的前提。
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { Config } from '../src/config.js'
 import { apply } from '../src/index.js'
 import { RPC_METHODS, rpcRoutePath } from '../src/protocol.js'
 
@@ -338,6 +339,45 @@ describe('设置页 RPC 的挂载方式', () => {
     )
     expect(asRecord(missing.result).ok).toBe(false)
     expect(asRecord(asRecord(asRecord(missing.result).error)).code).toBe('invalid-patch')
+
+    await dispose()
+  })
+
+  /**
+   * 端到端复现用户报的那条：在插件设置页把「正文上限（字符）」设成 4000，下次打开
+   * DSH 又变回 1800。
+   *
+   * 关键在第二行：宿主装载插件时会先跑一遍插件自己的 `Config` schema，schemastery 把
+   * **没写的字段**填成默认值（cordis 的 `resolveConfig()`：`config = schema(config)`）。
+   * 所以 `apply()` 收到的对象里 `content.maxBodyChars` 恒为 1800——「用户写了哪些键」
+   * 在这份配置里根本看不出来。把它当成用户意图，文件里的 4000 就会在合并时输给默认值，
+   * 随后 `persistEffectiveConfig()` 再把 1800 写回文件（数据真的没了）。
+   */
+  it('端到端：文件里的设置不被宿主 schema 的默认值冲掉（设置页 4000 不再变回 1800）', async () => {
+    const dataDir = tempDir()
+    // 上一次运行留在盘上的设置。schema 缺的字段由 Config 自己补齐，形状与真实文件一致。
+    const onDisk = {
+      ...(Config({ dataDir }) as unknown as Record<string, unknown>),
+      content: { includeMetadata: true, includeUserPrompt: false, maxBodyChars: 4000 },
+    }
+    writeFileSync(join(dataDir, 'config.json'), `${JSON.stringify(onDisk, null, 2)}\n`, 'utf8')
+
+    const service = makeService()
+    const host = makeHost({ service })
+    // 宿主给的配置：只有 dataDir 是真的写过的，其余全是 schema 补出来的默认值。
+    const dispose = apply(host.ctx, Config({ dataDir }))
+
+    const route = service.calls.routes.get(rpcRoutePath('state'))
+    const response = asResponse(await route?.fetch(postBody('r-setup')))
+    const body = asRecord(await response.json())
+    const config = asRecord(asRecord(asRecord(body.result).value).config)
+    // 1) 设置页读到的就是文件里的值（原来是 1800）。
+    expect(asRecord(config.content).maxBodyChars).toBe(4000)
+    // 2) 而且启动时的回写没有把文件改成默认值。
+    const written = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8')) as {
+      content: { maxBodyChars: number }
+    }
+    expect(written.content.maxBodyChars).toBe(4000)
 
     await dispose()
   })

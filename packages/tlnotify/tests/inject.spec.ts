@@ -489,6 +489,128 @@ describe('按钮带的 id 和注册的 id 不是一套时', () => {
 })
 
 /**
+ * 多选提问在 IM 上的**两段式**作答：先勾选，再提交。
+ *
+ * 现场（用户报）：「提问是多选题时，在 QQ 上只能选择一个就提交了，选第二个显示已失效」。
+ * QQ 的按钮是回调按钮——一次点击就是一条独立消息，没有勾选态；而且 QQ 没有编辑消息的
+ * API（`QqChannel.update()` 恒返回 undefined），卡片上的按钮点完还留在那儿。原来这里
+ * 无论单选多选都在第一次点击时 `#finish` + `resolve`，于是第二个按钮只能撞上
+ * 「这个请求已经结束或过期了」。
+ *
+ * 所以多选必须先攒候选（`pending.chosen`），再由「提交所选」按钮（或一次文本作答）把
+ * 它们一起交给宿主。`partial: true` 就是给调用方看的信号：已回执，但**还没**结算。
+ */
+describe('多选提问的按钮：先勾选，再提交', () => {
+  const option = (choice: string, optionIndex: number): ActionValue => ({
+    v: 1,
+    kind: 'question',
+    sessionId: 'sess-1',
+    requestId: 'req-1',
+    questionId: 'q1',
+    choice,
+    optionIndex,
+  })
+  const submit = (): ActionValue => ({
+    v: 1,
+    kind: 'question',
+    sessionId: 'sess-1',
+    requestId: 'req-1',
+    questionId: 'q1',
+    submit: true,
+  })
+
+  it('点选项只勾选（不结算），「提交所选」才把候选一起交出去', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest({ multiSelect: true }))
+
+    const first = h.bridge.settle(option('方案甲', 0))
+    expect(first.ok).toBe(true)
+    expect(first.partial).toBe(true)
+    expect(first.echo).toContain('已选「方案甲」')
+    // 还没结算：宿主仍在等，pending 还在。
+    expect(h.bridge.pendingCount).toBe(1)
+
+    const second = h.bridge.settle(option('方案丙', 2))
+    expect(second.partial).toBe(true)
+    expect(second.echo).toContain('已选「方案甲、方案丙」')
+    expect(h.bridge.pendingCount).toBe(1)
+
+    const submitted = h.bridge.settle(submit())
+    expect(submitted).toEqual({ ok: true, echo: '已提交「方案甲、方案丙」' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案甲', '方案丙'] }] })
+    expect(h.bridge.pendingCount).toBe(0)
+  })
+
+  it('同一个候选再点一次＝取消勾选', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest({ multiSelect: true }))
+
+    h.bridge.settle(option('方案甲', 0))
+    h.bridge.settle(option('方案乙', 1))
+    const off = h.bridge.settle(option('方案甲', 0))
+    expect(off.echo).toContain('已选「方案乙」')
+    expect(off.echo).not.toContain('方案甲')
+
+    h.bridge.settle(submit())
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案乙'] }] })
+  })
+
+  it('一个都没勾就点提交：只提示，不结算', () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ multiSelect: true }))
+    expect(h.bridge.settle(submit())).toEqual({
+      ok: false,
+      reason: '还没选任何选项：先点几个选项，再点「提交所选」',
+    })
+    expect(h.bridge.pendingCount).toBe(1)
+  })
+
+  it('提交之后再点按钮，才是真的「已经结束或过期」', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest({ multiSelect: true }))
+    h.bridge.settle(option('方案甲', 0))
+    h.bridge.settle(submit())
+    await answer
+
+    expect(h.bridge.settle(option('方案乙', 1))).toEqual({
+      ok: false,
+      reason: '这个请求已经结束或过期了',
+    })
+  })
+
+  it('单选提问不受影响：点一下就是最终答案（没有 partial 这一步）', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest())
+    expect(h.bridge.settle(option('方案乙', 1))).toEqual({ ok: true, echo: '已选择「方案乙」' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案乙'] }] })
+    expect(h.bridge.pendingCount).toBe(0)
+  })
+
+  it('单选提问收到「提交所选」时明确拒绝，不退化成提交空答案', () => {
+    const h = makeHarness()
+    void h.ask(questionRequest())
+    expect(h.bridge.settle(submit())).toEqual({ ok: false, reason: '这道题是单选，直接点选项就行' })
+    expect(h.bridge.pendingCount).toBe(1)
+  })
+
+  it('计划确认没有多选：submit 也不结算', () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ plan: true, labels: ['批准', '不批准'] }))
+    expect(h.bridge.settle(submit()).ok).toBe(false)
+    expect(h.bridge.pendingCount).toBe(1)
+  })
+
+  it('文本作答仍然一次提交（多选用空格 / 顿号分隔），与按钮两段式共存', async () => {
+    const h = makeHarness()
+    const answer = h.ask(questionRequest({ multiSelect: true }))
+    h.bridge.settle(option('方案甲', 0))
+    // 文本是**完整的一次提交**：以它为准，不叠加之前点过的候选。
+    expect(h.bridge.settleText('sess-1', '2 3')).toEqual({ ok: true, echo: '已选择「方案乙、方案丙」' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案乙', '方案丙'] }] })
+  })
+})
+
+/**
  * `hasLivePending` 是给日志兜底路径（`index.ts` 的 `#maybePending`）用的：两条路本该按
  * requestId 去重，但 waterfall 会自己合成 id，对不上，于是同一个提问被发两条通知。兜底路径
  * 改成先问一句「桥是不是已经在等这个会话的这类请求了」，就不再依赖 id 是否对得上。

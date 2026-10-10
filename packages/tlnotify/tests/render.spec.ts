@@ -246,6 +246,51 @@ describe('提问与审批正文', () => {
     )
     expect(notification.body).toContain('（可多选）')
     expect(notification.body).toContain('多个用空格隔开')
+    // 正文先给不依赖客户端按钮的那条路（QQ 桌面端不渲染按钮），再提按钮那条。
+    expect(notification.body.indexOf('回复序号')).toBeLessThan(notification.body.indexOf('提交所选'))
+  })
+
+  // 现场（用户报）：多选提问在 QQ 上「只能选择一个就提交了，选第二个显示已失效」。
+  // 原因之一是通知这一层根本没给「提交」这一步——点第一个选项就把整题答了。
+  it('多选时多一个「提交所选」按钮，并占用一个名额（选项不超过 5 个）', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: {
+          project: 'DSH',
+          text: '选几个',
+          requestId: 'call-1',
+          multiSelect: true,
+          options: Array.from({ length: 8 }, (_unused, index) => ({ label: `选项${index + 1}` })),
+        },
+      }),
+      undefined,
+      options(),
+    )
+    const submit = notification.actions.filter((item) => item.value.submit === true)
+    expect(submit).toHaveLength(1)
+    expect(submit[0]?.label).toBe('提交所选')
+    expect(submit[0]?.value).toMatchObject({ kind: 'question', requestId: 'call-1', v: 1 })
+    // 提交按钮必须是**真按钮**（带 requestId），否则点下去只会拿到「没有携带请求 id」。
+    expect(submit[0]?.value.requestId).toBe('call-1')
+    // 选项 5 个 + 提交 1 个 = 6（MAX_ACTION_BUTTONS），不再塞「打开会话 / 详细模式」。
+    expect(notification.actions).toHaveLength(6)
+    expect(notification.actions.map((item) => item.value.optionIndex).filter((v) => v !== undefined)).toEqual([
+      0, 1, 2, 3, 4,
+    ])
+    expect(notification.actions.some((item) => item.value.kind === 'goto')).toBe(false)
+  })
+
+  it('单选提问没有「提交所选」：点一下就是答案', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: { project: 'DSH', text: '选一个', requestId: 'call-1', options: [{ label: '甲' }, { label: '乙' }] },
+      }),
+      undefined,
+      options(),
+    )
+    expect(notification.actions.some((item) => item.value.submit === true)).toBe(false)
   })
 
   it('详细模式下选项带编号与描述', () => {

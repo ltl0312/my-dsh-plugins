@@ -840,8 +840,14 @@ class Tlnotify {
     if (next.logLevel !== previous.logLevel) this.#log.setLevel(next.logLevel)
 
     // 运行模式 / 绑定会话：配置是权威来源，内存态跟着它走。
+    //
+    // 两边都先归一化「空串 = 没绑定」再比：内置默认值里 `session.targetSessionId` 是空串
+    // （完整才对得上宿主 schema 补出来的形状，见 `writtenOnly()`），而 `ModeState.snapshot()`
+    // 在没绑定时不带这个字段。不归一化的话每次保存都会被判成「模式变了」，白调一次 setMode。
     const mode = this.#mode.snapshot()
-    if (next.mode !== mode.mode || (next.session.targetSessionId ?? undefined) !== mode.targetSessionId) {
+    const bound = (value: string | undefined): string | undefined =>
+      value && value.length > 0 ? value : undefined
+    if (next.mode !== mode.mode || bound(next.session.targetSessionId) !== mode.targetSessionId) {
       this.#mode.setMode(next.mode, next.session.targetSessionId)
     }
 
@@ -1910,12 +1916,15 @@ class Tlnotify {
         const pendingHint = this.#hasFreshWaiting(value.sessionId)
           ? '（提问还在准备中，稍等几秒再点一次）'
           : ''
+        // `partial` = 多选提问里只是勾上 / 取消了一个候选，整题还没答完：照旧回执，
+        // 但绝不能当结算处理（清了等待记录，下一次点击就真的「已失效」了）。
+        const settled = settlement.ok && settlement.partial !== true
         const text = settlement.ok
           ? (settlement.echo ?? '已处理')
           : `没有生效：${settlement.reason ?? '未知原因'}${pendingHint}`
-        if (settlement.ok) this.#clearWaiting(value.sessionId)
+        if (settled) this.#clearWaiting(value.sessionId)
         await this.#echo(channelId, text)
-        if (settlement.ok && action.messageId) {
+        if (settled && action.messageId) {
           // 摘掉按钮并把正文改成结算态，避免用户重复点。
           await this.#channels.update(channelId, action.messageId, {
             body: `${text}（原请求已结算）`,
