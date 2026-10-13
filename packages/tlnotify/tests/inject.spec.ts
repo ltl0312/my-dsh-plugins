@@ -491,18 +491,19 @@ describe('按钮带的 id 和注册的 id 不是一套时', () => {
 /**
  * 多选提问在 IM 上的**两段式**作答：先勾选，再提交。
  *
- * 现场（用户报）：「提问是多选题时，在 QQ 上只能选择一个就提交了，选第二个显示已失效」。
- * QQ 的按钮是回调按钮——一次点击就是一条独立消息，没有勾选态；而且 QQ 没有编辑消息的
- * API（`QqChannel.update()` 恒返回 undefined），卡片上的按钮点完还留在那儿。原来这里
- * 无论单选多选都在第一次点击时 `#finish` + `resolve`，于是第二个按钮只能撞上
- * 「这个请求已经结束或过期了」。
+ * 现场（用户报，前后两次）：
+ *   ①「提问是多选题时，在 QQ 上只能选择一个就提交了，选第二个显示已失效」——原来无论单选
+ *     多选都在第一次点击时 `#finish` + `resolve`，第二个按钮只能撞上「已经结束或过期」；
+ *   ② 改成「再点一次＝取消勾选」之后又报「每次点击都发一条消息」+「取消勾选后原始卡片上
+ *     那颗按钮还是 ☑」。
  *
- * 所以多选必须先攒候选（`pending.chosen`），再由「提交所选」按钮（或一次文本作答）把
- * 它们一起交给宿主。`partial: true` 就是给调用方看的信号：已回执，但**还没**结算。
+ * ②的根因是平台：QQ 的按钮只在点下去那一刻把文字换成 `visited_label`，之后**没有编辑消息
+ * 的接口**（`QqChannel.update()` 恒返回 undefined），所以「取消」这个动作会永远留着一个撤
+ * 不掉的 ☑。既然按钮只能忠实地表达「选上了」，就让它**只负责选**：
  *
- * 勾选态本身只能靠**回执文本**表达：QQ 的机器人键盘没有复选框控件（`action.type` 只有
- * 0 跳转 / 1 回调 / 2 指令），已发出的消息也没有编辑接口（互动事件回应只能带一个
- * `code`），所以 `QqChannel.update()` 恒返回 undefined。回执里的 ☑ / ☐ 清单就是「复选框」。
+ *   - 勾上 → 不结算，回执标 `echoOptional`（能显示按钮按下态的通道可以跳过，别刷屏）；
+ *   - 重复点 → 不改状态，回一条「已经勾上了 + 怎么减项」（这条不能跳过）；
+ *   - 减项 → 走文本作答，那是一次完整提交，覆盖点过的集合。
  */
 describe('多选提问的按钮：先勾选，再提交', () => {
   const option = (choice: string, optionIndex: number): ActionValue => ({
@@ -530,11 +531,13 @@ describe('多选提问的按钮：先勾选，再提交', () => {
     const first = h.bridge.settle(option('方案甲', 0))
     expect(first.ok).toBe(true)
     expect(first.partial).toBe(true)
-    // 勾选态按通知里的编号渲染，勾上的那个换成 ☑。
+    // 勾选回执按通知里的编号渲染，勾上的那个换成 ☑。
     expect(first.echo).toContain('☑ 1. 方案甲')
     expect(first.echo).toContain('☐ 2. 方案乙')
     expect(first.echo).toContain('☐ 3. 方案丙')
     expect(first.echo).toContain('已选 1 项')
+    // 而且它是**可跳过**的：QQ 的按钮点一下自己就从 ☐ 变 ☑，再回一条只会刷屏。
+    expect(first.echoOptional).toBe(true)
     // 还没结算：宿主仍在等，pending 还在。
     expect(h.bridge.pendingCount).toBe(1)
 
@@ -551,29 +554,39 @@ describe('多选提问的按钮：先勾选，再提交', () => {
     expect(h.bridge.pendingCount).toBe(0)
   })
 
-  it('同一个候选再点一次＝取消勾选（回执里的 ☑ 也跟着变回 ☐）', async () => {
+  // 用户实测：原来「再点一次＝取消」时，QQ 客户端**不会**把按钮上的 ☑ 变回 ☐（没有编辑
+  // 消息的接口），于是卡片显示与真实状态永久不一致。按钮只能忠实地表达「选上了」，
+  // 所以它只负责选；减项走文本作答（一次完整提交，覆盖点过的集合）。
+  it('重复点同一个候选：不取消，只提示怎么减项（回执不能跳过）', async () => {
     const h = makeHarness()
     const answer = h.ask(questionRequest({ multiSelect: true }))
 
     h.bridge.settle(option('方案甲', 0))
     h.bridge.settle(option('方案乙', 1))
-    const off = h.bridge.settle(option('方案甲', 0))
-    expect(off.echo).toContain('☐ 1. 方案甲')
-    expect(off.echo).toContain('☑ 2. 方案乙')
-    expect(off.echo).toContain('已选 1 项')
+    const again = h.bridge.settle(option('方案甲', 0))
 
+    expect(again.ok).toBe(true)
+    expect(again.partial).toBe(true)
+    expect(again.echo).toContain('「方案甲」已经勾上了')
+    expect(again.echo).toContain('当前勾选：方案甲、方案乙')
+    expect(again.echo).toContain('回最终序号')
+    // 这条是**必须**发出去的（用户在问「为什么取消不了」），不能像勾选回执那样被跳过。
+    expect(again.echoOptional).toBeUndefined()
+
+    // 状态没变：还是两项。
     h.bridge.settle(submit())
-    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案乙'] }] })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案甲', '方案乙'] }] })
   })
 
-  it('全部取消之后回执说「还没选任何选项」，不会给出空提交', () => {
+  it('减项走文本作答：回复的序号是完整提交，覆盖点过的集合', async () => {
     const h = makeHarness()
-    void h.ask(questionRequest({ multiSelect: true }))
+    const answer = h.ask(questionRequest({ multiSelect: true }))
+
     h.bridge.settle(option('方案甲', 0))
-    const none = h.bridge.settle(option('方案甲', 0))
-    expect(none.echo).toContain('☐ 1. 方案甲')
-    expect(none.echo).toContain('还没选任何选项')
-    expect(h.bridge.pendingCount).toBe(1)
+    h.bridge.settle(option('方案乙', 1))
+    // 想只留「方案甲」：回「1」，这是一次完整提交，把点过的两项都覆盖掉。
+    expect(h.bridge.settleText('sess-1', '1')).toEqual({ ok: true, echo: '已选择「方案甲」' })
+    await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案甲'] }] })
   })
 
   it('一个都没勾就点提交：只提示，不结算', () => {

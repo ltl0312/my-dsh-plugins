@@ -161,12 +161,18 @@ export interface PendingSettlement {
    */
   armed?: boolean
   /**
-   * true = 多选提问里**勾上 / 取消了一个候选**，作答还没提交。
+   * true = 多选提问里**勾上了一个候选**，作答还没提交。
    *
    * 调用方照常回执，但**不能**当结算处理：别清 `index.ts` 的等待记录，也别把通知
    * 改成「原请求已结算」的样子（QQ 根本改不了消息，那条提示只会误导）。
    */
   partial?: boolean
+  /**
+   * true = 这条回执**在能显示按钮按下态的通道上是多余的**（QQ 的 `visited_label`：点一下
+   * 按钮自己就从 ☐ 变 ☑）。调用方可以跳过发送，免得每次点击都往对话里丢一条消息——
+   * 用户实测明确反对那个刷屏。不能显示按下态的通道（飞书）照旧要发。
+   */
+  echoOptional?: boolean
 }
 
 interface PendingBase {
@@ -449,19 +455,31 @@ export class InteractionBridge {
     if (value.submit === true) return this.#submitChosen(key, pending)
     const chosen = this.#pickOption(pending, value)
     if (!chosen.ok) return { ok: false, reason: chosen.reason }
-    // 多选提问：这一下只是勾上 / 取消一个候选，**不结算**。
+    // 多选提问：这一下只是把一个候选**勾上**，不结算。
     //
-    // 现场（用户报）：多选提问在 QQ 上「只能选择一个就提交了，选第二个显示已失效」。
-    // 原因是这里原来无论单选多选都立刻 `#finish` + `resolve`——第一次点击把整题答了，
-    // 而且 QQ 没有编辑消息的 API（`QqChannel.update()` 恒返回 undefined），那张卡片上
-    // 的按钮还留着，于是第二次点击只能撞上「这个请求已经结束或过期了」。
+    // 现场（用户报，两次）：① 多选提问在 QQ 上「只能选择一个就提交了，选第二个显示已失效」
+    // ——因为这里原来无论单选多选都立刻 `#finish` + `resolve`，第一次点击就把整题答了；
+    // ② 改成「点一下切换勾选态」之后，用户又报「每次点击都会发一条消息」以及「取消勾选后
+    // 原始卡片上那颗按钮还是 ☑」。
+    //
+    // ②的根因在平台：QQ 的按钮只在**点下去那一刻**把文字换成 `visited_label`，之后没有
+    // 编辑消息的接口（`QqChannel.update()` 恒返回 undefined），所以「取消」这个动作在客户端
+    // 上永远留着一个撤不掉的 ☑。既然按钮只能忠实地表达「选上了」，那就让它**只负责选**：
+    //
+    //   - 勾上 → 不结算、不回消息（按钮自己变 ☑ 就是反馈，见 `echoOptional`）；
+    //   - 重复点同一个 → 不改变状态，回一句「已经勾上了」并告诉他怎么减项（文本作答是
+    //     一次完整提交，能覆盖掉点过的集合）；
+    //   - 减项 → 走文本，例如回「1」或「1 3」。
+    //
+    // 这样按钮显示与真实状态**永远一致**，代价是不能靠按钮取消（那本来也表达不出来）。
     if (pending.kind === 'question' && pending.multiSelect === true) {
       const picked = pending.chosen ?? []
-      const at = picked.indexOf(chosen.label)
-      if (at >= 0) picked.splice(at, 1)
-      else picked.push(chosen.label)
+      if (picked.includes(chosen.label)) {
+        return { ok: true, partial: true, echo: multiSelectAlreadyText(pending, chosen.label) }
+      }
+      picked.push(chosen.label)
       pending.chosen = picked
-      return { ok: true, partial: true, echo: multiSelectReceipt(pending) }
+      return { ok: true, partial: true, echo: multiSelectReceipt(pending), echoOptional: true }
     }
     this.#finish(key, pending)
     pending.resolve({ answers: [{ id: pending.questionId, selected: [chosen.label] }] })
@@ -843,7 +861,10 @@ export function isInteractionAction(value: ActionValue): boolean {
 /**
  * 多选的「勾选态」回执：按通知里的编号渲染一份 ☑ / ☐ 清单。
  *
- * ── 为什么勾选态只能靠回一条文本 ─────────────────────────────────────────
+ * 只有**不能显示按钮按下态**的通道才需要它（QQ 能，见 `Channel.showsPressedState`）；
+ * 在 QQ 上它是兜底文案，调用方默认跳过发送，免得每次点击都刷一条消息。
+ *
+ * ── 为什么复选框只能画在按钮上 ───────────────────────────────────────────
  *
  * **QQ 的机器人键盘没有复选框控件。** 官方文档（bot.q.qq.com「消息按钮」与
  * 「发送单聊消息」两页）里 `action.type` 只有三个取值——0 跳转、1 回调、2 指令；
@@ -854,8 +875,7 @@ export function isInteractionAction(value: ActionValue): boolean {
  *
  * 正文里也**不能**摆复选框字符：QQ 的 Markdown 支持格式里没有任务列表，而且正文里的
  * 字符永远回调不到机器人（用户点过 `☐`，结论是「点不动，功能没做」）。所以可点的只有
- * 按钮——复选框画在按钮上（`render.ts#buildActions` 的 `☐` / `visitedLabel` 的 `☑`），
- * 而**权威的勾选态**由这条回执给出（按钮上的 ☑ 取消勾选时不会变回去）。
+ * 按钮——复选框画在按钮上（`render.ts#buildActions` 的 `☐` / `visitedLabel` 的 `☑`）。
  *
  * 编号与 `render.ts#questionBody` 一致（1 起），用户看完可以直接照编号回「1 3」一次提交。
  */
@@ -866,9 +886,25 @@ function multiSelectReceipt(question: PendingQuestion): string {
   )
   const tail =
     picked.length > 0
-      ? `已选 ${picked.length} 项。再点按钮可增减，选完点「提交所选」；也可以回「1 3」一次提交。`
+      ? `已选 ${picked.length} 项。选完点「提交所选」；要减掉某项就直接回最终序号（例如「1 3」）。`
       : '还没选任何选项。点选项勾选，选完点「提交所选」。'
   return lines.length > 0 ? `当前勾选：\n${lines.join('\n')}\n\n${tail}` : tail
+}
+
+/**
+ * 重复点同一个候选时的提示。
+ *
+ * 按钮**只负责选、不负责取消**：QQ 客户端点过之后不会把 `☑` 变回 `☐`（没有编辑消息的
+ * 接口），让它「切换」只会留下一个撤不掉的 ☑，用户实测报过这个不一致。所以这里不改状态，
+ * 只告诉他怎么减项——文本作答是一次**完整提交**，会覆盖点过的集合。
+ */
+function multiSelectAlreadyText(question: PendingQuestion, label: string): string {
+  const picked = question.chosen ?? []
+  const current = picked.length > 0 ? picked.join('、') : '（空）'
+  return (
+    `「${label}」已经勾上了（当前勾选：${current}）。\n` +
+    '按钮只能勾选、取消不了——要减掉某项就直接回最终序号，例如回「1」或「1 3」一次提交。'
+  )
 }
 
 /** 通道回传的按钮载荷可能带 `Notification` 上的信息，这里统一转成 ActionValue。 */

@@ -1916,14 +1916,19 @@ class Tlnotify {
         const pendingHint = this.#hasFreshWaiting(value.sessionId)
           ? '（提问还在准备中，稍等几秒再点一次）'
           : ''
-        // `partial` = 多选提问里只是勾上 / 取消了一个候选，整题还没答完：照旧回执，
+        // `partial` = 多选提问里只是勾上了一个候选，整题还没答完：照旧回执，
         // 但绝不能当结算处理（清了等待记录，下一次点击就真的「已失效」了）。
         const settled = settlement.ok && settlement.partial !== true
         const text = settlement.ok
           ? (settlement.echo ?? '已处理')
           : `没有生效：${settlement.reason ?? '未知原因'}${pendingHint}`
         if (settled) this.#clearWaiting(value.sessionId)
-        await this.#echo(channelId, text)
+        // 勾选回执在能显示按钮按下态的通道上是多余的：点一下按钮自己就从 ☐ 变 ☑，
+        // 再补一条「当前勾选」只会把对话刷屏（用户实测明确反对）。不能显示按下态的
+        // 通道（飞书）照旧要发，否则用户点了没有任何反馈。
+        const skipEcho =
+          settlement.echoOptional === true && this.#channels.showsPressedState(channelId)
+        if (!skipEcho) await this.#echo(channelId, text)
         if (settled && action.messageId) {
           // 摘掉按钮并把正文改成结算态，避免用户重复点。
           await this.#channels.update(channelId, action.messageId, {

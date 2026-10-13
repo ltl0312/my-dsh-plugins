@@ -525,6 +525,26 @@ describe('ChannelManager 的逐台投递', () => {
     vi.spyOn(QqChannel.prototype, 'start').mockResolvedValue(undefined)
   }
 
+  // 多选勾选回执要不要发，取决于「按钮能不能自己显示点过了」：QQ 的 visited_label 能，
+  // 所以它那里可以跳过（否则每次点击都刷一条消息）；未知通道按「不能」处理——宁可多回
+  // 一条，也别让用户点了没有任何反馈。
+  it('showsPressedState：QQ 是 true，飞书与未知通道是 false', async () => {
+    stubStart()
+    const { manager } = makeManager()
+    await manager.start(
+      [channel({ id: 'qq-1', type: 'qq' }), channel({ id: 'fs-1', type: 'feishu' })],
+      undefined,
+    )
+
+    expect(manager.showsPressedState('qq-1')).toBe(true)
+    expect(manager.showsPressedState('fs-1')).toBe(false)
+    expect(manager.showsPressedState('不存在')).toBe(false)
+
+    await manager.stop()
+    // stop() 之后通道表被清空，照旧按「不能」处理。
+    expect(manager.showsPressedState('qq-1')).toBe(false)
+  })
+
   it('两台机器人都不关心这个会话：sendEach 静默返回空数组，只有 send() 才 warn', async () => {
     stubStart()
     const send = vi.spyOn(QqChannel.prototype, 'send').mockResolvedValue({ messageId: 'm-1' })

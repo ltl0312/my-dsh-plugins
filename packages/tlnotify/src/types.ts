@@ -281,6 +281,14 @@ export interface Channel {
   readonly type: string
   /** 单条消息的正文上限（字符数），分片用；不填则用 render 的默认值。 */
   readonly maxChars?: number
+  /**
+   * 按钮自己能不能表达「这颗点过了」（QQ 的 `render_data.visited_label`）。
+   *
+   * 能表达时，多选勾选**不再逐次回执**：点一下按钮由 ☐ 变 ☑ 就是反馈，回执只在
+   * 「取消勾选」——按钮说不清的那种情况——补一条（见 `index.ts#onAction`）。
+   * 每次点击都回一条消息会把 QQ 对话刷成一串「当前勾选」，实测用户明确反对。
+   */
+  readonly showsPressedState?: boolean
   start(context: ChannelStartContext): Promise<void>
   stop(): Promise<void>
   send(notification: Notification): Promise<{ messageId: string; refIdx?: string }>

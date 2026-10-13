@@ -297,9 +297,10 @@ describe('提问与审批正文', () => {
     expect(notification.body).toContain('（可多选）')
     expect(notification.body).toContain('提交所选')
     // 正文要明确指向「带 ☐ 的按钮」——曾经写成正文里的 ☐，用户当场去点它。
-    expect(notification.body).toContain('勾选下面带 ☐ 的按钮')
-    // 文本作答那条路永远可用（QQ 桌面端不渲染按钮），要一并写出来。
-    expect(notification.body).toContain('也可以直接回「1 3」一次提交')
+    expect(notification.body).toContain('点下面带 ☐ 的按钮勾选')
+    // 还要说清按钮取消不了勾选（QQ 客户端不会把 ☑ 变回 ☐），减项走回文字。
+    expect(notification.body).toContain('按钮取消不了勾选')
+    expect(notification.body).toContain('要减掉某项就直接回最终序号')
   })
 
   // 现场（用户报）：多选提问在 QQ 上「只能选择一个就提交了，选第二个显示已失效」。

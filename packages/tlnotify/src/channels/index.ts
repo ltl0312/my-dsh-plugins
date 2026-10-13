@@ -77,6 +77,17 @@ export class ChannelManager {
   }
 
   /**
+   * 这条通道的按钮能不能自己显示「点过了」（QQ 的 `visited_label`）。
+   *
+   * 调用方（`index.ts#onAction`）拿它决定多选**勾选**时要不要再回一条消息：能显示就不用
+   * 回，否则每次点击都回一条会把对话刷成一串「当前勾选」。通道不存在时按「不能」处理
+   * ——宁可多回一条，也别让用户点了没反馈。
+   */
+  showsPressedState(channelId: string): boolean {
+    return this.#channels.get(channelId)?.showsPressedState === true
+  }
+
+  /**
    * 按发送顺序交出**配置里启用的**通道（含「启用了但启动失败」的那几个）。
    *
    * 给调用方做「这台机器人关心这条事件吗」的判断用——判断需要事件上下文

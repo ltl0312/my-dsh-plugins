@@ -118,6 +118,11 @@ export interface QqChannelOptions {
 export class QqChannel implements Channel {
   readonly id: string
   readonly type = 'qq'
+  /**
+   * QQ 的按钮支持 `visited_label`：点过之后客户端把按钮文字换成它。多选靠这个把
+   * `☐ 甲` 变成 `☑ 甲`，所以勾选时**不需要**再回一条消息（见 `Channel.showsPressedState`）。
+   */
+  readonly showsPressedState = true
   readonly #config: ChannelConfig
   readonly #log: ChannelLogger
   #bot: QQBotLike | undefined
