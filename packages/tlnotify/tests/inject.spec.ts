@@ -499,6 +499,10 @@ describe('按钮带的 id 和注册的 id 不是一套时', () => {
  *
  * 所以多选必须先攒候选（`pending.chosen`），再由「提交所选」按钮（或一次文本作答）把
  * 它们一起交给宿主。`partial: true` 就是给调用方看的信号：已回执，但**还没**结算。
+ *
+ * 勾选态本身只能靠**回执文本**表达：QQ 的机器人键盘没有复选框控件（`action.type` 只有
+ * 0 跳转 / 1 回调 / 2 指令），已发出的消息也没有编辑接口（互动事件回应只能带一个
+ * `code`），所以 `QqChannel.update()` 恒返回 undefined。回执里的 ☑ / ☐ 清单就是「复选框」。
  */
 describe('多选提问的按钮：先勾选，再提交', () => {
   const option = (choice: string, optionIndex: number): ActionValue => ({
@@ -526,13 +530,19 @@ describe('多选提问的按钮：先勾选，再提交', () => {
     const first = h.bridge.settle(option('方案甲', 0))
     expect(first.ok).toBe(true)
     expect(first.partial).toBe(true)
-    expect(first.echo).toContain('已选「方案甲」')
+    // 勾选态按通知里的编号渲染，勾上的那个换成 ☑。
+    expect(first.echo).toContain('☑ 1. 方案甲')
+    expect(first.echo).toContain('☐ 2. 方案乙')
+    expect(first.echo).toContain('☐ 3. 方案丙')
+    expect(first.echo).toContain('已选 1 项')
     // 还没结算：宿主仍在等，pending 还在。
     expect(h.bridge.pendingCount).toBe(1)
 
     const second = h.bridge.settle(option('方案丙', 2))
     expect(second.partial).toBe(true)
-    expect(second.echo).toContain('已选「方案甲、方案丙」')
+    expect(second.echo).toContain('☑ 1. 方案甲')
+    expect(second.echo).toContain('☑ 3. 方案丙')
+    expect(second.echo).toContain('已选 2 项')
     expect(h.bridge.pendingCount).toBe(1)
 
     const submitted = h.bridge.settle(submit())
@@ -541,18 +551,29 @@ describe('多选提问的按钮：先勾选，再提交', () => {
     expect(h.bridge.pendingCount).toBe(0)
   })
 
-  it('同一个候选再点一次＝取消勾选', async () => {
+  it('同一个候选再点一次＝取消勾选（回执里的 ☑ 也跟着变回 ☐）', async () => {
     const h = makeHarness()
     const answer = h.ask(questionRequest({ multiSelect: true }))
 
     h.bridge.settle(option('方案甲', 0))
     h.bridge.settle(option('方案乙', 1))
     const off = h.bridge.settle(option('方案甲', 0))
-    expect(off.echo).toContain('已选「方案乙」')
-    expect(off.echo).not.toContain('方案甲')
+    expect(off.echo).toContain('☐ 1. 方案甲')
+    expect(off.echo).toContain('☑ 2. 方案乙')
+    expect(off.echo).toContain('已选 1 项')
 
     h.bridge.settle(submit())
     await expect(answer).resolves.toEqual({ answers: [{ id: 'q1', selected: ['方案乙'] }] })
+  })
+
+  it('全部取消之后回执说「还没选任何选项」，不会给出空提交', () => {
+    const h = makeHarness()
+    void h.ask(questionRequest({ multiSelect: true }))
+    h.bridge.settle(option('方案甲', 0))
+    const none = h.bridge.settle(option('方案甲', 0))
+    expect(none.echo).toContain('☐ 1. 方案甲')
+    expect(none.echo).toContain('还没选任何选项')
+    expect(h.bridge.pendingCount).toBe(1)
   })
 
   it('一个都没勾就点提交：只提示，不结算', () => {

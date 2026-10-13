@@ -1,4 +1,4 @@
-// packages/tlnotify/tests/render.spec.ts
+﻿// packages/tlnotify/tests/render.spec.ts
 //
 // 渲染决定了「手机上第一眼看到什么」。标题是固定的三段式，任何模式都不变；
 // 正文才随模式变。按钮的数量与顺序也有硬上限。
@@ -234,20 +234,43 @@ describe('提问与审批正文', () => {
       undefined,
       options(),
     )
-    expect(notification.body).toContain('可选：\n1. 甲\n2. 乙\n（可多选）')
+    // 候选一开始就摆成待勾选的清单（QQ 键盘没有复选框控件，勾选态只能靠文本表达）。
+    expect(notification.body).toContain('可选：\n☐ 1. 甲\n☐ 2. 乙\n（可多选）')
     expect(notification.body).not.toContain('自定义回答')
   })
 
-  it('多选时加标注，并说明多个答案怎么隔开', () => {
+  it('单选提问的选项不带空复选框', () => {
     const notification = renderNotification(
-      event({ kind: 'question', detail: { project: 'DSH', text: '选几个', multiSelect: true } }),
+      event({
+        kind: 'question',
+        detail: {
+          project: 'DSH',
+          text: '选一个',
+          requestId: 'call-1',
+          options: [{ label: '甲' }, { label: '乙' }],
+        },
+      }),
+      undefined,
+      options(),
+    )
+    expect(notification.body).toContain('可选：\n1. 甲\n2. 乙')
+    expect(notification.body).not.toContain('☐')
+  })
+
+  it('多选时加标注，并说明勾选与一次提交这两条路', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: { project: 'DSH', text: '选几个', multiSelect: true },
+      }),
       undefined,
       options(),
     )
     expect(notification.body).toContain('（可多选）')
-    expect(notification.body).toContain('多个用空格隔开')
-    // 正文先给不依赖客户端按钮的那条路（QQ 桌面端不渲染按钮），再提按钮那条。
-    expect(notification.body.indexOf('回复序号')).toBeLessThan(notification.body.indexOf('提交所选'))
+    expect(notification.body).toContain('提交所选')
+    expect(notification.body).toContain('☑')
+    // 文本作答那条路永远可用（QQ 桌面端不渲染按钮），要一并写出来。
+    expect(notification.body).toContain('也可以直接回「1 3」一次提交')
   })
 
   // 现场（用户报）：多选提问在 QQ 上「只能选择一个就提交了，选第二个显示已失效」。
@@ -273,7 +296,7 @@ describe('提问与审批正文', () => {
     expect(submit[0]?.value).toMatchObject({ kind: 'question', requestId: 'call-1', v: 1 })
     // 提交按钮必须是**真按钮**（带 requestId），否则点下去只会拿到「没有携带请求 id」。
     expect(submit[0]?.value.requestId).toBe('call-1')
-    // 选项 5 个 + 提交 1 个 = 6（MAX_ACTION_BUTTONS），不再塞「打开会话 / 详细模式」。
+    // 选项 5 个 + 提交 1 个 = 6（MAX_ACTION_BUTTONS），不再塞「会话短id / 详细模式」。
     expect(notification.actions).toHaveLength(6)
     expect(notification.actions.map((item) => item.value.optionIndex).filter((v) => v !== undefined)).toEqual([
       0, 1, 2, 3, 4,
@@ -347,13 +370,13 @@ describe('提问与审批正文', () => {
 })
 
 describe('按钮', () => {
-  it('审批给「允许 / 拒绝」，外加打开会话与详细模式', () => {
+  it('审批给「允许 / 拒绝」，外加会话短id与详细模式', () => {
     const notification = renderNotification(
       event({ kind: 'approval', detail: { project: 'DSH', requestId: 'req-1', toolName: 'Bash' } }),
       undefined,
       options(),
     )
-    expect(notification.actions.map((a) => a.label)).toEqual(['允许', '拒绝', '打开会话', '详细模式'])
+    expect(notification.actions.map((a) => a.label)).toEqual(['允许', '拒绝', '会话短id', '详细模式'])
     expect(notification.actions[0]!.value).toMatchObject({
       v: 1,
       kind: 'approval',
@@ -371,7 +394,7 @@ describe('按钮', () => {
       undefined,
       options(),
     )
-    expect(notification.actions.map((a) => a.label)).toEqual(['打开会话', '详细模式'])
+    expect(notification.actions.map((a) => a.label)).toEqual(['会话短id', '详细模式'])
   })
 
   it('提问为每个选项生成一个按钮，带下标', () => {
@@ -396,7 +419,7 @@ describe('按钮', () => {
       options(),
     )
     expect(notification.actions).toHaveLength(MAX_ACTION_BUTTONS)
-    expect(notification.actions.map((a) => a.label)).not.toContain('打开会话')
+    expect(notification.actions.map((a) => a.label)).not.toContain('会话短id')
   })
 
   it('计划确认给「批准计划 / 不批准」', () => {
@@ -410,21 +433,21 @@ describe('按钮', () => {
     expect(notification.actions[1]!.value.choice).toBe('reject')
   })
 
-  it('普通事件只给「打开会话」与「详细模式」', () => {
+  it('普通事件只给「会话短id」与「详细模式」', () => {
     const notification = renderNotification(event(), snapshot(), options())
-    expect(notification.actions.map((a) => a.label)).toEqual(['打开会话', '详细模式'])
+    expect(notification.actions.map((a) => a.label)).toEqual(['会话短id', '详细模式'])
     expect(notification.actions[0]!.value.kind).toBe('goto')
     expect(notification.actions[1]!.value.kind).toBe('detail')
   })
 
   it('单会话模式下不再给「详细模式」按钮（本来就详细）', () => {
     const notification = renderNotification(event(), snapshot(), options({ mode: 'session' }))
-    expect(notification.actions.map((a) => a.label)).toEqual(['打开会话'])
+    expect(notification.actions.map((a) => a.label)).toEqual(['会话短id'])
   })
 
   it('已经升级过详情的会话不再给「详细模式」按钮', () => {
     const notification = renderNotification(event(), snapshot(), options({ detailed: true }))
-    expect(notification.actions.map((a) => a.label)).toEqual(['打开会话'])
+    expect(notification.actions.map((a) => a.label)).toEqual(['会话短id'])
   })
 
   it('每个按钮的 value 都能直接喂给 RouteTable.fromAction', () => {

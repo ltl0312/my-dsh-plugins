@@ -206,10 +206,14 @@ function questionBody(event: RawEvent, withOptions: boolean, text: TextMode): st
   const options = event.detail.options ?? []
   if (options.length > 0) {
     lines.push('可选：')
+    // 多选的选项前面摆一个**空复选框**（`☐`）：QQ 的机器人键盘没有复选框控件（见
+    // `InteractionBridge#checkboxLines` 的注释），勾选态只能靠文本表达，那至少让候选
+    // 一开始就长得像一份待勾选的清单，勾完的回执再把 `☐` 换成 `☑`。
+    const box = event.detail.multiSelect ? '☐ ' : ''
     options.forEach((option, index) => {
       const label = oneLine(text(option.label))
       const description = withOptions && option.description ? ` —— ${oneLine(text(option.description))}` : ''
-      lines.push(`${index + 1}. ${label}${description}`)
+      lines.push(`${box}${index + 1}. ${label}${description}`)
     })
     if (!event.detail.multiSelect) lines.push(`${options.length + 1}. ${CUSTOM_ANSWER_LABEL}`)
   }
@@ -221,7 +225,7 @@ function questionBody(event: RawEvent, withOptions: boolean, text: TextMode): st
   // 那条路要 `requestId` 与渲染出来的按钮（见 `buildActions`），只在正常那一路才有。
   lines.push(
     event.detail.multiSelect
-      ? '可多选：回复序号（多个用空格隔开）一次提交；也可以点选项勾选，再点「提交所选」。'
+      ? '可多选：点选项勾选（每点一下我会回一条带 ☑ 的清单），选完点「提交所选」；也可以直接回「1 3」一次提交。'
       : '回复序号或选项文字即可作答。',
   )
   return lines.join('\n')
@@ -370,9 +374,13 @@ function buildActions(event: RawEvent, options: RenderOptions): NotificationActi
       break
   }
 
-  // 「打开会话」对所有事件都有用；「升级详情」只在全局模式且未升级时给。
+  // 「会话短id」对所有事件都有用；「升级详情」只在全局模式且未升级时给。
+  //
+  // 标签不能叫「打开会话」：IM 里根本没有通往 DSH 界面的跳转能力，那个名字会让人以为
+  // 点了能跳过去。它实际给出的就是这条通知所属会话的短 id（`#onAction` 的 `goto` 分支），
+  // 而短 id 本来也印在标题里——名字照着它真正给的东西取，用户才不会点完一头雾水。
   if (actions.length < MAX_ACTION_BUTTONS) {
-    actions.push(action('goto', '打开会话', sessionId))
+    actions.push(action('goto', '会话短id', sessionId))
   }
   if (options.mode === 'global' && !options.detailed && actions.length < MAX_ACTION_BUTTONS) {
     actions.push(action('detail', '详细模式', sessionId))

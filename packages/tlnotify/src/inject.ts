@@ -461,13 +461,7 @@ export class InteractionBridge {
       if (at >= 0) picked.splice(at, 1)
       else picked.push(chosen.label)
       pending.chosen = picked
-      const stateText =
-        picked.length > 0 ? `已选「${picked.join('、')}」` : '当前什么都没选'
-      return {
-        ok: true,
-        partial: true,
-        echo: `${stateText}。可继续点选项增减，选完点「提交所选」；也可以直接回复序号（多个用空格隔开）一次提交。`,
-      }
+      return { ok: true, partial: true, echo: multiSelectReceipt(pending) }
     }
     this.#finish(key, pending)
     pending.resolve({ answers: [{ id: pending.questionId, selected: [chosen.label] }] })
@@ -844,6 +838,33 @@ export class InteractionBridge {
 /** 便于测试与调试：从 ActionValue 判断这是不是需要 InteractionBridge 的按钮。 */
 export function isInteractionAction(value: ActionValue): boolean {
   return value.kind === 'approval' || value.kind === 'question' || value.kind === 'plan'
+}
+
+/**
+ * 多选的「勾选态」回执：按通知里的编号渲染一份 ☑ / ☐ 清单。
+ *
+ * ── 为什么只能这么做 ─────────────────────────────────────────────────────
+ *
+ * **QQ 的机器人键盘没有复选框控件。** 官方文档（bot.q.qq.com「消息按钮」与
+ * 「发送单聊消息」两页）里 `action.type` 只有三个取值——0 跳转、1 回调、2 指令；
+ * `render_data` 只有 label / visited_label / style；`permission.type` 是权限，不是
+ * 选择态。已发出的消息也**没有编辑接口**：互动事件回应 `PUT /interactions/{id}`
+ * 的请求体只有一个 `code`（0 成功 / 1 失败 / 2 频繁 …），撤回接口则是「消息消失」。
+ * 这就是 `QqChannel.update()` 恒返回 `undefined` 的原因。
+ *
+ * 所以勾选态只能靠**回一条文本**表达。编号与 `render.ts#questionBody` 一致（1 起），
+ * 用户看完可以直接照编号回「1 3」一次提交。
+ */
+function multiSelectReceipt(question: PendingQuestion): string {
+  const picked = question.chosen ?? []
+  const lines = question.labels.map(
+    (label, index) => `${picked.includes(label) ? '☑' : '☐'} ${index + 1}. ${label}`,
+  )
+  const tail =
+    picked.length > 0
+      ? `已选 ${picked.length} 项。再点按钮可增减，选完点「提交所选」；也可以回「1 3」一次提交。`
+      : '还没选任何选项。点选项勾选，选完点「提交所选」。'
+  return lines.length > 0 ? `${lines.join('\n')}\n\n${tail}` : tail
 }
 
 /** 通道回传的按钮载荷可能带 `Notification` 上的信息，这里统一转成 ActionValue。 */
