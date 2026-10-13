@@ -1,4 +1,4 @@
-﻿// packages/tlnotify/tests/render.spec.ts
+// packages/tlnotify/tests/render.spec.ts
 //
 // 渲染决定了「手机上第一眼看到什么」。标题是固定的三段式，任何模式都不变；
 // 正文才随模式变。按钮的数量与顺序也有硬上限。
@@ -234,12 +234,39 @@ describe('提问与审批正文', () => {
       undefined,
       options(),
     )
-    // 候选一开始就摆成待勾选的清单（QQ 键盘没有复选框控件，勾选态只能靠文本表达）。
-    expect(notification.body).toContain('可选：\n☐ 1. 甲\n☐ 2. 乙\n（可多选）')
+    // 正文里**不摆**复选框字符：QQ 的 Markdown 没有任务列表语法，正文里的字符也回调不到
+    // 机器人——用户点过那个 ☐，结论是「点不动」。可点的复选框在按钮上（见下一条用例）。
+    // 注意 `☐` 仍会出现在「勾选下面带 ☐ 的按钮」那句提示里，所以只禁止它以选项行的形式出现。
+    expect(notification.body).toContain('可选：\n1. 甲\n2. 乙\n（可多选）')
+    expect(notification.body).not.toMatch(/^☐ /m)
     expect(notification.body).not.toContain('自定义回答')
   })
 
-  it('单选提问的选项不带空复选框', () => {
+  it('多选的复选框长在按钮上：label 是 ☐，点过之后客户端换成 ☑（visitedLabel）', () => {
+    const notification = renderNotification(
+      event({
+        kind: 'question',
+        detail: {
+          project: 'DSH',
+          text: '选几个',
+          requestId: 'call-1',
+          options: [{ label: '甲' }, { label: '乙' }],
+          multiSelect: true,
+        },
+      }),
+      undefined,
+      options(),
+    )
+    const optionButtons = notification.actions.filter((item) => item.value.optionIndex !== undefined)
+    expect(optionButtons.map((item) => item.label)).toEqual(['☐ 甲', '☐ 乙'])
+    expect(optionButtons.map((item) => item.visitedLabel)).toEqual(['☑ 甲', '☑ 乙'])
+    // 「提交所选」不参与勾选，标签保持原样。
+    const submit = notification.actions.find((item) => item.value.submit === true)
+    expect(submit?.label).toBe('提交所选')
+    expect(submit?.visitedLabel).toBeUndefined()
+  })
+
+  it('单选提问的按钮不带复选框', () => {
     const notification = renderNotification(
       event({
         kind: 'question',
@@ -253,8 +280,9 @@ describe('提问与审批正文', () => {
       undefined,
       options(),
     )
-    expect(notification.body).toContain('可选：\n1. 甲\n2. 乙')
-    expect(notification.body).not.toContain('☐')
+    const optionButtons = notification.actions.filter((item) => item.value.optionIndex !== undefined)
+    expect(optionButtons.map((item) => item.label)).toEqual(['甲', '乙'])
+    expect(optionButtons.every((item) => item.visitedLabel === undefined)).toBe(true)
   })
 
   it('多选时加标注，并说明勾选与一次提交这两条路', () => {
@@ -268,7 +296,8 @@ describe('提问与审批正文', () => {
     )
     expect(notification.body).toContain('（可多选）')
     expect(notification.body).toContain('提交所选')
-    expect(notification.body).toContain('☑')
+    // 正文要明确指向「带 ☐ 的按钮」——曾经写成正文里的 ☐，用户当场去点它。
+    expect(notification.body).toContain('勾选下面带 ☐ 的按钮')
     // 文本作答那条路永远可用（QQ 桌面端不渲染按钮），要一并写出来。
     expect(notification.body).toContain('也可以直接回「1 3」一次提交')
   })

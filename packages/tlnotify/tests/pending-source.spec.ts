@@ -176,8 +176,12 @@ describe('多选标记的字段名：multi_select 与 multiSelect 都认', () =>
       },
     })
 
-    expect(notification.body).toContain('可选：\n☐ 1. 回执正常\n☐ 2. 暂时不改\n（可多选）')
+    expect(notification.body).toContain('可选：\n1. 回执正常\n2. 暂时不改\n（可多选）')
     expect(notification.body).not.toContain('自定义回答')
+    // 复选框长在按钮上（正文里一个都不摆，见 render.ts#questionBody 的注释）。
+    const optionButtons = notification.actions.filter((item) => item.value.optionIndex !== undefined)
+    expect(optionButtons.map((item) => item.label)).toEqual(['☐ 回执正常', '☐ 暂时不改'])
+    expect(optionButtons.map((item) => item.visitedLabel)).toEqual(['☑ 回执正常', '☑ 暂时不改'])
     const submit = notification.actions.filter((action) => action.value.submit === true)
     expect(submit).toHaveLength(1)
     expect(submit[0]?.label).toBe('提交所选')

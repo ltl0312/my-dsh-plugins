@@ -501,7 +501,10 @@ export function buildKeyboard(actions: readonly NotificationAction[]): InlineKey
     id: `${action.value.kind}-${index}`,
     render_data: {
       label: action.label,
-      visited_label: action.label,
+      // 「点击后按钮上的文字」。多选用它把 `☐ 甲` 变成 `☑ 甲`——这是 QQ 客户端本地
+      // 的显示切换，也是这台客户端上唯一能给出「点过了」视觉反馈的地方（正文里的字符
+      // 永远回调不到机器人，见 render.ts#questionBody 的注释）。
+      visited_label: action.visitedLabel ?? action.label,
       style: action.tone === 'primary' ? 1 : 0,
     },
     action: {

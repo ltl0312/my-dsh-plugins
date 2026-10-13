@@ -57,6 +57,20 @@ describe('QQ 内联键盘', () => {
     expect(second?.render_data.style).toBe(0)
   })
 
+  // 多选把复选框画在按钮上：`label` 是 ☐，点过之后客户端换成 visited_label 的 ☑。
+  // 这是 QQ 客户端唯一能给出的「点过了」反馈——消息正文里的字符永远回调不到机器人。
+  it('给了 visitedLabel 就用它（多选的 ☐ → ☑）', () => {
+    const keyboard = buildKeyboard([
+      { ...action('☐ 甲'), visitedLabel: '☑ 甲' },
+      action('提交所选'),
+    ])
+    const [first, second] = keyboard?.content.rows[0]?.buttons ?? []
+    expect(first?.render_data.label).toBe('☐ 甲')
+    expect(first?.render_data.visited_label).toBe('☑ 甲')
+    // 没给 visitedLabel 的按钮照旧与 label 一致。
+    expect(second?.render_data.visited_label).toBe('提交所选')
+  })
+
   it('每行最多 3 个按钮，多出来的另起一行', () => {
     const keyboard = buildKeyboard([1, 2, 3, 4, 5, 6, 7].map((index) => action(`选项${index}`)))
     const rows = keyboard?.content.rows ?? []

@@ -195,6 +195,14 @@ export interface NotificationAction {
   value: ActionValue
   /** 危险操作（拒绝 / 中止）用不同样式。 */
   tone?: 'primary' | 'default' | 'danger'
+  /**
+   * 「点过之后按钮上显示什么」（QQ 的 `render_data.visited_label`）。
+   *
+   * 多选拿它把按钮变成复选框：`label` 是 `☐ 甲`，点一下客户端换成 `visited_label`
+   * 的 `☑ 甲`。这是**客户端本地**的显示，取消勾选不会变回去——真正的勾选态以回执清单
+   * 为准。通道不支持这个概念时（飞书）忽略即可。
+   */
+  visitedLabel?: string
 }
 
 /**

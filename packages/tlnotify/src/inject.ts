@@ -843,7 +843,7 @@ export function isInteractionAction(value: ActionValue): boolean {
 /**
  * 多选的「勾选态」回执：按通知里的编号渲染一份 ☑ / ☐ 清单。
  *
- * ── 为什么只能这么做 ─────────────────────────────────────────────────────
+ * ── 为什么勾选态只能靠回一条文本 ─────────────────────────────────────────
  *
  * **QQ 的机器人键盘没有复选框控件。** 官方文档（bot.q.qq.com「消息按钮」与
  * 「发送单聊消息」两页）里 `action.type` 只有三个取值——0 跳转、1 回调、2 指令；
@@ -852,8 +852,12 @@ export function isInteractionAction(value: ActionValue): boolean {
  * 的请求体只有一个 `code`（0 成功 / 1 失败 / 2 频繁 …），撤回接口则是「消息消失」。
  * 这就是 `QqChannel.update()` 恒返回 `undefined` 的原因。
  *
- * 所以勾选态只能靠**回一条文本**表达。编号与 `render.ts#questionBody` 一致（1 起），
- * 用户看完可以直接照编号回「1 3」一次提交。
+ * 正文里也**不能**摆复选框字符：QQ 的 Markdown 支持格式里没有任务列表，而且正文里的
+ * 字符永远回调不到机器人（用户点过 `☐`，结论是「点不动，功能没做」）。所以可点的只有
+ * 按钮——复选框画在按钮上（`render.ts#buildActions` 的 `☐` / `visitedLabel` 的 `☑`），
+ * 而**权威的勾选态**由这条回执给出（按钮上的 ☑ 取消勾选时不会变回去）。
+ *
+ * 编号与 `render.ts#questionBody` 一致（1 起），用户看完可以直接照编号回「1 3」一次提交。
  */
 function multiSelectReceipt(question: PendingQuestion): string {
   const picked = question.chosen ?? []
@@ -864,7 +868,7 @@ function multiSelectReceipt(question: PendingQuestion): string {
     picked.length > 0
       ? `已选 ${picked.length} 项。再点按钮可增减，选完点「提交所选」；也可以回「1 3」一次提交。`
       : '还没选任何选项。点选项勾选，选完点「提交所选」。'
-  return lines.length > 0 ? `${lines.join('\n')}\n\n${tail}` : tail
+  return lines.length > 0 ? `当前勾选：\n${lines.join('\n')}\n\n${tail}` : tail
 }
 
 /** 通道回传的按钮载荷可能带 `Notification` 上的信息，这里统一转成 ActionValue。 */

@@ -206,14 +206,17 @@ function questionBody(event: RawEvent, withOptions: boolean, text: TextMode): st
   const options = event.detail.options ?? []
   if (options.length > 0) {
     lines.push('可选：')
-    // 多选的选项前面摆一个**空复选框**（`☐`）：QQ 的机器人键盘没有复选框控件（见
-    // `InteractionBridge#checkboxLines` 的注释），勾选态只能靠文本表达，那至少让候选
-    // 一开始就长得像一份待勾选的清单，勾完的回执再把 `☐` 换成 `☑`。
-    const box = event.detail.multiSelect ? '☐ ' : ''
+    // 多选的复选框**只放在按钮上**（见 `buildActions`），正文里一个都不摆。
+    //
+    // 曾经在正文里写过 `☐ 1. …`，用户当场去点那个 ☐ —— 点不动，于是判定「功能没做」。
+    // 这不是用户看错：QQ 的 Markdown 支持格式里**没有任务列表**（官方「Markdown 消息」
+    // 一页只列了标题 / 文字样式 / 链接 / 图片 / 有序列表 / 无序列表 / 嵌套 / 引用 /
+    // 分割线 / 换行），而且消息正文里的任何东西都回调不到机器人——能点的只有键盘按钮
+    // （`action.type=1` 回调按钮）。所以正文里绝不能出现长得像复选框的字符。
     options.forEach((option, index) => {
       const label = oneLine(text(option.label))
       const description = withOptions && option.description ? ` —— ${oneLine(text(option.description))}` : ''
-      lines.push(`${box}${index + 1}. ${label}${description}`)
+      lines.push(`${index + 1}. ${label}${description}`)
     })
     if (!event.detail.multiSelect) lines.push(`${options.length + 1}. ${CUSTOM_ANSWER_LABEL}`)
   }
@@ -225,7 +228,7 @@ function questionBody(event: RawEvent, withOptions: boolean, text: TextMode): st
   // 那条路要 `requestId` 与渲染出来的按钮（见 `buildActions`），只在正常那一路才有。
   lines.push(
     event.detail.multiSelect
-      ? '可多选：点选项勾选（每点一下我会回一条带 ☑ 的清单），选完点「提交所选」；也可以直接回「1 3」一次提交。'
+      ? '可多选：勾选下面带 ☐ 的按钮（可多选，点一下我会回一条清单），选完点「提交所选」；也可以直接回「1 3」一次提交。'
       : '回复序号或选项文字即可作答。',
   )
   return lines.join('\n')
@@ -338,15 +341,20 @@ function buildActions(event: RawEvent, options: RenderOptions): NotificationActi
         const multiSelect = event.detail.multiSelect === true
         const optionBudget = multiSelect ? MAX_ACTION_BUTTONS - 1 : MAX_ACTION_BUTTONS
         options_.slice(0, optionBudget).forEach((option, index) => {
-          actions.push(
-            action(
-              'question',
-              truncate(option.label, 20),
-              sessionId,
-              { requestId, ...(questionId ? { questionId } : {}), choice: option.label, optionIndex: index },
-              'primary',
-            ),
+          // 复选框**长在按钮上**，因为只有按钮点得动（正文里的字符永远回调不到机器人）。
+          // `visited_label` 是 QQ 的「点过之后按钮上显示什么」：点一下由 ☐ 变 ☑，这就是
+          // 这台客户端能给出的最接近复选框的反馈。它不会因为「取消勾选」变回去——真正的
+          // 勾选态以回执清单为准（`InteractionBridge#multiSelectReceipt`）。
+          const budget = multiSelect ? 18 : 20
+          const label = truncate(option.label, budget)
+          const item = action(
+            'question',
+            multiSelect ? `☐ ${label}` : label,
+            sessionId,
+            { requestId, ...(questionId ? { questionId } : {}), choice: option.label, optionIndex: index },
+            'primary',
           )
+          actions.push(multiSelect ? { ...item, visitedLabel: `☑ ${label}` } : item)
         })
         if (multiSelect) {
           actions.push(
