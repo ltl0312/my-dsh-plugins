@@ -12,7 +12,7 @@
 | 插件 | 版本 | 一句话 | 详细文档 |
 |---|---|---|---|
 | `dsh-plugin-tlmemory` | 0.7.0 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
-| `dsh-plugin-tlnotify` | 0.2.0 | 把 DSH 会话事件聚合到一个 IM 通道推到 QQ / 飞书，并且能直接回话 | [`packages/tlnotify/README.md`](packages/tlnotify/README.md) |
+| `dsh-plugin-tlnotify` | 0.3.0 | 把 DSH 会话事件聚合到一个 IM 通道推到 QQ / 飞书，并且能直接回话 | [`packages/tlnotify/README.md`](packages/tlnotify/README.md) |
 | `dsh-plugin-tlsearch` | 0.3.2 | 低 Token 消耗的联网搜索，只返回清洗过的标题 / URL / 摘要 | [`packages/tlsearch/README.md`](packages/tlsearch/README.md) |
 
 ---
