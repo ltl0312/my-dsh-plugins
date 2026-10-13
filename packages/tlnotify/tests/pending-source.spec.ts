@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 
 import { extractToolCallEvent, extractToolCallEvents } from '../src/events.js'
 import type { SessionEventLike, SessionLike } from '../src/events.js'
+import { renderNotification } from '../src/render.js'
 
 const session: SessionLike = { id: 'sess-1', header: { cwd: 'D:\\demo\\proj' } }
 
@@ -92,5 +93,93 @@ describe('日志兜底路径认得出「这是哪一道题」', () => {
     // (sessionId, seq) 认重，共用 seq 会让第 2、3 条被当成重复事件丢掉。
     expect(raws[0]!.seq).toBe(408)
     expect(new Set(raws.map((raw) => raw.seq)).size).toBe(3)
+  })
+})
+
+/**
+ * 多选标记的**字段名**：两种拼法都必须认。
+ *
+ * 现场（2026-10-13，用户验收多选）：QQ 上收到的那张卡片是**单选**的样子——没有 ☐、
+ * 没有「提交所选」，反而多出一行「6. 自定义回答（先输入序号再输入文本）」。日志显示真正
+ * 投递的是**日志兜底**那条路（waterfall 被去重），而它解析的是模型原始工具参数：
+ *
+ *   {"questions":[{"header":"多选自测","id":"multiselect-smoke","multi_select":true,…}]}
+ *
+ * `parseQuestion` 当时只认驼峰 `multiSelect`，于是 `detail.multiSelect` 是 falsy。
+ * 两种拼法都是真的：宿主给模型的 schema 用下划线，宿主自己的请求对象（waterfall 读到的）
+ * 用驼峰——所以两条路都要能读懂。下面第一组参数就是从 session 日志里原样抄下来的。
+ */
+describe('多选标记的字段名：multi_select 与 multiSelect 都认', () => {
+  /** 生产环境里那份原始参数（`multi_select`，下划线）。 */
+  const productionArgs = {
+    questions: [
+      {
+        header: '多选自测',
+        id: 'multiselect-smoke',
+        multi_select: true,
+        options: [
+          { description: '点选项后能收到 ☑/☐ 清单回执', label: '回执正常' },
+          { label: '暂时不改' },
+        ],
+      },
+    ],
+  }
+
+  it('原始参数里的 multi_select（宿主 schema 的下划线拼法）算多选', () => {
+    const raw = extractToolCallEvent(session, toolCall('ask_user_question', productionArgs))
+    expect(raw?.detail.multiSelect).toBe(true)
+    expect(raw?.detail.questionId).toBe('multiselect-smoke')
+  })
+
+  it('宿主请求对象用的 multiSelect（驼峰）照旧算多选', () => {
+    const raw = extractToolCallEvent(
+      session,
+      toolCall('ask_user_question', {
+        questions: [{ id: 'q1', multiSelect: true, options: [{ label: '甲' }] }],
+      }),
+    )
+    expect(raw?.detail.multiSelect).toBe(true)
+  })
+
+  it('没写或写 false 时仍然是单选（不能把单选当多选）', () => {
+    for (const questions of [
+      [{ id: 'q1', options: [{ label: '甲' }] }],
+      [{ id: 'q1', multiSelect: false, options: [{ label: '甲' }] }],
+      [{ id: 'q1', multi_select: false, options: [{ label: '甲' }] }],
+    ]) {
+      const raw = extractToolCallEvent(session, toolCall('ask_user_question', { questions }))
+      expect(raw?.detail.multiSelect).toBe(false)
+    }
+  })
+
+  it('端到端：这份原始参数渲染出来必须带 ☐ 与「提交所选」', () => {
+    // 这条才是用户看得见的那一层：兜底路径 → 渲染 → QQ 卡片。
+    const raw = extractToolCallEvent(session, toolCall('ask_user_question', productionArgs))
+    expect(raw).toBeDefined()
+    const notification = renderNotification(raw!, undefined, {
+      mode: 'global',
+      content: { includeMetadata: true, includeUserPrompt: false, maxBodyChars: 1800 },
+      session: {
+        context: {
+          includeAssistant: true,
+          includeTools: true,
+          includeTiming: true,
+          previousTurns: 3,
+          includeUserPrompt: true,
+        },
+      },
+      global: {
+        verbosity: 'brief',
+        includeSessionLabel: true,
+        includeSummaryLine: true,
+        includeSubagent: false,
+      },
+    })
+
+    expect(notification.body).toContain('可选：\n☐ 1. 回执正常\n☐ 2. 暂时不改\n（可多选）')
+    expect(notification.body).not.toContain('自定义回答')
+    const submit = notification.actions.filter((action) => action.value.submit === true)
+    expect(submit).toHaveLength(1)
+    expect(submit[0]?.label).toBe('提交所选')
   })
 })

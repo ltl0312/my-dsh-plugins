@@ -189,8 +189,11 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 /**
  * 从 `ask_user_question` 的参数里抽选项。
  *
- * 宿主的工具参数形如 `{ questions: [{ id, question, header, options:[{label,description}], multiSelect }] }`；
- * 但模型偶尔会写 `options: ["A","B"]` 这种简写，所以两种都吃。
+ * 宿主的工具参数形如
+ * `{ questions: [{ id, question, header, multi_select, options:[{label,description}] }] }`
+ * ——多选那个字段在**工具 schema 里是下划线拼法** `multi_select`（模型生成的原始参数就是
+ * 它），而宿主自己的请求对象用的是驼峰 `multiSelect`。两种拼法都要认，见 `parseQuestion`。
+ * 模型偶尔还会写 `options: ["A","B"]` 这种简写，所以两种都吃。
  */
 /** 一条提问（`questions[i]`）里我们关心的那几样。 */
 export interface ParsedQuestion {
@@ -255,7 +258,16 @@ function parseQuestion(entry: unknown): ParsedQuestion | undefined {
   }
 
   const questionId = typeof first.id === 'string' ? first.id : undefined
-  const multiSelect = first.multiSelect === true
+  // 多选标记**两种拼法都要认**，而且两种都是真实存在的：
+  //
+  //   - `multi_select`：宿主给模型的工具 schema 就是这个下划线拼法（模型按 schema 生成的
+  //     原始参数 JSON 里就是它）——兜底路径解析的正是这份原始参数；
+  //   - `multiSelect`：宿主自己的请求对象（`user-questions/request` 那条 waterfall 读到的）
+  //     用的是驼峰。
+  //
+  // 只认驼峰曾经让多选在 QQ 上渲染成单选（现场 2026-10-13：没有 ☐、没有「提交所选」，反而
+  // 多出一行「6. 自定义回答」）。当时真正投递的是**兜底**那条路，它读的就是下划线拼法。
+  const multiSelect = first.multiSelect === true || first.multi_select === true
   const parsed: ParsedQuestion = { options, multiSelect }
   if (questionText) parsed.text = questionText
   if (questionId) parsed.questionId = questionId
