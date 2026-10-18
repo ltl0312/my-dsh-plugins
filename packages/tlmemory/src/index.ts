@@ -498,8 +498,12 @@ export function apply(ctx: Context, config: Config): () => void {
     ctx.systemPrompt?.section?.({
       name: 'tlmemory:injected-context',
       order: 115,
+      // 记忆内容属于用户数据，绝不能当模板插值：0.2.1-rc.2 只注册 provider/model，
+      // 记忆里任何 {{...}} 都会让整轮抛 unknown prompt variable 而失败。
+      // cordis 3.x 的 section 类型尚未声明该字段，运行时由 DSH 0.2.1+ 读取。
+      interpolate: false,
       text: () => activePromptSectionText,
-    }) ?? (() => {})
+    } as any) ?? (() => {})
 
   // v0.6.6 作用域动态感知：工具执行时按宿主 exec 上下文携带的 session 解析工程作用域；
   // 无会话线索时先取进程级身份（合法才用），孤儿进程目录一律降级白名单首位合法工作区
