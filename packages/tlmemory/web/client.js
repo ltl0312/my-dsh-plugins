@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
       var __getOwnPropNames = Object.getOwnPropertyNames;
       var __getProtoOf = Object.getPrototypeOf;
       var __hasOwnProp = Object.prototype.hasOwnProperty;
+      var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
       var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
         get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
       }) : x)(function(x) {
@@ -39,6 +40,7 @@ window.__ModuleLoader__.load({
         mod
       ));
       var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+      var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
     
       // src/client/entry.ts
       var entry_exports = {};
@@ -48,7 +50,7 @@ window.__ModuleLoader__.load({
       });
     
       // src/client/index.tsx
-      var import_react = __toESM(__require("react"), 1);
+      var import_react2 = __toESM(__require("react"), 1);
       var import_client = __require("react-dom/client");
     
       // src/client/logic.ts
@@ -867,8 +869,599 @@ window.__ModuleLoader__.load({
         doc.querySelector(STYLE_SELECTOR)?.remove();
       }
     
+      // src/client/settings.tsx
+      var import_react = __toESM(__require("react"), 1);
+    
+      // src/client/settings-logic.ts
+      var SETTINGS_NS = "dsh-plugin-tlmemory";
+      var SETTINGS_NS_HINT = "tlmemory";
+      function isRecord(value) {
+        return value !== null && typeof value === "object" && !Array.isArray(value);
+      }
+      function unwrap(response) {
+        if (isRecord(response) && "ok" in response) {
+          if (response.ok === true) {
+            return { ok: true, value: response.value };
+          }
+          const error = response.error;
+          const message = isRecord(error) && typeof error.message === "string" ? error.message : "";
+          const code = isRecord(error) && typeof error.code === "string" ? error.code : void 0;
+          return { ok: false, message: message === "" ? "settings request rejected" : message, code };
+        }
+        return { ok: true, value: response };
+      }
+      function pickNamespace(view, preferred = SETTINGS_NS) {
+        const namespaces = isRecord(view) && Array.isArray(view.namespaces) ? view.namespaces : [];
+        const exact = namespaces.find((ns) => ns?.ns === preferred);
+        if (exact !== void 0) return exact;
+        const candidates = namespaces.filter(
+          (ns) => typeof ns?.ns === "string" && ns.ns.toLowerCase().includes(SETTINGS_NS_HINT)
+        );
+        return candidates.length === 1 ? candidates[0] : void 0;
+      }
+      function rootNode(schema) {
+        if (!isRecord(schema)) return void 0;
+        const refs = isRecord(schema.refs) ? schema.refs : void 0;
+        const uid = typeof schema.uid === "number" ? schema.uid : void 0;
+        if (refs !== void 0 && uid !== void 0) {
+          const root = refs[String(uid)];
+          if (isRecord(root)) return root;
+        }
+        return typeof schema.type === "string" ? schema : void 0;
+      }
+      function resolveDictNode(schema, entry) {
+        if (isRecord(entry) && typeof entry.type === "string") return entry;
+        if (typeof entry !== "number") return void 0;
+        const refs = isRecord(schema) && isRecord(schema.refs) ? schema.refs : void 0;
+        const node = refs?.[String(entry)];
+        return isRecord(node) ? node : void 0;
+      }
+      function textOf(value) {
+        return typeof value === "string" && value !== "" ? value : void 0;
+      }
+      function normalize(type, raw) {
+        if (type === "boolean") return raw === true;
+        if (raw === void 0 || raw === null) return "";
+        if (type === "number") return typeof raw === "number" && Number.isFinite(raw) ? String(raw) : String(raw);
+        return String(raw);
+      }
+      function fieldsFromView(view) {
+        const root = rootNode(view?.schema);
+        const dict = isRecord(root) && isRecord(root.dict) ? root.dict : void 0;
+        if (dict === void 0) return [];
+        const values = isRecord(view) && isRecord(view.value) ? view.value : {};
+        const fields = [];
+        for (const [key, entry] of Object.entries(dict)) {
+          const node = resolveDictNode(view?.schema, entry);
+          const type = node?.type;
+          if (type !== "string" && type !== "number" && type !== "boolean") continue;
+          const meta = isRecord(node) && isRecord(node.meta) ? node.meta : {};
+          const declared = meta.default;
+          const raw = values[key] !== void 0 ? values[key] : declared;
+          const defaultText = declared === void 0 || declared === null ? void 0 : normalize(type, declared) === "" ? void 0 : String(normalize(type, declared));
+          fields.push({
+            key,
+            type,
+            value: normalize(type, raw),
+            defaultText,
+            hint: textOf(meta.description)
+          });
+        }
+        return fields;
+      }
+      function draftOf(fields) {
+        const draft = {};
+        for (const field of fields) draft[field.key] = field.value;
+        return draft;
+      }
+      function isDirty(fields, draft) {
+        for (const field of fields) {
+          if ((draft[field.key] ?? field.value) !== field.value) return true;
+        }
+        return false;
+      }
+      function buildSavePlan(fields, draft) {
+        const patch = {};
+        const unset = [];
+        for (const field of fields) {
+          const next = draft[field.key] ?? field.value;
+          if (next === field.value) continue;
+          if (field.type === "boolean") {
+            patch[field.key] = next === true;
+            continue;
+          }
+          const text = String(next).trim();
+          if (field.type === "string") {
+            if (text === "") unset.push(field.key);
+            else patch[field.key] = text;
+            continue;
+          }
+          const parsed = Number(text);
+          if (text === "" || !Number.isFinite(parsed)) return { patch: {}, unset: [], invalid: field.key };
+          patch[field.key] = parsed;
+        }
+        return { patch, unset };
+      }
+      function resetField(field, draft) {
+        const next = { ...draft };
+        if (field.defaultText !== void 0) next[field.key] = field.type === "boolean" ? field.defaultText === "true" : field.defaultText;
+        else next[field.key] = field.type === "boolean" ? false : "";
+        return next;
+      }
+      var SettingsPanelController = class {
+        constructor(transport) {
+          __publicField(this, "transport");
+          __publicField(this, "listeners", /* @__PURE__ */ new Set());
+          __publicField(this, "snapshot", {
+            status: "loading",
+            writable: false,
+            fields: [],
+            draft: {},
+            dirty: false,
+            busy: false,
+            messageKey: null,
+            messageKind: "info"
+          });
+          __publicField(this, "disposed", false);
+          /** 写入串行化：并发点击保存不会互相踩 revision */
+          __publicField(this, "tail", Promise.resolve());
+          this.transport = transport;
+        }
+        getSnapshot() {
+          return this.snapshot;
+        }
+        subscribe(listener) {
+          this.listeners.add(listener);
+          return () => {
+            this.listeners.delete(listener);
+          };
+        }
+        dispose() {
+          this.disposed = true;
+          this.listeners.clear();
+        }
+        emit(patch) {
+          this.snapshot = { ...this.snapshot, ...patch };
+          for (const listener of this.listeners) listener(this.snapshot);
+        }
+        /** 重新从宿主读取 schema 与当前值 */
+        async load() {
+          if (this.disposed) return;
+          this.emit({ status: "loading", busy: true });
+          const outcome = unwrap(await this.transport.describe());
+          if (this.disposed) return;
+          if (!outcome.ok) {
+            this.emit({ status: "error", busy: false, messageKey: "loadFailed", messageKind: "error" });
+            return;
+          }
+          const view = pickNamespace(outcome.value);
+          if (view === void 0) {
+            this.emit({
+              status: "unavailable",
+              busy: false,
+              ns: void 0,
+              fields: [],
+              draft: {},
+              dirty: false,
+              messageKey: "unavailable",
+              messageKind: "error"
+            });
+            return;
+          }
+          const fields = fieldsFromView(view);
+          this.emit({
+            status: "ready",
+            busy: false,
+            ns: view.ns,
+            revision: typeof view.revision === "number" ? view.revision : void 0,
+            writable: outcome.value?.writable !== false,
+            fields,
+            draft: draftOf(fields),
+            dirty: false,
+            messageKey: null,
+            messageKind: "info"
+          });
+        }
+        setDraft(key, value) {
+          if (this.disposed) return;
+          const draft = { ...this.snapshot.draft, [key]: value };
+          this.emit({ draft, dirty: isDirty(this.snapshot.fields, draft) });
+        }
+        resetFieldToDefault(key) {
+          if (this.disposed) return;
+          const field = this.snapshot.fields.find((candidate) => candidate.key === key);
+          if (field === void 0) return;
+          const draft = resetField(field, this.snapshot.draft);
+          this.emit({ draft, dirty: isDirty(this.snapshot.fields, draft) });
+        }
+        /** 保存：先 unset（清空字段）再 update（值字段），每一步都带当前 revision */
+        save() {
+          const run = this.tail.then(async () => {
+            if (this.disposed) return;
+            const { ns, fields, draft, revision } = this.snapshot;
+            if (ns === void 0) return;
+            const plan = buildSavePlan(fields, draft);
+            if (plan.invalid !== void 0) {
+              this.emit({ messageKey: "invalidNumber", messageKind: "error" });
+              return;
+            }
+            if (plan.unset.length === 0 && Object.keys(plan.patch).length === 0) {
+              this.emit({ messageKey: "noChanges", messageKind: "info" });
+              return;
+            }
+            this.emit({ busy: true, messageKey: "saving", messageKind: "info" });
+            let expected = revision;
+            if (plan.unset.length > 0) {
+              const ops = plan.unset.map((key) => ({ op: "unset", path: [key] }));
+              const written = unwrap(await this.transport.mutate(ns, ops, expected));
+              if (!written.ok) {
+                await this.fail(written.message, written.code);
+                return;
+              }
+              expected = written.value?.revision ?? expected;
+            }
+            if (Object.keys(plan.patch).length > 0) {
+              const written = unwrap(await this.transport.update(ns, plan.patch, expected));
+              if (!written.ok) {
+                await this.fail(written.message, written.code);
+                return;
+              }
+            }
+            await this.load();
+            if (this.disposed) return;
+            this.emit({ messageKey: "saved", messageKind: "info" });
+          });
+          this.tail = run.then(
+            () => {
+            },
+            () => {
+            }
+          );
+          return run;
+        }
+        /** 写入失败的统一收尾：重读宿主状态，冲突给出可操作提示 */
+        async fail(message, code) {
+          await this.load();
+          if (this.disposed) return;
+          this.emit({
+            messageKey: code === "settings/conflict" ? "conflict" : "saveFailed",
+            messageKind: "error",
+            busy: false
+          });
+          if (code !== "settings/conflict") {
+            console.warn("[tlmemory] \u4FDD\u5B58\u8BBE\u7F6E\u5931\u8D25\uFF1A", message);
+          }
+        }
+      };
+    
+      // src/client/settings.tsx
+      var SETTINGS_LOCALE_NS = "settings.tlmemory";
+      var SETTINGS_SECTION_ID = "tlmemory";
+      var SETTINGS_SECTION_ORDER = 30;
+      var FIELD_LABEL_KEYS = {
+        dbPath: "field.dbPath",
+        serverPort: "field.serverPort",
+        maxRecallCount: "field.maxRecallCount",
+        enableAutoReflection: "field.enableAutoReflection",
+        compactionInterval: "field.compactionInterval"
+      };
+      var FIELD_HINT_KEYS = {
+        dbPath: "hint.dbPath",
+        serverPort: "hint.serverPort",
+        maxRecallCount: "hint.maxRecallCount",
+        enableAutoReflection: "hint.enableAutoReflection",
+        compactionInterval: "hint.compactionInterval"
+      };
+      var zh = {
+        nav: "\u8BB0\u5FC6",
+        title: "TLMemory \u957F\u671F\u8BB0\u5FC6",
+        description: "\u914D\u7F6E\u8BB0\u5FC6\u5E93\u4F4D\u7F6E\u4E0E\u53EC\u56DE\u884C\u4E3A\u3002\u4FDD\u5B58\u540E\u7ACB\u5373\u751F\u6548\uFF0C\u65E0\u9700\u91CD\u542F\u3002",
+        "field.dbPath": "\u6570\u636E\u5E93\u8DEF\u5F84",
+        "field.serverPort": "\u770B\u677F\u670D\u52A1\u7AEF\u53E3",
+        "field.maxRecallCount": "\u5355\u8F6E\u53EC\u56DE\u6761\u6570",
+        "field.enableAutoReflection": "\u81EA\u52A8\u63D0\u70BC\u8BB0\u5FC6",
+        "field.compactionInterval": "\u81EA\u52A8\u63D0\u70BC\u95F4\u9694\uFF08\u8F6E\uFF09",
+        "hint.dbPath": "\u7559\u7A7A\u5219\u4F7F\u7528\u9ED8\u8BA4\u8DEF\u5F84 ~/.dsh/tlmemory.db\uFF1B\u9996\u6B21\u542F\u52A8\u81EA\u52A8\u5EFA\u5E93\u5EFA\u8868\u3002",
+        "hint.serverPort": "\u8BB0\u5FC6\u770B\u677F\u670D\u52A1\u76D1\u542C\u7684\u672C\u5730\u7AEF\u53E3\uFF08\u4EC5\u56DE\u73AF\u5730\u5740\uFF09\u3002",
+        "hint.maxRecallCount": "\u6BCF\u8F6E\u5BF9\u8BDD\u6700\u591A\u6CE8\u5165\u51E0\u6761\u76F8\u5173\u8BB0\u5FC6\u3002",
+        "hint.enableAutoReflection": "\u5F00\u542F\u540E\uFF0C\u5BF9\u8BDD\u7ED3\u675F\u4F1A\u540E\u53F0\u63D0\u70BC\u53EF\u590D\u7528\u7684\u4E8B\u5B9E\u4E0E\u504F\u597D\u3002",
+        "hint.compactionInterval": "\u6BCF\u7D2F\u8BA1\u591A\u5C11\u8F6E\u5BF9\u8BDD\u89E6\u53D1\u4E00\u6B21\u540E\u53F0\u63D0\u70BC\u3002",
+        defaultText: "\u9ED8\u8BA4\u503C",
+        emptyText: "\u672A\u8BBE\u7F6E",
+        reset: "\u6062\u590D\u9ED8\u8BA4",
+        save: "\u4FDD\u5B58",
+        saving: "\u4FDD\u5B58\u4E2D\u2026",
+        discard: "\u653E\u5F03\u6539\u52A8",
+        saved: "\u5DF2\u4FDD\u5B58\uFF0C\u65B0\u914D\u7F6E\u7ACB\u5373\u751F\u6548\u3002",
+        noChanges: "\u6CA1\u6709\u9700\u8981\u4FDD\u5B58\u7684\u6539\u52A8\u3002",
+        invalidNumber: "\u8BF7\u586B\u5199\u6570\u5B57\uFF0C\u6216\u70B9\u300C\u6062\u590D\u9ED8\u8BA4\u300D\u3002",
+        conflict: "\u914D\u7F6E\u521A\u88AB\u5176\u5B83\u7A97\u53E3\u6539\u52A8\uFF0C\u5DF2\u91CD\u65B0\u8F7D\u5165\u6700\u65B0\u503C\uFF0C\u8BF7\u786E\u8BA4\u540E\u518D\u4FDD\u5B58\u3002",
+        saveFailed: "\u5BBF\u4E3B\u6CA1\u6709\u63A5\u53D7\u8FD9\u6B21\u4FEE\u6539\uFF0C\u5DF2\u91CD\u65B0\u8F7D\u5165\u6700\u65B0\u503C\u3002",
+        loadFailed: "\u8BFB\u53D6\u914D\u7F6E\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002",
+        unavailable: "\u672A\u5728\u5F53\u524D profile \u4E2D\u627E\u5230\u672C\u63D2\u4EF6\u7684\u914D\u7F6E\u547D\u540D\u7A7A\u95F4\uFF0C\u6682\u65F6\u65E0\u6CD5\u5728\u6B64\u914D\u7F6E\u3002",
+        readOnly: "\u5F53\u524D\u90E8\u7F72\u7684\u8BBE\u7F6E\u4E3A\u53EA\u8BFB\u3002",
+        retry: "\u91CD\u65B0\u8BFB\u53D6",
+        loading: "\u6B63\u5728\u8BFB\u53D6\u914D\u7F6E\u2026",
+        namespace: "\u547D\u540D\u7A7A\u95F4",
+        revision: "\u7248\u672C"
+      };
+      var en = {
+        nav: "Memory",
+        title: "TLMemory long-term memory",
+        description: "Configure where memories live and how they are recalled. Changes apply immediately.",
+        "field.dbPath": "Database path",
+        "field.serverPort": "Dashboard port",
+        "field.maxRecallCount": "Recall limit per turn",
+        "field.enableAutoReflection": "Auto-distill memories",
+        "field.compactionInterval": "Auto-distill interval (turns)",
+        "hint.dbPath": "Leave blank to use ~/.dsh/tlmemory.db; the database and tables are created on first start.",
+        "hint.serverPort": "Loopback port serving the memory dashboard.",
+        "hint.maxRecallCount": "How many related memories may be injected into one turn.",
+        "hint.enableAutoReflection": "When enabled, reusable facts and preferences are distilled after a turn.",
+        "hint.compactionInterval": "Turns accumulated before a background distillation runs.",
+        defaultText: "Default",
+        emptyText: "Not set",
+        reset: "Reset to default",
+        save: "Save",
+        saving: "Saving\u2026",
+        discard: "Discard",
+        saved: "Saved; the new configuration is active now.",
+        noChanges: "Nothing to save.",
+        invalidNumber: "Enter a number, or reset the field to its default.",
+        conflict: "Another window changed the configuration; the latest values were reloaded.",
+        saveFailed: "The host rejected the change; the latest values were reloaded.",
+        loadFailed: "Could not read the configuration. Please retry.",
+        unavailable: "This plugin has no configuration namespace in the current profile.",
+        readOnly: "This deployment stores settings read-only.",
+        retry: "Reload",
+        loading: "Reading configuration\u2026",
+        namespace: "Namespace",
+        revision: "Revision"
+      };
+      var S = {
+        root: { display: "flex", flexDirection: "column", gap: "18px", padding: "4px 0 8px" },
+        head: { display: "flex", flexDirection: "column", gap: "6px" },
+        title: { margin: 0, fontSize: "16px", fontWeight: 600 },
+        description: { margin: 0, fontSize: "13px", lineHeight: 1.6, opacity: 0.72 },
+        field: { display: "flex", flexDirection: "column", gap: "6px" },
+        labelRow: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
+        label: { fontSize: "13px", fontWeight: 500 },
+        hint: { fontSize: "12px", lineHeight: 1.55, opacity: 0.66 },
+        defaultTag: { fontSize: "11px", opacity: 0.55 },
+        input: {
+          width: "100%",
+          boxSizing: "border-box",
+          padding: "8px 10px",
+          fontSize: "13px",
+          borderRadius: "8px",
+          border: "1px solid rgba(128,128,128,0.38)",
+          background: "transparent",
+          color: "inherit",
+          font: "inherit"
+        },
+        checkboxRow: { display: "flex", alignItems: "center", gap: "8px" },
+        linkButton: {
+          border: "none",
+          background: "transparent",
+          color: "inherit",
+          opacity: 0.62,
+          fontSize: "12px",
+          cursor: "pointer",
+          padding: 0,
+          textDecoration: "underline"
+        },
+        footer: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" },
+        message: { fontSize: "12px", lineHeight: 1.5 },
+        primaryButton: {
+          padding: "7px 16px",
+          fontSize: "13px",
+          borderRadius: "8px",
+          border: "1px solid rgba(128,128,128,0.4)",
+          background: "rgba(128,128,128,0.16)",
+          color: "inherit",
+          cursor: "pointer",
+          font: "inherit"
+        },
+        meta: { fontSize: "11px", opacity: 0.45, fontFamily: "ui-monospace, Menlo, Consolas, monospace" }
+      };
+      function disabledStyle(disabled) {
+        return disabled ? { ...S.linkButton, opacity: 0.3, cursor: "default" } : { ...S.linkButton };
+      }
+      function TlmemorySettingsSection(props) {
+        const { controller, t } = props;
+        const [snapshot, setSnapshot] = import_react.default.useState(() => controller.getSnapshot());
+        import_react.default.useEffect(() => controller.subscribe((next) => setSnapshot(next)), [controller]);
+        const readOnly = !snapshot.writable || snapshot.status !== "ready";
+        const busy = snapshot.busy;
+        const canSave = snapshot.dirty && !readOnly && !busy;
+        const header = import_react.default.createElement(
+          "div",
+          { style: { ...S.head } },
+          import_react.default.createElement("h3", { style: { ...S.title } }, t("title")),
+          import_react.default.createElement("p", { style: { ...S.description } }, t("description"))
+        );
+        if (snapshot.status === "loading" && snapshot.fields.length === 0) {
+          return import_react.default.createElement(
+            "div",
+            { style: { ...S.root }, "data-tlmemory-settings": "loading" },
+            header,
+            import_react.default.createElement("p", { style: { ...S.hint } }, t("loading"))
+          );
+        }
+        if (snapshot.status === "unavailable" || snapshot.status === "error") {
+          return import_react.default.createElement(
+            "div",
+            { style: { ...S.root }, "data-tlmemory-settings": snapshot.status },
+            header,
+            import_react.default.createElement(
+              "p",
+              { style: { ...S.hint } },
+              t(snapshot.messageKey ?? (snapshot.status === "error" ? "loadFailed" : "unavailable"))
+            ),
+            import_react.default.createElement(
+              "div",
+              { style: { ...S.footer } },
+              import_react.default.createElement("button", { type: "button", style: { ...S.primaryButton }, onClick: () => void controller.load() }, t("retry"))
+            )
+          );
+        }
+        const rows = snapshot.fields.map((field) => renderField(field, snapshot, controller, t, readOnly || busy));
+        const message = snapshot.messageKey === null ? null : import_react.default.createElement(
+          "span",
+          {
+            style: {
+              ...S.message,
+              color: snapshot.messageKind === "error" ? "#e5686d" : "inherit",
+              opacity: snapshot.messageKind === "error" ? 1 : 0.66
+            },
+            role: "status",
+            "aria-live": "polite"
+          },
+          t(snapshot.messageKey)
+        );
+        const meta = snapshot.ns === void 0 ? null : import_react.default.createElement(
+          "span",
+          { style: { ...S.meta } },
+          `${t("namespace")}: ${snapshot.ns}`,
+          snapshot.revision === void 0 ? "" : ` \xB7 ${t("revision")}: ${String(snapshot.revision)}`
+        );
+        return import_react.default.createElement(
+          "div",
+          { style: { ...S.root }, "data-tlmemory-settings": "ready" },
+          header,
+          ...rows,
+          import_react.default.createElement(
+            "div",
+            { style: { ...S.footer } },
+            import_react.default.createElement(
+              "button",
+              {
+                type: "button",
+                style: canSave ? { ...S.primaryButton } : { ...S.primaryButton, opacity: 0.45, cursor: "default" },
+                disabled: !canSave,
+                onClick: () => {
+                  void controller.save();
+                }
+              },
+              busy ? t("saving") : t("save")
+            ),
+            snapshot.dirty && !busy ? import_react.default.createElement(
+              "button",
+              { type: "button", style: disabledStyle(readOnly), disabled: readOnly, onClick: () => void controller.load() },
+              t("discard")
+            ) : null,
+            message
+          ),
+          readOnly ? import_react.default.createElement("p", { style: { ...S.hint } }, t("readOnly")) : null,
+          meta
+        );
+      }
+      function renderField(field, snapshot, controller, t, disabled) {
+        const labelKey = FIELD_LABEL_KEYS[field.key];
+        const hintKey = FIELD_HINT_KEYS[field.key];
+        const label = t(labelKey ?? field.key);
+        const hint = hintKey === void 0 ? field.hint : t(hintKey);
+        const draftValue = snapshot.draft[field.key] ?? field.value;
+        const defaultText = field.defaultText === void 0 ? t("emptyText") : `${t("defaultText")}: ${field.defaultText}`;
+        const labelRow = import_react.default.createElement(
+          "div",
+          { style: { ...S.labelRow } },
+          import_react.default.createElement("span", { style: { ...S.label } }, label),
+          import_react.default.createElement("span", { style: { ...S.defaultTag } }, defaultText),
+          import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              style: disabledStyle(disabled),
+              disabled,
+              title: t("reset"),
+              onClick: () => {
+                controller.resetFieldToDefault(field.key);
+              }
+            },
+            t("reset")
+          )
+        );
+        const control = field.type === "boolean" ? import_react.default.createElement(
+          "label",
+          { style: { ...S.checkboxRow } },
+          import_react.default.createElement("input", {
+            type: "checkbox",
+            checked: draftValue === true,
+            disabled,
+            onChange: (event) => {
+              controller.setDraft(field.key, event.target?.checked === true);
+            }
+          }),
+          import_react.default.createElement("span", { style: { ...S.hint } }, hint ?? "")
+        ) : import_react.default.createElement("input", {
+          type: field.type === "number" ? "number" : "text",
+          style: { ...S.input, opacity: disabled ? 0.6 : 1 },
+          value: typeof draftValue === "string" ? draftValue : String(draftValue),
+          placeholder: field.type === "number" ? field.defaultText ?? "" : "",
+          disabled,
+          spellcheck: false,
+          onChange: (event) => {
+            controller.setDraft(field.key, event.target?.value ?? "");
+          }
+        });
+        return import_react.default.createElement(
+          "div",
+          { style: { ...S.field }, "data-tlmemory-field": field.key },
+          labelRow,
+          control,
+          field.type === "boolean" ? null : import_react.default.createElement("span", { style: { ...S.hint } }, hint ?? "")
+        );
+      }
+      function registerSettingsSection(ctx) {
+        const disposers = [];
+        const remoteSettings = ctx.remote?.settings;
+        if (remoteSettings === void 0 || typeof remoteSettings.describe !== "function") {
+          console.warn("[tlmemory] \u5BBF\u4E3B\u672A\u63D0\u4F9B remote.settings\uFF0C\u8DF3\u8FC7\u8BBE\u7F6E\u9762\u677F\u6CE8\u518C");
+          return () => {
+          };
+        }
+        const t = ctx.locale.bind(SETTINGS_LOCALE_NS);
+        disposers.push(ctx.locale.register(SETTINGS_LOCALE_NS, { zh, en }));
+        const controller = new SettingsPanelController(remoteSettings);
+        disposers.push(() => controller.dispose());
+        void controller.load();
+        disposers.push(
+          ctx.remote.$on("settings/document-updated", () => {
+            void controller.load();
+          })
+        );
+        disposers.push(
+          ctx.slots.inject(
+            "settings.section",
+            () => ctx.slots.register(
+              {
+                name: "settings.section",
+                id: SETTINGS_SECTION_ID,
+                order: SETTINGS_SECTION_ORDER,
+                label: () => t("nav"),
+                locale: SETTINGS_LOCALE_NS,
+                inject: () => ({ controller, t })
+              },
+              TlmemorySettingsSection
+            )
+          )
+        );
+        const dispose = () => {
+          for (const entry of disposers.splice(0)) {
+            try {
+              entry();
+            } catch (error) {
+              console.warn("[tlmemory] \u8BBE\u7F6E\u9762\u677F\u56DE\u6536\u5931\u8D25\uFF1A", error);
+            }
+          }
+        };
+        ctx.effect(() => dispose, "tlmemory: settings section");
+        return dispose;
+      }
+    
       // src/client/index.tsx
-      var inject = [];
+      var inject = ["slots", "locale", "remote", "remote.settings"];
       var VIEW_DATASET_KEY = "dshTlmemoryView";
       var DOT_COLOR = {
         probing: "var(--dsw-alias-state-warn-primary, #eab308)",
@@ -876,10 +1469,10 @@ window.__ModuleLoader__.load({
         offline: "var(--dsw-alias-state-error-primary, #ef4444)"
       };
       function useThemeMode() {
-        const [mode, setMode] = import_react.default.useState(
+        const [mode, setMode] = import_react2.default.useState(
           () => typeof document === "undefined" ? "light" : detectThemeMode(document)
         );
-        import_react.default.useEffect(() => {
+        import_react2.default.useEffect(() => {
           if (typeof document === "undefined") return void 0;
           setMode(detectThemeMode(document));
           return watchThemeMode(document, (next) => {
@@ -890,20 +1483,20 @@ window.__ModuleLoader__.load({
       }
       function MemoryDashboardPanel(props) {
         const { state } = props;
-        const [health, setHealth] = import_react.default.useState("probing");
-        const [frameLoaded, setFrameLoaded] = import_react.default.useState(false);
-        const [reloadNonce, setReloadNonce] = import_react.default.useState(0);
-        const healthRef = import_react.default.useRef("probing");
-        const frameRef = import_react.default.useRef(null);
+        const [health, setHealth] = import_react2.default.useState("probing");
+        const [frameLoaded, setFrameLoaded] = import_react2.default.useState(false);
+        const [reloadNonce, setReloadNonce] = import_react2.default.useState(0);
+        const healthRef = import_react2.default.useRef("probing");
+        const frameRef = import_react2.default.useRef(null);
         const theme = useThemeMode();
-        const themeRef = import_react.default.useRef(theme);
-        import_react.default.useEffect(() => {
+        const themeRef = import_react2.default.useRef(theme);
+        import_react2.default.useEffect(() => {
           healthRef.current = health;
         }, [health]);
-        import_react.default.useEffect(() => {
+        import_react2.default.useEffect(() => {
           themeRef.current = theme;
         }, [theme]);
-        const pushTheme = import_react.default.useCallback(() => {
+        const pushTheme = import_react2.default.useCallback(() => {
           const target = frameRef.current?.contentWindow;
           if (target === null || target === void 0) return;
           try {
@@ -912,15 +1505,15 @@ window.__ModuleLoader__.load({
           } catch {
           }
         }, []);
-        import_react.default.useEffect(() => {
+        import_react2.default.useEffect(() => {
           const frame = frameRef.current;
           if (frame === null || frame === void 0) return;
           applyFrameTransparency(frame);
         }, [reloadNonce]);
-        import_react.default.useEffect(() => {
+        import_react2.default.useEffect(() => {
           if (frameLoaded) pushTheme();
         }, [frameLoaded, theme, pushTheme]);
-        import_react.default.useEffect(() => {
+        import_react2.default.useEffect(() => {
           if (typeof window === "undefined") return void 0;
           const onMessage = (event) => {
             if (!isDashboardOrigin(event.origin)) return;
@@ -932,7 +1525,7 @@ window.__ModuleLoader__.load({
             window.removeEventListener("message", onMessage);
           };
         }, [pushTheme]);
-        const applyHealth = import_react.default.useCallback((ok) => {
+        const applyHealth = import_react2.default.useCallback((ok) => {
           const wasOffline = healthRef.current === "offline";
           const next = ok ? "online" : "offline";
           healthRef.current = next;
@@ -946,19 +1539,19 @@ window.__ModuleLoader__.load({
             setReloadNonce((value) => value + 1);
           }
         }, []);
-        const probe = import_react.default.useCallback(() => {
+        const probe = import_react2.default.useCallback(() => {
           void probeDashboardHealth(DASHBOARD_ORIGIN).then((ok) => {
             applyHealth(ok);
           });
         }, [applyHealth]);
-        import_react.default.useEffect(() => {
+        import_react2.default.useEffect(() => {
           probe();
           const timer = setInterval(probe, PROBE_INTERVAL_MS);
           return () => {
             clearInterval(timer);
           };
         }, [probe]);
-        import_react.default.useEffect(
+        import_react2.default.useEffect(
           () => state.subscribe(() => {
             if (state.isOpen()) probe();
           }),
@@ -971,31 +1564,31 @@ window.__ModuleLoader__.load({
         };
         const statusText = health === "probing" ? "\u8FDE\u63A5\u4E2D" : health === "online" ? "\u670D\u52A1\u5728\u7EBF" : "\u670D\u52A1\u672A\u542F\u52A8";
         const showOverlay = health === "offline" || !frameLoaded;
-        const overlay = !showOverlay ? null : health === "offline" ? import_react.default.createElement(
+        const overlay = !showOverlay ? null : health === "offline" ? import_react2.default.createElement(
           "div",
           { className: "tlmemory-overlay" },
-          import_react.default.createElement(
+          import_react2.default.createElement(
             "div",
             { className: "tlmemory-overlay-card" },
-            import_react.default.createElement("span", { className: "tlmemory-overlay-title" }, "\u8BB0\u5FC6\u770B\u677F\u670D\u52A1\u672A\u542F\u52A8"),
-            import_react.default.createElement(
+            import_react2.default.createElement("span", { className: "tlmemory-overlay-title" }, "\u8BB0\u5FC6\u770B\u677F\u670D\u52A1\u672A\u542F\u52A8"),
+            import_react2.default.createElement(
               "span",
               { className: "tlmemory-overlay-hint" },
               `\u672A\u80FD\u8FDE\u63A5 ${DASHBOARD_ORIGIN}\u3002\u8BF7\u786E\u8BA4 DSH \u5BBF\u4E3B\u5DF2\u542F\u52A8\uFF08\u770B\u677F\u670D\u52A1\u968F\u5BBF\u4E3B\u81EA\u52A8\u5F00\u542F\uFF0C\u7AEF\u53E3\u88AB\u5360\u7528\u65F6\u5DF2\u81EA\u52A8\u987A\u5EF6\uFF09\u3002`
             ),
-            import_react.default.createElement("button", { type: "button", className: "tlmemory-retry", onClick: retry }, "\u91CD\u8BD5")
+            import_react2.default.createElement("button", { type: "button", className: "tlmemory-retry", onClick: retry }, "\u91CD\u8BD5")
           )
-        ) : import_react.default.createElement(
+        ) : import_react2.default.createElement(
           "div",
           { className: "tlmemory-overlay" },
-          import_react.default.createElement(
+          import_react2.default.createElement(
             "div",
             { className: "tlmemory-overlay-card" },
-            import_react.default.createElement("span", { className: "tlmemory-spinner" }),
-            import_react.default.createElement("span", { className: "tlmemory-overlay-hint" }, "\u6B63\u5728\u52A0\u8F7D\u8BB0\u5FC6\u770B\u677F\u2026")
+            import_react2.default.createElement("span", { className: "tlmemory-spinner" }),
+            import_react2.default.createElement("span", { className: "tlmemory-overlay-hint" }, "\u6B63\u5728\u52A0\u8F7D\u8BB0\u5FC6\u770B\u677F\u2026")
           )
         );
-        return import_react.default.createElement(
+        return import_react2.default.createElement(
           "div",
           { className: "tlmemory-panel", "data-dsh-plugin": PLUGIN_ID, "data-theme": theme },
           // 标题栏布局（右上角安全区）：
@@ -1004,10 +1597,10 @@ window.__ModuleLoader__.load({
           // 中心列整幅接管时，面板右上角与宿主右上角的抽屉折叠按钮是同一块区域，
           // 任何贴右的控件都会盖住宿主自己的图标。安全区由 .tlmemory-header 的
           // padding-right 保证（见 styles.ts）。
-          import_react.default.createElement(
+          import_react2.default.createElement(
             "header",
             { className: "tlmemory-header" },
-            import_react.default.createElement(
+            import_react2.default.createElement(
               "button",
               {
                 type: "button",
@@ -1020,14 +1613,14 @@ window.__ModuleLoader__.load({
                   state.setOpen(false);
                 }
               },
-              import_react.default.createElement("span", { "aria-hidden": "true" }, "\u2039"),
-              import_react.default.createElement("span", null, BACK_TO_CONVERSATION_LABEL)
+              import_react2.default.createElement("span", { "aria-hidden": "true" }, "\u2039"),
+              import_react2.default.createElement("span", null, BACK_TO_CONVERSATION_LABEL)
             ),
-            import_react.default.createElement(
+            import_react2.default.createElement(
               "div",
               { className: "tlmemory-heading" },
-              import_react.default.createElement("h2", { className: "tlmemory-title" }, DASHBOARD_LABEL),
-              import_react.default.createElement(
+              import_react2.default.createElement("h2", { className: "tlmemory-title" }, DASHBOARD_LABEL),
+              import_react2.default.createElement(
                 "span",
                 {
                   className: "tlmemory-status",
@@ -1036,18 +1629,18 @@ window.__ModuleLoader__.load({
                   role: "status",
                   "aria-live": "polite"
                 },
-                import_react.default.createElement("span", { className: "tlmemory-dot", style: { color: DOT_COLOR[health] } }, "\u25CF"),
-                import_react.default.createElement("span", { className: "tlmemory-status-text" }, statusText)
+                import_react2.default.createElement("span", { className: "tlmemory-dot", style: { color: DOT_COLOR[health] } }, "\u25CF"),
+                import_react2.default.createElement("span", { className: "tlmemory-status-text" }, statusText)
               ),
-              health === "offline" ? import_react.default.createElement("button", { type: "button", className: "tlmemory-retry", onClick: retry }, "\u91CD\u8BD5") : null
+              health === "offline" ? import_react2.default.createElement("button", { type: "button", className: "tlmemory-retry", onClick: retry }, "\u91CD\u8BD5") : null
             )
           ),
-          import_react.default.createElement(
+          import_react2.default.createElement(
             "div",
             { className: "tlmemory-body" },
             // 透明底：iframe 自身不铺底色（透明属性在 effect 里经 ref 落到真实元素上，
             // 不依赖 React 对不同版本的遗留属性白名单），宿主背景得以穿透到看板之下。
-            import_react.default.createElement("iframe", {
+            import_react2.default.createElement("iframe", {
               key: reloadNonce,
               ref: frameRef,
               className: "tlmemory-frame",
@@ -1062,6 +1655,11 @@ window.__ModuleLoader__.load({
         );
       }
       function apply(ctx) {
+        try {
+          registerSettingsSection(ctx);
+        } catch (error) {
+          console.warn("[tlmemory] \u8BBE\u7F6E\u9762\u677F\u6CE8\u518C\u5931\u8D25\uFF1A", error);
+        }
         if (typeof document === "undefined") return;
         if (document.querySelector(ENTRY_SELECTOR) !== null) return;
         if (document.querySelector(VIEW_SELECTOR) !== null) return;
@@ -1092,7 +1690,7 @@ window.__ModuleLoader__.load({
               viewDatasetKey: VIEW_DATASET_KEY,
               mount: (container) => {
                 const root = (0, import_client.createRoot)(container);
-                root.render(import_react.default.createElement(MemoryDashboardPanel, { state }));
+                root.render(import_react2.default.createElement(MemoryDashboardPanel, { state }));
                 return () => {
                   root.unmount();
                 };

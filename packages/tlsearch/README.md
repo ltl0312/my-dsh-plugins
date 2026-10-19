@@ -4,7 +4,9 @@
 
 把「一次搜索」塞进模型上下文的东西压到最少：只返回清洗过的 `{ title, url, snippet }`，
 没有提供方散文、没有 Raw HTML、没有埋点参数、没有每轮重复的引用指引。
-后端可插拔（Tavily / Brave / SearXNG），端点可自建（SearXNG、new-api 等中转网关）。
+后端可插拔（Tavily / Brave / SearXNG / Google CSE / Exa），端点可自建（SearXNG、new-api 等中转网关）。
+面板在宿主的 **设置 →「联网搜索」**，全部配置项都能在那里改，**改完立即写回配置并生效**。
+适配 DSH **0.2.1-rc.2**（`dsh.client` + `external: ["react"]`）。
 
 ---
 
@@ -22,6 +24,10 @@
   冷却期内**不发网络请求**直接快速失败。调用方主动中断**不计入**熔断。
 - **零运行时依赖**：网络层直接用 Node 原生 `fetch` / `AbortSignal`，不引入 axios 等重库。
 - **错误可据以行动**：缺凭据、端点错、非 JSON、限流、超时各有分类错误码与修复指引。
+- **零必填配置**：`Config` 里没有一个必填字段——不填 key 也能装配，工具照常出现在模型可用的工具表里，
+  只在真正调用时返回「去哪儿补」的可读原因。
+- **面板内即改即生效**：全部字段都是 volatile，Settings 页改完**下一次调用**就按新值跑（不重载插件）；
+  密钥走宿主脱敏通道，只显示「已保存」不回显。
 
 ---
 
@@ -198,7 +204,11 @@ pnpm add dsh-plugin-tlsearch
 
 ## ⚙️ 配置
 
-配置有两条路径：宿主 GUI 的 **Settings > Plugins > Plugin configuration > tlsearch**，
+**零必填**：不写任何配置项，包被挂载即可调用 `search`。密钥按「设置页 → 环境变量 →
+备用后端 → 后端链」顺序解析，全都缺失时只会在工具调用处返回一条可读的「后端不可用」，
+不会影响宿主启动与加载。
+
+配置有两条路径：宿主 GUI 的 **设置 →「联网搜索」**，
 或在 Profile 目录下的 `~/.dsh/profiles/web/cordis.patch.yml` 里**按 id 覆盖**
 （注意是覆盖，不是再插一条 `- insert:` —— 挂载已由 bundle 完成，重复插入会挂载两次）：
 
@@ -242,6 +252,22 @@ pnpm add dsh-plugin-tlsearch
 > 越界值一律**钳制**而非报错；`null` / 空串等「未提供」形态退回默认值而不是被压成下限。
 > 配置不完整**不会**导致插件装载失败——工具照常注册，调用时返回分类错误，
 > 便于模型把「去哪儿补配置」原样转述给你。
+
+### 设置面板（改完即生效，不用重启）
+
+在宿主的 **Settings > Plugins > tlsearch**（`settings.section` 插槽，`id=tlsearch`、`order=31`）
+里可以直接编辑**上表全部字段**——没有只读项，也没有需要改 YAML 才能动的字段。
+
+- **即时生效**：写入走 `remote.settings.mutate(ns, [{op:'set', path, value}], revision)`，
+  宿主把变更下发到 volatile 引用（`cosmokit.volatile.write` 全局符号），插件**每次工具调用**
+  都重新读取当前配置（`ctx.fiber.config` 优先，回退到装配时收到的对象），**不缓存快照**。
+  因此改 `maxResults` / `provider` / 超时后，下一次调用立刻按新值跑，无需重载插件。
+- **密钥不回显**：`apiKey` 与 `fallback.apiKey` 标了 `role('secret')`，宿主 `describe()` 会把它们
+  从返回值里摘掉、只给 `secrets[].set` 标记。面板因此显示「已保存（不回显）」，留空即不动它，
+  点「清空」才真正 unset；写入用路径化操作，**未触碰的密钥不会跟着请求走**。
+- **并发安全**：写入带上一次读到的 `revision`；被别处改动时宿主抛 `SETTINGS_CONFLICT`，
+  面板提示「配置已被其它窗口修改」并自动重读，不会静默覆盖。
+- **后端链**在面板里是一个 JSON 文本域（数组元素无法逐字段脱敏，所以整段编辑、失焦时校验）。
 
 ### 环境变量回退
 
@@ -345,14 +371,20 @@ Tavily 的密钥同时以请求头与请求体两种形式携带，因此 `new-a
 本仓库统一使用 **pnpm**（见根目录 `AGENTS.md`）：
 
 ```powershell
-# 类型检查（tsc --noEmit，零错误）
+# 类型检查（服务端 tsc --noEmit + 客户端 tsc -p tsconfig.client.json，零错误）
 pnpm --filter dsh-plugin-tlsearch run typecheck
 
-# 构建产物：dist/index.js (ESM) + dist/index.cjs (CJS) + dist/index.d.ts
+# 构建产物：dist/index.js (ESM) + dist/index.cjs (CJS) + dist/index.d.ts + web/client.js（面板）
 pnpm --filter dsh-plugin-tlsearch run build
 
-# 单元测试（112 个用例，零网络：全部使用假 fetch 与假 Cordis 上下文）
+# 单元测试（192 个用例，零网络：全部使用假 fetch 与假 Cordis 上下文）
 pnpm --filter dsh-plugin-tlsearch run test
+
+# 产物契约自检：volatile 标记 / 脱敏标记 / 零运行时依赖 / 客户端模块协议
+pnpm --filter dsh-plugin-tlsearch run assert:build
+
+# 面板冒烟：在最小 shell 桩里真跑一遍 web/client.js 的 apply()
+pnpm --filter dsh-plugin-tlsearch run smoke:client
 
 # 全工作区递归构建
 pnpm run build
@@ -362,15 +394,22 @@ pnpm run build
 
 | 文件 | 职责 |
 |---|---|
-| `src/index.ts` | 插件入口：`Config` schema、`apply` 装配、生命周期与可逆注销 |
-| `src/tool.ts` | 模型可见工具：定义、参数校验、熔断判定、在途请求登记、错误分类 |
-| `src/providers.ts` | 三个后端适配器 + 配置解析 + 归一化管线（清洗/去重/截断） |
+| `src/index.ts` | 插件入口：`Config` schema（全字段 volatile）、`apply` 装配、实时配置读取、生命周期与可逆注销 |
+| `src/tool.ts` | 模型可见工具：定义、参数校验、熔断判定、在途请求登记、错误分类（每次调用现读配置） |
+| `src/providers.ts` | 五个后端适配器 + 配置解析 + 归一化管线（清洗/去重/截断） |
 | `src/http.ts` | 超时、体积上限、熔断状态机、错误分类 |
 | `src/sanitize.ts` | HTML/实体/空白清洗、词边界截断、URL 埋点参数剔除 |
 | `src/format.ts` | 工具返回契约收敛层 + 紧凑渲染（markdown/json） |
 | `src/types.ts` | 领域模型与 Cordis 上下文类型合并 |
+| `src/volatile.ts` | volatile 引用机制：schema 标记、校验时按路径包引用、读取时解引用（跨包靠全局 Symbol 互认） |
+| `src/client/index.tsx` | 面板入口：`inject = ['slots','locale','remote']`、`settings.section` 注册、`settings.tlsearch` 文案 |
+| `src/client/store.ts` | 面板数据层：`remote.settings.describe/mutate`、revision 冲突处理、脱敏标记、变更订阅 |
+| `src/client/SettingsPage.tsx` | 面板 UI：分组表单、密钥「已保存」状态、后端链 JSON 编辑、可用性判定 |
+| `src/client/{model,i18n,styles,host,entry}.ts` | 表单模型/默认值/钳制、zh+en 词表、样式、宿主结构类型、bundle 入口 |
+| `scripts/build-client.mjs` | esbuild 打 `src/client/entry.ts` → `web/client.js`，包成 `window.__ModuleLoader__.load({id, factory})` |
+| `scripts/{assert-build,probe-dist,smoke-client}.mjs` | 产物契约自检 / 无 node_modules 沙箱里的加载探针 / 面板运行时冒烟 |
 
-### 两个值得记录的宿主事实
+### 四个值得记录的宿主事实
 
 1. **工具返回必须是 `{ content: [{ type: 'text', text }] }`**。
    宿主的工具流水线会按 `output.schema` 校验返回值，再以 `(args, value)` **双参**调用
@@ -381,6 +420,17 @@ pnpm run build
    因此真正的卸载路径绑定在 `ctx` 上：工具注销器由 `ctx.tools.register` 返回（本身即 effect），
    在途请求中止与熔断复位挂在 `ctx.on('dispose', …)`。同时返回幂等的 `dispose` 函数，
    对会消费返回值的宿主与单元测试同样可用。
+3. **设置表单只为 volatile 字段生成，且 volatile 不能套在数组元素上**
+   （`dsh-app-boot` 的 `validateVolatilePlacement`：*volatile fields require a fixed object path
+   without an enclosing volatile field*）。所以 `chain` 是**整节点** volatile，元素内部不能再标；
+   `fallback` 只标 4 个叶子、容器保持普通对象，面板才会渲染成 4 个字段而不是一段 JSON。
+   引用本身是 `{ get(), [Symbol.for('cosmokit.volatile.write')] }` —— 符号是全局的，
+   因此本包自带的实现与宿主（fork 版 cosmokit）能互认，无需把 fork 作为运行时依赖。
+4. **客户端面板的注入是白名单代理**：只有写进 `export const inject` 的服务能读，
+   读未声明的会直接抛（`?.` 挡不住）。所以 `inject = ['slots','locale','remote']`，
+   而 `logger` 这类可选服务一律走 `ctx.get('logger')`。`web/client.js` 必须是
+   `window.__ModuleLoader__.load({ id: '<包名>', factory: (require) => … })` 的 IIFE，
+   `id` 与包名不一致时宿主报 *loaded without registering …*；`react` 通过 `dsh.client.external` 声明为外部依赖。
 
 ---
 

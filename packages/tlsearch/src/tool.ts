@@ -24,7 +24,7 @@ import {
   providerLabel,
   runBackendSearch,
 } from './providers.js'
-import type { ProviderId, ResolvedConfig } from './types.js'
+import type { ConfigReader, ProviderId, ResolvedConfig } from './types.js'
 
 /**
  * 计入熔断的错误码：只有「后端真的不可用」才该触发熔断。
@@ -94,7 +94,12 @@ const HOST_TIMEOUT_GRACE_MS = 5_000
 /** 运行期句柄：由装配层（index.ts）持有，跨工具调用共享熔断状态 */
 export interface SearchToolRuntime {
   ctx: Context
-  config: ResolvedConfig
+  /**
+   * 配置读取器（**不是**配置快照）。
+   *
+   * 必须每次调用现取：设置页保存走 volatile 引用热替换，快照会静默失效。
+   */
+  config: ConfigReader
   /**
    * 按后端取熔断器（每个后端一个，互不影响）。
    * 装配层负责保证同一 provider 始终返回同一个实例。
@@ -168,11 +173,11 @@ function describeFailures(failures: readonly AttemptFailure[]): string {
  *   - `timeoutMs`：进入宿主的工具调用超时策略，超时会被协作式中断；
  *   - `isConcurrencySafe`：返回 true 时宿主允许**并行**调度多次搜索。
  *     本工具除熔断计数外无共享可变状态，并行是安全且明显更快的。
+ *
+ * 除这两个字段外，**所有配置都在 execute 里现取**：`core` 是读取器，不是快照。
+ * 设置页保存后（volatile 热更新）下一次调用立刻用新值，不需要重启插件。
  */
 export function createSearchTool(runtime: SearchToolRuntime): Record<string, unknown> {
-  const { config } = runtime
-  const attempts = config.backends
-
   return {
     name: SEARCH_TOOL_NAME,
     description: SEARCH_TOOL_DESCRIPTION,
@@ -185,7 +190,8 @@ export function createSearchTool(runtime: SearchToolRuntime): Record<string, unk
         },
         maxResults: {
           type: 'number',
-          description: `Optional result count (${LIMITS.minResults}-${LIMITS.maxResults}). Defaults to ${config.maxResults}.`,
+          // 不写死「默认 N」：默认值是可在设置页改的 volatile 字段，写死就会过期
+          description: `Optional result count (${LIMITS.minResults}-${LIMITS.maxResults}). Defaults to the configured maxResults.`,
         },
       },
       required: ['query'],
@@ -195,9 +201,15 @@ export function createSearchTool(runtime: SearchToolRuntime): Record<string, unk
       // 双参接收：宿主以 (args, value) 调用，历史宿主以 (value) 单参调用
       render: (...params: unknown[]) => toContentBlocks(pickProjectionCandidate(params[0], params[1])),
     },
-    timeoutMs: config.timeoutMs + HOST_TIMEOUT_GRACE_MS,
+    // getter：宿主若在调用期读取，就能跟着热更新的 timeoutMs 一起走
+    get timeoutMs(): number {
+      return runtime.config.read().timeoutMs + HOST_TIMEOUT_GRACE_MS
+    },
     isConcurrencySafe: () => true,
     async execute(args: SearchToolArgs, exec?: unknown) {
+      const config = runtime.config.read()
+      const attempts = config.backends
+
       const query = typeof args?.query === 'string' ? args.query.trim() : ''
       if (query.length === 0) {
         throw new SearchError('query must be a non-empty string.', 'config')
@@ -289,8 +301,6 @@ export function createSearchTool(runtime: SearchToolRuntime): Record<string, unk
  * 此时它的额度同样值得关注）。
  */
 export function createUsageTool(runtime: SearchToolRuntime): Record<string, unknown> {
-  const { config } = runtime
-
   return {
     name: USAGE_TOOL_NAME,
     description: USAGE_TOOL_DESCRIPTION,
@@ -299,9 +309,12 @@ export function createUsageTool(runtime: SearchToolRuntime): Record<string, unkn
       schema: TOOL_RESULT_SCHEMA,
       render: (...params: unknown[]) => toContentBlocks(pickProjectionCandidate(params[0], params[1])),
     },
-    timeoutMs: config.timeoutMs + HOST_TIMEOUT_GRACE_MS,
+    get timeoutMs(): number {
+      return runtime.config.read().timeoutMs + HOST_TIMEOUT_GRACE_MS
+    },
     isConcurrencySafe: () => true,
     async execute(_args: unknown, exec?: unknown) {
+      const config = runtime.config.read()
       // 额度只对 Tavily 有意义；它在链里哪个位置都行（主后端或兜底）
       const backend = config.backends.find((entry) => entry.provider === 'tavily')
       if (!backend) {
@@ -329,30 +342,89 @@ export function createUsageTool(runtime: SearchToolRuntime): Record<string, unkn
 }
 
 /**
- * 注册工具（搜索 + 可选的额度自查）。返回精确注销器。
+ * 工具注册句柄：注销器 + 热更新同步入口。
+ *
+ * `refresh()` 只做一件事：按**当前**配置决定额度工具该不该在。
+ * 额度工具的存在与否是结构性的（工具清单每轮随请求发送），只能靠增删注册来表达，
+ * 所以设置页把 Tavily 加进/移出调度链之后必须由它来对账。
+ */
+export interface ToolRegistration {
+  /** 摘除本次注册的全部工具（逐个隔离异常） */
+  dispose(): void
+  /** 依据当前配置增删额度工具；重复调用安全 */
+  refresh(): void
+}
+
+/**
+ * 注册工具（搜索 + 可选的额度自查）。返回注册句柄。
  *
  * 注销器逐个隔离异常：一个摘除失败不影响其余，也不会把异常抛回宿主的卸载路径。
  */
-export function registerSearchTools(runtime: SearchToolRuntime): () => void {
-  if (!runtime.ctx.tools?.register) {
+export function registerSearchTools(runtime: SearchToolRuntime): ToolRegistration {
+  const tools = runtime.ctx.tools
+  if (typeof tools?.register !== 'function') {
     // 宿主未暴露工具服务（非 DSH 宿主 / 装配顺序差异）：告警并降级为无操作，
     // 绝不抛错 —— 抛错会让整条 profile 装载失败，而这里只是少一个工具。
     runtime.ctx.logger?.warn?.('[tlsearch] ctx.tools 未就绪，跳过工具注册')
-    return () => {}
+    return { dispose: () => {}, refresh: () => {} }
   }
 
-  const disposers: Array<() => void> = [runtime.ctx.tools.register(createSearchTool(runtime))]
-  if (hasTavilyBackend(runtime.config)) {
-    disposers.push(runtime.ctx.tools.register(createUsageTool(runtime)))
-  }
+  /**
+   * 注册必须保持「带接收者的调用」。
+   *
+   * dsh-tools 的 register 内部读 `this.layers`；一旦把方法摘下来单独调用
+   * （`const register = ctx.tools.register`），接收者丢失 →
+   * `TypeError: Cannot read properties of undefined (reading 'layers')`，
+   * 而该异常发生在 apply 阶段，会让整条 profile 装载失败（0.2.1-rc.2 实测）。
+   */
+  const register = (definition: Parameters<typeof tools.register>[0]): (() => void) =>
+    tools.register(definition)
 
-  return () => {
-    for (const disposer of disposers.splice(0)) {
+  let usageDisposer: (() => void) | null = null
+
+  /** 额度工具按需存在：Tavily 不在链上就不注册（纯省 Token） */
+  const syncUsageTool = (): void => {
+    const wanted = hasTavilyBackend(runtime.config.read())
+    if (wanted === (usageDisposer !== null)) return
+    if (wanted) {
       try {
-        disposer()
+        usageDisposer = register(createUsageTool(runtime))
       } catch (error) {
-        runtime.ctx.logger?.error?.('[tlsearch] 工具注销异常（已隔离）:', error)
+        runtime.ctx.logger?.error?.('[tlsearch] 额度工具注册失败（已隔离）:', error)
+        usageDisposer = null
       }
+      return
     }
+    const disposer = usageDisposer
+    usageDisposer = null
+    try {
+      disposer?.()
+    } catch (error) {
+      runtime.ctx.logger?.error?.('[tlsearch] 额度工具注销异常（已隔离）:', error)
+    }
+  }
+
+  const searchDisposer = register(createSearchTool(runtime))
+  syncUsageTool()
+
+  let disposed = false
+  return {
+    refresh() {
+      if (disposed) return
+      syncUsageTool()
+    },
+    dispose() {
+      if (disposed) return
+      disposed = true
+      const steps: Array<(() => void) | null> = [searchDisposer, usageDisposer]
+      usageDisposer = null
+      for (const step of steps) {
+        try {
+          step?.()
+        } catch (error) {
+          runtime.ctx.logger?.error?.('[tlsearch] 工具注销异常（已隔离）:', error)
+        }
+      }
+    },
   }
 }

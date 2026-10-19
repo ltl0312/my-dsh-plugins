@@ -12,7 +12,7 @@
 //   ② 把宿主抛出来的异常规整成和正常失败同一形状的 `RpcResult`，让调用点只处理一种返回。
 
 import { RPC_API_CHANNEL, rpcEndpoint, type RpcMethod, type RpcResult } from '../protocol.js'
-import type { ClientContextLike, ConnectionLike, ConnectionRpcLike } from './host.js'
+import type { ClientContextLike, ConnectionRpcLike } from './host.js'
 
 export interface ClientRpc {
   /** 宿主是否提供了 RPC 通道。false 时页面应进入只读态。 */
@@ -40,8 +40,7 @@ export function createClientRpc(ctx: ClientContextLike): ClientRpc {
   // 整段再包一层 try/catch 兜底：取不到就当作没连上，页面进只读态而不是转圈。
   const read = (): ConnectionRpcLike | undefined => {
     try {
-      const queried = typeof ctx.get === 'function' ? ctx.get('connection') : undefined
-      const service = (queried ?? ctx.connection) as ConnectionLike | undefined
+      const service = ctx.get('connection') as { rpc?: ConnectionRpcLike } | undefined
       const rpc = service?.rpc
       return typeof rpc?.call === 'function' ? rpc : undefined
     } catch {

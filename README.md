@@ -5,15 +5,20 @@
 指向包内自带的 `cordis.patch.yml`），装进 profile 即自动激活。
 各自的设计取舍、完整配置与源码结构见对应包的 README。
 
+**1.0.0 起适配 DSH 0.2.1-rc.2**（同时在 0.2.0-rc.2 上通过加载验证）：三个包都补上了
+`dsh.client` 客户端契约与 `external: ["react"]`，并各自在**设置页**提供一页可视化配置
+（tlmemory → 记忆、tlsearch → 联网搜索、tlnotify → 通知助手）。tlmemory 与 tlsearch
+**零必填项**，装完即用；tlnotify 只有在想收通知时才需要配机器人，不配也不影响加载。
+
 ---
 
 ## 📦 插件一览
 
 | 插件 | 版本 | 一句话 | 详细文档 |
 |---|---|---|---|
-| `dsh-plugin-tlmemory` | 0.7.0 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
-| `dsh-plugin-tlnotify` | 0.3.0 | 把 DSH 会话事件聚合到一个 IM 通道推到 QQ / 飞书，并且能直接回话 | [`packages/tlnotify/README.md`](packages/tlnotify/README.md) |
-| `dsh-plugin-tlsearch` | 0.3.2 | 低 Token 消耗的联网搜索，只返回清洗过的标题 / URL / 摘要 | [`packages/tlsearch/README.md`](packages/tlsearch/README.md) |
+| `dsh-plugin-tlmemory` | 1.0.0 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
+| `dsh-plugin-tlnotify` | 1.0.0 | 把 DSH 会话事件聚合到一个 IM 通道推到 QQ / 飞书，并且能直接回话 | [`packages/tlnotify/README.md`](packages/tlnotify/README.md) |
+| `dsh-plugin-tlsearch` | 1.0.0 | 低 Token 消耗的联网搜索，只返回清洗过的标题 / URL / 摘要 | [`packages/tlsearch/README.md`](packages/tlsearch/README.md) |
 
 ---
 
@@ -74,6 +79,28 @@ dsh plugin --profile web remove dsh-plugin-tlmemory
 
 > `--profile` 必须紧跟 `dsh plugin` 且只能出现一次；退出码、诊断前缀、原子回写等细节
 > 见各包 README 的「安装」一节。
+
+---
+
+## ⚙️ 设置页面板（1.0.0 起）
+
+三个包都在 **设置** 里各占一页，打开 DSH → 设置（`Ctrl/Cmd + Alt + ,`）即可看到：
+
+| 面板 | 插件 | 配置落在哪 | 生效方式 |
+|---|---|---|---|
+| **记忆** | `dsh-plugin-tlmemory` | profile 的 `cordis.patch.yml` 中 `- id: dsh-plugin-tlmemory` 的 `config` | 点**保存**后立即生效（插件在热路径读配置，不缓存 apply 期快照，无需重启） |
+| **联网搜索** | `dsh-plugin-tlsearch` | profile 的 `cordis.patch.yml` 中 `- id: dsh-plugin-tlsearch` 的 `config` | 改完即写、即生效（无保存按钮） |
+| **通知助手** | `dsh-plugin-tlnotify` | `$DSH_HOME/tlnotify/config.json` | 改完即写、即生效；带「重新读取」与通道扫码/绑定 |
+
+几个共同约定：
+
+- **面板与配置文件是同一份数据**，双向同步：手改 YAML/JSON 后重开设置页即看到新值，
+  面板里的改动也立刻写回文件。占用 `cordis.patch.yml` 的只有前两个包，第三个把
+  通道密钥放在 `config.json` 里（不写进会进版本库的 profile 补丁层）。
+- **密钥不回显**：API Key 输入框留空表示「沿用现值/环境变量」，不会把已存密钥打印出来。
+- 面板里显示「默认值: X / 未设置」表示该字段仍然跟随默认值，可以点**恢复默认**清掉覆盖。
+- 只声明 `dsh.client` 而没有 `dsh.bundle.patch` 会被插件管理器以 `not-a-bundle` 拒绝，
+  三个包两者都有。
 
 ---
 
@@ -162,6 +189,9 @@ allowBuilds:
 ---
 
 ### ⚙️ 配置
+
+**推荐用设置页**（设置 → 记忆）：五个字段都有默认值，零必填，改完点保存即刻生效，详情见上文
+[设置页面板](#-设置页面板100-起)。面板改的就是下面这段配置，所以手写 YAML 依然等价。
 
 看板服务随宿主**零配置自启**，无需任何开关声明。要改配置就在**自己的 profile 补丁层**
 `~/.dsh/profiles/web/cordis.patch.yml` 里**按 id 覆盖**（写 `- id:` 覆写行，**不要**再写
@@ -360,6 +390,10 @@ DSH 跑在电脑上，人不在电脑前。tlnotify 把「哪个项目的哪个�
 | `google` | 必需（key + `cx`） | `https://www.googleapis.com` | ⚠️ 自 2026 年起不再向新客户开放，2027-01-01 停服；适配器仅为存量老 CSE 过渡保留 |
 
 ### ⚙️ 关键配置（带默认值）
+
+**零必填，装完即可调用**：`provider` 默认 `tavily`，密钥按「设置页 → 环境变量 → 备用后端 →
+后端链」的顺序解析，都没有才在调用时返回一条可读的不可用错误（不会影响宿主加载）。
+日常改配置用**设置页 → 联网搜索**，改完即生效；下面是同一份配置的字段说明（手写 YAML 等价）。
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|

@@ -3079,8 +3079,7 @@ window.__ModuleLoader__.load({
       function createClientRpc(ctx) {
         const read = () => {
           try {
-            const queried = typeof ctx.get === "function" ? ctx.get("connection") : void 0;
-            const service = queried ?? ctx.connection;
+            const service = ctx.get("connection");
             const rpc = service?.rpc;
             return typeof rpc?.call === "function" ? rpc : void 0;
           } catch {
@@ -4419,8 +4418,7 @@ window.__ModuleLoader__.load({
       var inject = ["slots"];
       function warn(ctx, message, error) {
         try {
-          const queried = typeof ctx.get === "function" ? ctx.get("logger") : void 0;
-          const logger = queried ?? ctx.logger;
+          const logger = ctx.get("logger");
           logger?.warn?.(message, error);
         } catch {
         }
@@ -4473,7 +4471,7 @@ window.__ModuleLoader__.load({
         } catch (error) {
           warn(ctx, "tlnotify: \u6CE8\u518C\u8BBE\u7F6E\u9875\u5931\u8D25\u3002", error);
         }
-        ctx.effect?.(() => () => removeClientStyles(), "tlnotify: client mounts");
+        ctx.effect(() => () => removeClientStyles(), "tlnotify: client mounts");
       }
       return __toCommonJS(entry_exports);
     })();

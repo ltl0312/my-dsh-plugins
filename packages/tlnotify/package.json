@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlnotify",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
@@ -41,7 +41,12 @@
     },
     "client": {
       "platform": "web",
-      "inject": []
+      "inject": [
+        "slots"
+      ],
+      "external": [
+        "react"
+      ]
     }
   },
   "scripts": {
@@ -51,6 +56,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json",
     "test": "vitest run",
     "smoke:client": "node scripts/smoke-client.mjs",
+    "verify:client": "node scripts/assert-client-contract.mjs",
     "prepublishOnly": "pnpm run build"
   },
   "keywords": [

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlsearch",
-  "version": "0.3.2",
+  "version": "1.0.0",
   "license": "MIT",
   "description": "Low-token web search for dsh: compact, sanitized {title, url, snippet} results with a pluggable, auto-failing-over backend chain (Tavily / Exa / SearXNG / Brave / Google CSE) and a token budget you control",
   "type": "module",
@@ -23,23 +23,40 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./client": "./web/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "web/client.js",
     "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots",
+        "locale",
+        "remote",
+        "remote.settings"
+      ],
+      "external": [
+        "react"
+      ]
     }
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/build-client.mjs",
+    "build:client": "node scripts/build-client.mjs",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json",
     "test": "vitest run",
-    "prepublishOnly": "pnpm run build"
+    "assert:build": "node scripts/assert-build.mjs",
+    "smoke:client": "node scripts/smoke-client.mjs",
+    "prepublishOnly": "pnpm run build && pnpm run assert:build && pnpm run smoke:client"
   },
   "keywords": [
     "dsh",
@@ -71,7 +88,10 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/react": "^18.3.31",
     "cordis": "^3.0.0",
+    "esbuild": "^0.27.7",
+    "react": "^18.3.1",
     "schemastery": "^3.18.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",

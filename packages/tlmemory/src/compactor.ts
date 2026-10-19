@@ -52,9 +52,21 @@ export class MemoryCompactor {
   constructor(
     private ctx: Context,
     private db: MemoryDB,
-    /** 每累计多少次沉淀触发一轮 compaction（Config.compactionInterval） */
-    private interval: number = 20,
+    /**
+     * 每累计多少次沉淀触发一轮 compaction（Config.compactionInterval）。
+     *
+     * 允许传取值函数：设置页改完阈值要立即生效，做成常量就等于把装配期快照
+     * 固化进实例（本仓库 0.8.2 的白名单事故同型）。
+     */
+    private interval: number | (() => number) = 20,
   ) {}
+
+  /** 当前阈值：支持运行期动态读取，非法值兜底为 1（至少每次沉淀都检查） */
+  private intervalNow(): number {
+    const raw = typeof this.interval === 'function' ? this.interval() : this.interval
+    const value = Number(raw)
+    return Number.isFinite(value) ? Math.max(1, Math.trunc(value)) : 20
+  }
 
   /**
    * 沉淀计数：每完成一次提炼调度后调用。达到阈值即复位并返回 true
@@ -62,7 +74,7 @@ export class MemoryCompactor {
    */
   noteSedimented(): boolean {
     this.sedimentCount += 1
-    if (this.sedimentCount >= Math.max(1, this.interval)) {
+    if (this.sedimentCount >= this.intervalNow()) {
       this.sedimentCount = 0
       return true
     }

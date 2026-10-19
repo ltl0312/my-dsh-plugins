@@ -37,12 +37,7 @@ export interface ConnectionRpcLike {
   call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<unknown>
 }
 
-export interface ConnectionLike {
-  isLoopback?: boolean
-  rpc?: ConnectionRpcLike
-}
-
-/** 客户端 apply 拿到的 ctx。用可选字段是为了能在半装好的宿主上优雅降级。 */
+/** 客户端 apply 拿到的 ctx。`get` / `effect` 由 runner 无条件提供。 */
 export interface ClientContextLike {
   /**
    * 免声明的服务查询（cordis `Context.get`）。
@@ -55,9 +50,9 @@ export interface ClientContextLike {
    * 指引就是「Prefer ctx.get(name) with an undefined check; use inject only for hard
    * dependencies.」（`lib/client.js:6144`）。所以软依赖一律从这里取。
    */
-  get?: (name: string) => unknown
+  get: (name: string) => unknown
+  /** 硬依赖：`inject` 里声明了 `slots`，provider 不在时整包被 park。 */
   slots?: SlotsService
-  connection?: ConnectionLike
-  effect?: (callback: () => void | (() => void), label?: string) => unknown
-  logger?: { warn?: (message: string, error?: unknown) => void }
+  /** runner 的 `CTX_VERBS` 之一（`dsh-cordis-client-runner/lib/client.js:205-216`）。 */
+  effect: (callback: () => void | (() => void), label?: string) => unknown
 }

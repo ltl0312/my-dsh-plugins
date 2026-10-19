@@ -119,6 +119,20 @@ export interface ResolvedConfig extends BackendConfig {
   outputFormat: OutputFormat
 }
 
+/**
+ * 「现取现用」的配置读取器。
+ *
+ * 为什么不是 `ResolvedConfig`：设置页的写入走 volatile 引用（见 volatile.ts），
+ * 值会在**不重启插件**的情况下被替换。任何在装配期抓下来的 `ResolvedConfig`
+ * 都会在第一次改配置之后变成陈旧快照——那正是「保存了但没生效」的根因。
+ *
+ * 因此运行期只持有读取器：每次工具调用调用一次 `read()`，拿到的永远是当前值。
+ */
+export interface ConfigReader {
+  /** 按当前 volatile 值重新解析出的生效配置（补默认值 / 读环境变量 / 钳制边界） */
+  readonly read: () => ResolvedConfig
+}
+
 // ---------------------------------------------------------------------------
 // Cordis 宿主服务声明合并（只声明本插件实际消费的服务）
 // ---------------------------------------------------------------------------
@@ -137,4 +151,15 @@ declare module 'cordis' {
       register: (tool: unknown) => () => void
     }
   }
+
+  // ── 宿主 Loader 的热更新事件（刻意不做类型合并） ──────────────────────────
+  // 依据：cordis-plugin-loader/lib/index.js:402-422 —— `_commitVolatile` 写完引用后
+  // `fiber.ctx.emit(self, 'loader/volatile-update', paths)`，其中 `self` 带
+  // `Context.filter = (owner) => owner.fiber === fiber`，即**只有本插件的监听器会收到**。
+  // `paths` 是变更字段的键路径数组（如 `[['apiKey']]`）。
+  //
+  // 为什么不合并进 `Events`：cordis 3.0.0 的 `Events<C extends Context>` 是带类型参数的
+  // 接口，声明合并要求两份声明的类型参数列表完全一致（lib/index.d.ts:185）；而它的
+  // `on(name: keyof any, listener: (...args: any) => any)` 本来就不做名字约束
+  // （lib/index.d.ts:179）。所以只在调用点用局部签名，既不惹编译器，也不影响运行时。
 }

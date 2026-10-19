@@ -10,5 +10,6 @@
     "outDir": "./dist"
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "// exclude": "src/client 是浏览器半边（JSX + DOM），由 tsconfig.client.json 单独检查；tsup 也只从 src/index.ts 打服务端产物",
+  "exclude": ["node_modules", "dist", "src/client"]
 }

@@ -275,6 +275,10 @@ const fakeCtx = {
   get(name) {
     return name === 'connection' ? { rpc: fakeRpc } : undefined
   },
+  effect(callback) {
+    callback()
+    return () => {}
+  },
   get connection() {
     throw new Error('service "connection" is not declared by your plugin')
   },
@@ -300,7 +304,12 @@ check('apply 会注入自己的样式表', () => {
 
 check('宿主没有 slots 服务时 apply 只警告、不抛错', () => {
   const warns = []
-  mod.apply({ logger: { warn: (message) => warns.push(message) } })
+  mod.apply({
+    get: (name) => (name === 'logger' ? { warn: (message) => warns.push(message) } : undefined),
+    effect() {
+      return () => {}
+    },
+  })
   assert.equal(warns.length, 1)
   assert.match(warns[0], /slots/)
 })
@@ -556,6 +565,10 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
     get() {
       return undefined
     },
+    effect(callback) {
+      callback()
+      return () => {}
+    },
     get connection() {
       throw new Error('service "connection" is not declared by your plugin')
     },
@@ -582,11 +595,14 @@ check('协议形状的字段没有被原样倒进 DOM', () => {
   }
 }
 
-// 失败路径上的日志本身也不能再抛：真实 ctx 里 `logger` 同样不在白名单里。
-check('logger 一读就抛时，apply 走警告分支也只是安静降级', () => {
+// 失败路径上的日志本身也不能再抛：真实 ctx 里 `logger` 不在白名单里，只走 `ctx.get`。
+check('没有 logger 时，apply 走警告分支也只是安静降级', () => {
   mod.apply({
     get() {
       return undefined
+    },
+    effect() {
+      return () => {}
     },
     get connection() {
       throw new Error('service "connection" is not declared by your plugin')

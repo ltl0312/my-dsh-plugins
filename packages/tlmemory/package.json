@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlmemory",
-  "version": "0.8.3",
+  "version": "1.0.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
@@ -35,7 +35,12 @@
     },
     "client": {
       "platform": "web",
-      "inject": []
+      "inject": [
+        "slots",
+        "locale",
+        "remote",
+        "remote.settings"
+      ]
     }
   },
   "files": [

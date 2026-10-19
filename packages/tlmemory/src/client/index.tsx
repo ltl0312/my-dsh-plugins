@@ -50,10 +50,19 @@ import { mountCenterPanel } from './panel-mount.js'
 import { applyFrameTransparency } from './frame.js'
 import { detectThemeMode, watchThemeMode } from './theme.js'
 import { ensureClientStyles, removeClientStyles } from './styles.js'
+import { registerSettingsSection } from './settings.js'
 
 // 客户端模块的公开面：cordis 加载所需（apply / inject）+ 供自检与单测使用的
 // 逻辑、挂载与样式入口（与家族插件不同，本插件把纯逻辑一并导出以便单测）。
 export * from './logic.js'
+export { registerSettingsSection, TlmemorySettingsSection, SETTINGS_LOCALE_NS, SETTINGS_SECTION_ID } from './settings.js'
+export {
+  SettingsPanelController,
+  buildSavePlan,
+  fieldsFromView,
+  pickNamespace,
+  SETTINGS_NS,
+} from './settings-logic.js'
 export { ENTRY_ICON, mountSidebarEntry, sidebarRoot, newSessionButton } from './sidebar-entry.js'
 export { mountCenterPanel, conversationColumn } from './panel-mount.js'
 export { ensureClientStyles, removeClientStyles, CLIENT_CSS, STYLE_SELECTOR } from './styles.js'
@@ -62,10 +71,23 @@ export { applyFrameTransparency, TRANSPARENT_BACKGROUND } from './frame.js'
 export { ACTIVE_ATTRIBUTE, VIEW_ATTRIBUTE }
 
 /**
- * 客户端插件的服务依赖：DOM 级接管不需要任何客户端服务，
- * 因此显式声明为空 —— apply 立即执行，由 MutationObserver 等待外壳渲染。
+ * 客户端插件的服务依赖。
+ *
+ * 看板的 DOM 级接管本身不需要任何服务，但设置页分区（settings.section）
+ * 必须等 shell 把这三个核心服务就绪后再注册：
+ *   - slots  ：插槽注册表（settings.section 由 dsh-client-ui-settings-general 消费）
+ *   - locale ：词典（导航项标签随语言切换）
+ *   - remote ：远程传输（其上的 settings 命名空间负责读写本插件配置）
+ *
+ * 三者都是 shell 自带的核心服务（宿主内所有设置页插件都声明它们），声明后
+ * apply 只会在服务就绪时执行一次，DOM 挂载不再需要 MutationObserver 之外的等待。
+ *
+ * ⚠️ `remote.settings` 必须单独声明（0.2.1-rc.2 实测）：客户端 ctx 是服务代理，
+ * 未声明的属性一读就抛 `cannot get property "remote.settings" without inject`，
+ * `?.` 也挡不住。宿主自己的设置页（dsh-client-ui-settings-general）同样把
+ * `remote` 与 `remote.settings` 并列声明，这里照抄同一契约。
  */
-export const inject: string[] = []
+export const inject: string[] = ['slots', 'locale', 'remote', 'remote.settings']
 
 /** 健康探测的三态 */
 type Health = 'probing' | 'online' | 'offline'
@@ -336,6 +358,14 @@ function MemoryDashboardPanel(props: { state: PanelState }): ReactElement {
  * @param ctx - 客户端根上下文
  */
 export function apply(ctx: Context): void {
+  // 设置页分区与服务端看板互不依赖，先注册：它不需要 document，也不受下面
+  // DOM 幂等短路的影响（重复 apply 时旧纤程的插槽注册已被 cordis 回收）。
+  try {
+    registerSettingsSection(ctx)
+  } catch (error) {
+    console.warn('[tlmemory] 设置面板注册失败：', error)
+  }
+
   if (typeof document === 'undefined') return
 
   // DOM 级幂等：入口行或面板容器已存在（重复 apply / HMR 重注入 / 残留的旧

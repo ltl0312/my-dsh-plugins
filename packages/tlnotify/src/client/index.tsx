@@ -31,13 +31,13 @@ export const inject: string[] = ['slots']
 /**
  * 打招呼专用。
  *
- * 客户端的 ctx 是白名单代理，`ctx.logger` **不在**白名单里（读它同样会抛）。日志是
- * 失败路径上的最后一环，绝不能再制造第二个异常，所以取不到就安静算了。
+ * 客户端的 ctx 是白名单代理，直接读 `ctx.logger` 会被拒绝（它不是 `inject` 里的名字），
+ * 只有 `ctx.get('logger')` 这条免声明查询能取到。日志是失败路径上的最后一环，绝不能
+ * 再制造第二个异常，所以取不到就安静算了。
  */
 function warn(ctx: ClientContextLike, message: string, error?: unknown): void {
   try {
-    const queried = typeof ctx.get === 'function' ? ctx.get('logger') : undefined
-    const logger = (queried ?? ctx.logger) as { warn?: (message: string, error?: unknown) => void } | undefined
+    const logger = ctx.get('logger') as { warn?: (message: string, error?: unknown) => void } | undefined
     logger?.warn?.(message, error)
   } catch {
     /* 客户端的 ctx 可能连 logger 都不给：这里只是打招呼，绝不能因此再抛。 */
@@ -102,5 +102,5 @@ export function apply(ctx: ClientContextLike): void {
     warn(ctx, 'tlnotify: 注册设置页失败。', error)
   }
 
-  ctx.effect?.(() => () => removeClientStyles(), 'tlnotify: client mounts')
+  ctx.effect(() => () => removeClientStyles(), 'tlnotify: client mounts')
 }

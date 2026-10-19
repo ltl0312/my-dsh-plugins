@@ -76,7 +76,7 @@ const check = (label, ok) => {
 console.log('module id =', id)
 check('模块 id 为包名', id === 'dsh-plugin-tlmemory')
 check('导出 apply', typeof plugin.apply === 'function')
-check('inject 为空数组（不再依赖客户端服务）', Array.isArray(plugin.inject) && plugin.inject.length === 0)
+check('inject 声明了设置面板所需的三个客户端服务', Array.isArray(plugin.inject) && plugin.inject.join(',') === 'slots,locale,remote')
 check('不再导出已废弃的页签 API', plugin.activateViewTab === undefined && plugin.openDashboardForSession === undefined)
 
 document.body.innerHTML = `
@@ -163,6 +163,145 @@ check('点击会话行即收拢面板', !html.hasAttribute('data-dsh-tlmemory-ac
 // 重复 apply 幂等
 plugin.apply({ effect: () => () => {} })
 check('重复 apply 不产生第二份入口/容器', document.querySelectorAll('[data-dsh-tlmemory-entry]').length === 1 && document.querySelectorAll('[data-dsh-tlmemory-view]').length === 1)
+
+// ── 设置页分区装配（1.0.0 新增能力）────────────────────────────────────────
+// 用完整假上下文（slots / locale / remote.settings）走一遍真实注册链路：
+// 词典注册 → 插槽注册 → describe 读取 → 渲染 → 保存。
+// 注意这里是在 DOM 已挂载之后再次 apply：设置分区必须照常注册（不得被
+// DOM 幂等短路吃掉），这正是宿主 HMR 重注入时的路径。
+const settingsEffects = []
+const observed = { slots: [], locale: [], events: [], sections: [], describeCalls: 0, writes: [] }
+/** 与 schemastery toJSON() 同形的引用图（真实形状由 tests/config.spec.ts 断言） */
+const projection = {
+  uid: 6,
+  refs: {
+    1: { type: 'string', meta: { volatile: true, description: '库路径' } },
+    2: { type: 'number', meta: { volatile: true, default: 4890, description: '端口' } },
+    3: { type: 'number', meta: { volatile: true, default: 5, description: '召回条数' } },
+    4: { type: 'boolean', meta: { volatile: true, default: true, description: '自动提炼' } },
+    5: { type: 'number', meta: { volatile: true, default: 20, description: '间隔' } },
+    6: {
+      type: 'object',
+      meta: { default: {} },
+      dict: { dbPath: 1, serverPort: 2, maxRecallCount: 3, enableAutoReflection: 4, compactionInterval: 5 },
+    },
+  },
+}
+let fakeRevision = 1
+const fakeSettings = {
+  async describe() {
+    observed.describeCalls += 1
+    return {
+      ok: true,
+      value: {
+        writable: true,
+        hasDocument: true,
+        namespaces: [
+          {
+            ns: 'dsh-plugin-tlmemory',
+            revision: fakeRevision,
+            schema: projection,
+            value: { serverPort: 4890, maxRecallCount: 5, enableAutoReflection: true, compactionInterval: 20 },
+            base: {},
+            user: {},
+          },
+        ],
+      },
+    }
+  },
+  async update(ns, patch, revision) {
+    observed.writes.push({ method: 'update', ns, patch, revision })
+    fakeRevision += 1
+    return { ok: true, value: { ns, revision: fakeRevision } }
+  },
+  async mutate(ns, ops, revision) {
+    observed.writes.push({ method: 'mutate', ns, ops, revision })
+    fakeRevision += 1
+    return { ok: true, value: { ns, revision: fakeRevision } }
+  },
+}
+
+const settingsCtx = {
+  effect: (callback, label) => {
+    settingsEffects.push({ callback, label })
+    return () => {}
+  },
+  locale: {
+    bind: (ns) => (key) => `${ns}:${key}`,
+    register: (ns, dict) => {
+      observed.locale.push({ ns, dict })
+      return () => {}
+    },
+  },
+  slots: {
+    inject: (name, callback) => {
+      observed.slots.push(name)
+      return callback()
+    },
+    register: (spec, Component) => {
+      observed.sections.push({ spec, Component })
+      return () => {}
+    },
+  },
+  remote: {
+    settings: fakeSettings,
+    $on: (event, callback) => {
+      observed.events.push({ event, callback })
+      return () => {}
+    },
+  },
+}
+plugin.apply(settingsCtx)
+await new Promise((resolve) => setTimeout(resolve, 0))
+
+check('设置分区注入 settings.section 插槽', observed.slots.length === 1 && observed.slots[0] === 'settings.section')
+check('注册词典 settings.tlmemory（zh + en）', observed.locale.length === 1 && observed.locale[0].ns === 'settings.tlmemory' && 'zh' in observed.locale[0].dict && 'en' in observed.locale[0].dict)
+check('订阅 settings/document-updated 以跟随外部改动', observed.events.some((entry) => entry.event === 'settings/document-updated'))
+const section = observed.sections[0]
+check('分区注册项形态正确（id/order/label/locale/inject）', section?.spec.name === 'settings.section' && section.spec.id === 'tlmemory' && section.spec.order === 30 && section.spec.locale === 'settings.tlmemory' && typeof section.spec.label === 'function' && typeof section.spec.inject === 'function')
+check('导航标签走词典', section?.spec.label() === 'settings.tlmemory:nav')
+
+const injected = section?.spec.inject()
+await new Promise((resolve) => setTimeout(resolve, 0))
+const snapshot = injected.controller.getSnapshot()
+console.log('settings snapshot =', JSON.stringify({ status: snapshot.status, ns: snapshot.ns, revision: snapshot.revision, fields: snapshot.fields.map((f) => f.key) }))
+check('控制器读到命名空间与 5 个字段', snapshot.status === 'ready' && snapshot.ns === 'dsh-plugin-tlmemory' && snapshot.fields.length === 5)
+check('字段值来自宿主当前值', snapshot.draft.maxRecallCount === '5' && snapshot.draft.enableAutoReflection === true && snapshot.draft.dbPath === '')
+
+const findNode = (node, predicate) => {
+  if (node === null || typeof node !== 'object') return undefined
+  if (predicate(node)) return node
+  for (const child of node.children ?? []) {
+    const hit = findNode(child, predicate)
+    if (hit !== undefined) return hit
+  }
+  return undefined
+}
+const tree = section.Component(injected)
+check('分区可渲染为 ready 表单', tree?.props?.['data-tlmemory-settings'] === 'ready')
+const fieldKeys = []
+const collect = (node) => {
+  if (node === null || typeof node !== 'object') return
+  const key = node.props?.['data-tlmemory-field']
+  if (typeof key === 'string') fieldKeys.push(key)
+  for (const child of node.children ?? []) collect(child)
+}
+collect(tree)
+check('五个字段行全部渲染', ['dbPath', 'serverPort', 'maxRecallCount', 'enableAutoReflection', 'compactionInterval'].every((key) => fieldKeys.includes(key)))
+const saveButton = findNode(tree, (node) => node.type === 'button' && node.children?.[0] === 'settings.tlmemory:save')
+check('保存按钮存在（初始因无改动而禁用）', saveButton !== undefined && saveButton.props.disabled === true)
+
+injected.controller.setDraft('maxRecallCount', '8')
+await injected.controller.save()
+console.log('writes =', JSON.stringify(observed.writes))
+check('保存写入 patch 并带 revision', observed.writes.length === 1 && observed.writes[0].method === 'update' && observed.writes[0].patch.maxRecallCount === 8 && observed.writes[0].revision === 1)
+check('保存后重新 load 最新值', observed.describeCalls === 2 && injected.controller.getSnapshot().messageKey === 'saved')
+
+for (const effect of settingsEffects) {
+  const disposer = effect.callback()
+  if (typeof disposer === 'function') disposer()
+}
+check('设置分区副作用可回收', settingsEffects.length === 1 && settingsEffects[0].label === 'tlmemory: settings section')
 
 // 卸载还原
 for (const effect of effects) {

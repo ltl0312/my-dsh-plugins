@@ -11,9 +11,9 @@
 // - 可逆注销：全部副作用（切片/工具/监听/服务/数据库）收敛于单一 Disposer。
 // Cordis 上下文声明合并统一收敛于 types.ts，此处严禁重复声明以免属性签名冲突。
 import type { Context } from 'cordis'
-import Schema from 'schemastery'
 import path from 'node:path'
 import fs from 'node:fs'
+import { Config, liveConfig, resolveDbPath } from './config.js'
 import { MemoryDB } from './db.js'
 import { MemoryExtractor } from './extractor.js'
 import { MemoryCompactor } from './compactor.js'
@@ -65,24 +65,10 @@ export {
 export type { WorkspaceRegistry } from './workspaces.js'
 export type { ProjectPruneOptions, OrphanMergeOptions, OrphanMergeResult } from './db.js'
 
-export interface Config {
-  dbPath?: string
-  serverPort?: number
-  maxRecallCount?: number
-  enableAutoReflection?: boolean
-  /** M3 compaction 间隔：每累计 N 次静默沉淀触发一轮强化衰减 + 矛盾检测（默认 20） */
-  compactionInterval?: number
-}
-
-export const Config: Schema<Config> = Schema.object({
-  dbPath: Schema.string().description('SQLite 数据库物理文件路径（默认置于全局 ~/.dsh/tlmemory.db）'),
-  serverPort: Schema.number().default(4890).description('侧边栏与 REST API 服务端口'),
-  maxRecallCount: Schema.number().default(5).description('单轮最大系统提示词注入记忆条数'),
-  enableAutoReflection: Schema.boolean().default(true).description('是否开启会话结束异步自动反思提炼'),
-  compactionInterval: Schema.number()
-    .default(20)
-    .description('M3 compaction 间隔：每累计 N 次静默沉淀触发一轮强化衰减与矛盾检测'),
-})
+// 配置 schema 与运行期读取器统一收敛在 config.ts（宿主设置页的 schema 来源）。
+// 这里**只做转出**：`export { Config }` 同时转出该名字的类型与值两个含义，
+// 因此历史调用方 `import { Config } from '../src/index.js'` 的语义不变。
+export { Config } from './config.js'
 
 export const name = 'tlmemory'
 export const inject = ['tools', 'llm', 'systemPrompt']
@@ -225,15 +211,21 @@ function extractSessionRouteContext(session: unknown): ExtractionRouteContext {
 }
 
 export function apply(ctx: Context, config: Config): () => void {
-  ctx.logger?.info?.(`[tlmemory] 插件装配启动中...`)
+  // 运行期实时配置读口（绝不缓存装配期快照）：宿主改设置后会把新 config 写回
+  // fiber 并重启插件，热路径上的阈值仍逐次回读，保证「保存即生效」没有窗口期。
+  const readConfig = liveConfig(ctx, config)
+  const dbFile = resolveDbPath(readConfig())
+  ctx.logger?.info?.(
+    `[tlmemory] 插件装配启动中... db=${dbFile ?? '(默认 ~/.dsh/tlmemory.db)'}`,
+  )
 
-  const db = new MemoryDB(config.dbPath)
+  const db = new MemoryDB(dbFile)
   const recallEngine = new MemoryRecallEngine(db)
   const turnTracker = new TurnTracker()
   const extractor = new MemoryExtractor(ctx, db)
   // M3 异步 compaction：强化衰减（确定性）+ 矛盾检测（LLM 成本按批摊薄），
   // 在提炼链尾部串行执行，绝不与提炼并行、绝不阻塞会话流
-  const compactor = new MemoryCompactor(ctx, db, config.compactionInterval ?? 20)
+  const compactor = new MemoryCompactor(ctx, db, () => readConfig().compactionInterval ?? 20)
 
   // 工程身份：解析当前仓库根目录 → scope 哈希 + 可读工程名。
   // 但**登记前必须先过宿主工作区白名单**：插件可能被宿主以任意工作目录拉起
@@ -522,7 +514,7 @@ export function apply(ctx: Context, config: Config): () => void {
   // 绝不能作为看板锚点呈现；工作区白名单读取器一并注入，服务端每次读清单都会校验。
   const server = new MemoryServer(
     db,
-    config.serverPort ?? 4890,
+    readConfig().serverPort ?? 4890,
     ctx.logger,
     projectIsAllowed ? project : undefined,
     () => loadWorkspaceRegistry(),
@@ -560,7 +552,11 @@ export function apply(ctx: Context, config: Config): () => void {
         turnTracker.addUserMessage(userMsg.content, userMsg.source?.kind)
 
         if (text) {
-          activeRecalledMemories = recallEngine.recall(text, sessionScope, config.maxRecallCount ?? 5)
+          activeRecalledMemories = recallEngine.recall(
+            text,
+            sessionScope,
+            readConfig().maxRecallCount ?? 5,
+          )
           activePromptSectionText = recallEngine.formatPromptBlock(activeRecalledMemories)
           server.broadcastHits(sessionScope, activeRecalledMemories.map((m) => m.id))
         }
@@ -573,7 +569,7 @@ export function apply(ctx: Context, config: Config): () => void {
         // 清空注入缓存，避免上一轮记忆残留进下一轮提示词
         activePromptSectionText = ''
 
-        if (item && (config.enableAutoReflection ?? true) && shouldConsolidate(item)) {
+        if (item && (readConfig().enableAutoReflection ?? true) && shouldConsolidate(item)) {
           // 主响应流已完成结算，进入后台执行：M2 干活信号门控通过后
           // 才付费调用 LLM（见 shouldConsolidate），链式串行 + 超时中止（P2-4），
           // 提炼失败仅记日志，绝不阻塞、绝不打扰会话对话流。

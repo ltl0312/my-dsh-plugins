@@ -10,7 +10,8 @@
 # 只声明 dsh.client 的普通插件在桌面端因此**根本无法被挂载**。
 #
 # 配置方式（三选一）：
-#   1. 宿主 GUI：Settings > Plugins > Plugin configuration > dsh-plugin-tlmemory
+#   1. 宿主 GUI：设置（Settings）> 左栏「记忆」—— 1.0.0 起本包注册 settings.section
+#      分区，字段全部 volatile，保存即热生效（旧版插件列表卡片已废弃）。
 #   2. 在自己的 profile 补丁层里**按 id 覆盖**（不要再写 - insert:，否则会挂载两次）：
 #        - id: dsh-plugin-tlmemory
 #          config:
