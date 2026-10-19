@@ -21,6 +21,7 @@
 import type { Context } from "cordis";
 import { sanitizeSegment } from "./db.js";
 import type { MemoryDB } from "./db.js";
+import type { ConsolidateReport } from './consolidator.js'
 import { expandQueryCandidates } from "./query-expand.js";
 import type { MemoryNode, SearchResult } from "./types.js";
 
@@ -194,10 +195,20 @@ function extractExecSession(exec: unknown): unknown {
   return undefined
 }
 
+/**
+ * 归并执行器的最小接口：tools 只依赖这两个方法，不依赖 consolidator 的完整实现
+ * （单测可以塞替身，避免为了测工具注册而拉起 LLM）。
+ */
+export interface MemoryConsolidatorLike {
+  consolidate(options?: { dryRun?: boolean; limit?: number }): Promise<ConsolidateReport>
+  revert(mergeId: number): { restored: number; removedSummary: boolean } | null
+}
+
 export function registerMemoryTools(
   ctx: Context,
   db: MemoryDB,
   resolveCurrentScope?: ScopeResolver,
+  consolidator?: MemoryConsolidatorLike,
 ): () => void {
   // 第三参缺省（嵌入式最小用法）：回退 global —— 绝不回退 process.cwd()，
   // 那正是「记忆误存进终端启动目录」的事故根源。
@@ -505,9 +516,105 @@ export function registerMemoryTools(
     },
   });
 
+  // 记忆归并工具（1.1.0）：dry_run 默认 true —— 折叠是不可逆感很强的操作（虽然有
+  // merges 回滚，但用户看不到「合并后是什么」就落库等于赌运气），所以默认只出预览。
+  const unregisterConsolidate = consolidator
+    ? ctx.tools.register({
+        name: "tlmemory_consolidate",
+        description:
+          "把同一主题的多条短记忆归并成一条摘要（父子结构，可回滚）。" +
+          "默认 dry_run=true 只返回将合并的簇与摘要预览、不写库；确认后再传 dry_run=false 执行。",
+        parameters: {
+          type: "object",
+          properties: {
+            dry_run: {
+              type: "boolean",
+              description: "true（默认）只预览不写库；false 才真正折叠并落库",
+            },
+            limit: {
+              type: "number",
+              description: "本轮最多处理多少个簇，默认 8",
+            },
+            revert_merge_id: {
+              type: "number",
+              description: "撤销指定归并（merges 表 id），恢复来源记忆并删除摘要节点",
+            },
+          },
+        },
+        output: toolOutput(),
+        async execute(
+          args: { dry_run?: boolean; limit?: number; revert_merge_id?: number },
+        ) {
+          if (args?.revert_merge_id != null) {
+            const reverted = consolidator.revert(Number(args.revert_merge_id));
+            if (reverted === null) {
+              return toToolResult(
+                `撤销失败：merge #${args.revert_merge_id} 不存在或已撤销过。`,
+              );
+            }
+            return toToolResult(
+              `已撤销归并 #${args.revert_merge_id}：恢复 ${reverted.restored} 条记忆` +
+                `${reverted.removedSummary ? "，摘要节点已删除" : ""}。`,
+            );
+          }
+
+          const dryRun = args?.dry_run !== false;
+          const report = await consolidator.consolidate({
+            dryRun,
+            limit: args?.limit,
+          });
+          if (report.clusters.length === 0) {
+            return toToolResult("没有可归并的记忆簇（同主题短记忆不足 2 条）。");
+          }
+          if (!report.summarized) {
+            return toToolResult(
+              "聚类已完成，但当前会话的模型通道不可用，无法生成摘要：" +
+                JSON.stringify(
+                  report.clusters.map((cluster) => ({
+                    path: cluster.path,
+                    tree: cluster.treeType,
+                    count: cluster.sources.length,
+                    sources: cluster.sources.map((source) => source.name),
+                  })),
+                ),
+            );
+          }
+          if (dryRun) {
+            return toToolResult({
+              dry_run: true,
+              clusters: report.clusters.map((cluster) => ({
+                tree: cluster.treeType,
+                path: cluster.path,
+                count: cluster.sources.length,
+                name: cluster.name,
+                summary: cluster.summary,
+                sources: cluster.sources.map((source) => ({
+                  id: source.id,
+                  name: source.name,
+                  content: source.content,
+                })),
+              })),
+              skipped: report.skipped,
+              note: "确认无误后传 dry_run=false 执行；执行后可用 revert_merge_id 回滚。",
+            });
+          }
+          return toToolResult({
+            applied: report.applied.map((record) => ({
+              merge_id: record.mergeId,
+              summary_node_id: record.summaryNodeId,
+              folded: record.sourceIds.length,
+              summary: record.summary,
+            })),
+            skipped: report.skipped,
+          });
+        },
+      })
+    : () => {};
+
   return () => {
     unregisterSave();
     unregisterQuery();
     unregisterDelete();
+    unregisterConsolidate();
   };
 }

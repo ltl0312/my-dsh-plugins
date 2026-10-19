@@ -1143,14 +1143,16 @@ window.__ModuleLoader__.load({
         serverPort: "field.serverPort",
         maxRecallCount: "field.maxRecallCount",
         enableAutoReflection: "field.enableAutoReflection",
-        compactionInterval: "field.compactionInterval"
+        compactionInterval: "field.compactionInterval",
+        enableAutoMerge: "field.enableAutoMerge"
       };
       var FIELD_HINT_KEYS = {
         dbPath: "hint.dbPath",
         serverPort: "hint.serverPort",
         maxRecallCount: "hint.maxRecallCount",
         enableAutoReflection: "hint.enableAutoReflection",
-        compactionInterval: "hint.compactionInterval"
+        compactionInterval: "hint.compactionInterval",
+        enableAutoMerge: "hint.enableAutoMerge"
       };
       var zh = {
         nav: "\u8BB0\u5FC6",
@@ -1161,11 +1163,13 @@ window.__ModuleLoader__.load({
         "field.maxRecallCount": "\u5355\u8F6E\u53EC\u56DE\u6761\u6570",
         "field.enableAutoReflection": "\u81EA\u52A8\u63D0\u70BC\u8BB0\u5FC6",
         "field.compactionInterval": "\u81EA\u52A8\u63D0\u70BC\u95F4\u9694\uFF08\u8F6E\uFF09",
+        "field.enableAutoMerge": "\u81EA\u52A8\u5F52\u5E76\u76F8\u8FD1\u8BB0\u5FC6",
         "hint.dbPath": "\u7559\u7A7A\u5219\u4F7F\u7528\u9ED8\u8BA4\u8DEF\u5F84 ~/.dsh/tlmemory.db\uFF1B\u9996\u6B21\u542F\u52A8\u81EA\u52A8\u5EFA\u5E93\u5EFA\u8868\u3002",
         "hint.serverPort": "\u8BB0\u5FC6\u770B\u677F\u670D\u52A1\u76D1\u542C\u7684\u672C\u5730\u7AEF\u53E3\uFF08\u4EC5\u56DE\u73AF\u5730\u5740\uFF09\u3002",
         "hint.maxRecallCount": "\u6BCF\u8F6E\u5BF9\u8BDD\u6700\u591A\u6CE8\u5165\u51E0\u6761\u76F8\u5173\u8BB0\u5FC6\u3002",
         "hint.enableAutoReflection": "\u5F00\u542F\u540E\uFF0C\u5BF9\u8BDD\u7ED3\u675F\u4F1A\u540E\u53F0\u63D0\u70BC\u53EF\u590D\u7528\u7684\u4E8B\u5B9E\u4E0E\u504F\u597D\u3002",
         "hint.compactionInterval": "\u6BCF\u7D2F\u8BA1\u591A\u5C11\u8F6E\u5BF9\u8BDD\u89E6\u53D1\u4E00\u6B21\u540E\u53F0\u63D0\u70BC\u3002",
+        "hint.enableAutoMerge": "\u628A\u540C\u4E00\u4E3B\u9898\u7684\u591A\u6761\u77ED\u8BB0\u5FC6\u6298\u53E0\u6210\u4E00\u6761\u6458\u8981\uFF0C\u539F\u53E5\u4FDD\u7559\u5728\u5E93\u91CC\u53EF\u56DE\u6EDA\u3002",
         defaultText: "\u9ED8\u8BA4\u503C",
         emptyText: "\u672A\u8BBE\u7F6E",
         reset: "\u6062\u590D\u9ED8\u8BA4",
@@ -1194,11 +1198,13 @@ window.__ModuleLoader__.load({
         "field.maxRecallCount": "Recall limit per turn",
         "field.enableAutoReflection": "Auto-distill memories",
         "field.compactionInterval": "Auto-distill interval (turns)",
+        "field.enableAutoMerge": "Auto-merge similar memories",
         "hint.dbPath": "Leave blank to use ~/.dsh/tlmemory.db; the database and tables are created on first start.",
         "hint.serverPort": "Loopback port serving the memory dashboard.",
         "hint.maxRecallCount": "How many related memories may be injected into one turn.",
         "hint.enableAutoReflection": "When enabled, reusable facts and preferences are distilled after a turn.",
         "hint.compactionInterval": "Turns accumulated before a background distillation runs.",
+        "hint.enableAutoMerge": "Fold same-topic short memories into one summary; originals stay recoverable.",
         defaultText: "Default",
         emptyText: "Not set",
         reset: "Reset to default",

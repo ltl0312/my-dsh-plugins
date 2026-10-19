@@ -31,6 +31,11 @@ export interface Config {
   enableAutoReflection?: boolean
   /** M3 compaction 间隔：每累计 N 次静默沉淀触发一轮强化衰减 + 矛盾检测（默认 20） */
   compactionInterval?: number
+  /**
+   * 记忆归并开关（1.1.0）：开启后每轮 compaction 额外把「同主题多句话」折叠成一条摘要。
+   * 归并产物是父子结构且可回滚（merges 表 + revert），因此默认开启。
+   */
+  enableAutoMerge?: boolean
 }
 
 /** 各数值/布尔字段的默认值（与 schema.default 保持一致，供读取端兜底） */
@@ -39,6 +44,7 @@ export const CONFIG_DEFAULTS = {
   maxRecallCount: 5,
   enableAutoReflection: true,
   compactionInterval: 20,
+  enableAutoMerge: true,
 } as const
 
 /** 未配置 dbPath 时 MemoryDB 实际使用的路径（仅用于日志与文档，不写入 schema 默认值） */
@@ -87,6 +93,11 @@ export const Config: Schema<Config> = Schema.object({
     Schema.number()
       .default(CONFIG_DEFAULTS.compactionInterval)
       .description('每累计 N 次沉淀触发一轮强化衰减与矛盾检测（0 表示不自动触发）'),
+  ),
+  enableAutoMerge: volatile(
+    Schema.boolean()
+      .default(CONFIG_DEFAULTS.enableAutoMerge)
+      .description('是否把同一主题的多条短记忆自动归并成一条摘要（可回滚）'),
   ),
 })
 

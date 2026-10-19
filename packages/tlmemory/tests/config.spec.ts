@@ -38,10 +38,10 @@ describe('Config schema（宿主设置页的唯一事实来源）', () => {
     expect(Object.keys(roundTrip.refs).length).toBeGreaterThan(0)
   })
 
-  it('五个字段全部标了 volatile（否则设置页不显示、保存被拒绝）', () => {
+  it('六个字段全部标了 volatile（否则设置页不显示、保存被拒绝）', () => {
     const dict = rootDict()
     expect(Object.keys(dict).sort()).toEqual(
-      ['compactionInterval', 'dbPath', 'enableAutoReflection', 'maxRecallCount', 'serverPort'].sort(),
+      ['compactionInterval', 'dbPath', 'enableAutoMerge', 'enableAutoReflection', 'maxRecallCount', 'serverPort'].sort(),
     )
     for (const [key, uid] of Object.entries(dict)) {
       const node = serialized.refs[String(uid)]

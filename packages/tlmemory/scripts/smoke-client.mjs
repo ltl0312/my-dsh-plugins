@@ -76,7 +76,10 @@ const check = (label, ok) => {
 console.log('module id =', id)
 check('模块 id 为包名', id === 'dsh-plugin-tlmemory')
 check('导出 apply', typeof plugin.apply === 'function')
-check('inject 声明了设置面板所需的三个客户端服务', Array.isArray(plugin.inject) && plugin.inject.join(',') === 'slots,locale,remote')
+// 0.2.1 客户端 ctx 是白名单代理：`remote.settings` 是独立的 dotted inject 项，
+// 不是 `remote` 的子属性（漏声明时 createConfigStore 直接抛 cannot get property），
+// 因此这里必须连它一起断言，否则产物能过冒烟、真宿主却白屏。
+check('inject 声明了设置面板所需的四个客户端服务', Array.isArray(plugin.inject) && plugin.inject.join(',') === 'slots,locale,remote,remote.settings')
 check('不再导出已废弃的页签 API', plugin.activateViewTab === undefined && plugin.openDashboardForSession === undefined)
 
 document.body.innerHTML = `
@@ -180,10 +183,11 @@ const projection = {
     3: { type: 'number', meta: { volatile: true, default: 5, description: '召回条数' } },
     4: { type: 'boolean', meta: { volatile: true, default: true, description: '自动提炼' } },
     5: { type: 'number', meta: { volatile: true, default: 20, description: '间隔' } },
+    7: { type: 'boolean', meta: { volatile: true, default: true, description: '归并' } },
     6: {
       type: 'object',
       meta: { default: {} },
-      dict: { dbPath: 1, serverPort: 2, maxRecallCount: 3, enableAutoReflection: 4, compactionInterval: 5 },
+      dict: { dbPath: 1, serverPort: 2, maxRecallCount: 3, enableAutoReflection: 4, compactionInterval: 5, enableAutoMerge: 7 },
     },
   },
 }
@@ -201,7 +205,7 @@ const fakeSettings = {
             ns: 'dsh-plugin-tlmemory',
             revision: fakeRevision,
             schema: projection,
-            value: { serverPort: 4890, maxRecallCount: 5, enableAutoReflection: true, compactionInterval: 20 },
+            value: { serverPort: 4890, maxRecallCount: 5, enableAutoReflection: true, compactionInterval: 20, enableAutoMerge: true },
             base: {},
             user: {},
           },
@@ -265,7 +269,7 @@ const injected = section?.spec.inject()
 await new Promise((resolve) => setTimeout(resolve, 0))
 const snapshot = injected.controller.getSnapshot()
 console.log('settings snapshot =', JSON.stringify({ status: snapshot.status, ns: snapshot.ns, revision: snapshot.revision, fields: snapshot.fields.map((f) => f.key) }))
-check('控制器读到命名空间与 5 个字段', snapshot.status === 'ready' && snapshot.ns === 'dsh-plugin-tlmemory' && snapshot.fields.length === 5)
+check('控制器读到命名空间与 6 个字段', snapshot.status === 'ready' && snapshot.ns === 'dsh-plugin-tlmemory' && snapshot.fields.length === 6)
 check('字段值来自宿主当前值', snapshot.draft.maxRecallCount === '5' && snapshot.draft.enableAutoReflection === true && snapshot.draft.dbPath === '')
 
 const findNode = (node, predicate) => {
@@ -287,7 +291,7 @@ const collect = (node) => {
   for (const child of node.children ?? []) collect(child)
 }
 collect(tree)
-check('五个字段行全部渲染', ['dbPath', 'serverPort', 'maxRecallCount', 'enableAutoReflection', 'compactionInterval'].every((key) => fieldKeys.includes(key)))
+check('六个字段行全部渲染', ['dbPath', 'serverPort', 'maxRecallCount', 'enableAutoReflection', 'compactionInterval', 'enableAutoMerge'].every((key) => fieldKeys.includes(key)))
 const saveButton = findNode(tree, (node) => node.type === 'button' && node.children?.[0] === 'settings.tlmemory:save')
 check('保存按钮存在（初始因无改动而禁用）', saveButton !== undefined && saveButton.props.disabled === true)
 

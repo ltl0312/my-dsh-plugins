@@ -64,6 +64,11 @@ export interface MemoryNode {
    * 不要用 reinforce_count 做这个判定：它同时被重沉淀、去重强化与衰减改写。
    */
   last_injected_at: number
+  /**
+   * 归并折叠指针（1.1.0）：非空表示本节点已被折叠进该父节点（status 同时为 'merged'）。
+   * 来源叶子原文保留、退出召回，可通过 merges 审计表整次回滚。
+   */
+  merged_into?: number | null
   created_at: number
   updated_at: number
 }

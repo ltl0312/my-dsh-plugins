@@ -17,6 +17,7 @@ import { Config, liveConfig, resolveDbPath } from './config.js'
 import { MemoryDB } from './db.js'
 import { MemoryExtractor } from './extractor.js'
 import { MemoryCompactor } from './compactor.js'
+import { MemoryConsolidator } from './consolidator.js'
 import { registerMemoryTools } from './tools.js'
 import { MemoryRecallEngine } from './recall.js'
 import { MemoryServer } from './server.js'
@@ -38,6 +39,10 @@ export { MemoryCompactor } from './compactor.js'
 export { registerMemoryTools, toContentBlocks, toToolResult } from './tools.js'
 export type { ToolResultEnvelope, ToolTextBlock, ScopeResolver } from './tools.js'
 export { MemoryRecallEngine } from './recall.js'
+// 归并能力的纯函数出口：scripts/merge-preview.mjs 直接复用同一套聚类规则，
+// 避免「预览用一套、执行用另一套」的双实现漂移。
+export { MemoryConsolidator, clusterCandidates, diceCoefficient, pathsAreSimilar } from './consolidator.js'
+export type { MergeCluster, ConsolidateReport } from './consolidator.js'
 // 阶段三/六交付物：嵌入式 REST 与 WebSocket 实时中继服务 + 轮次跟踪器
 export { MemoryServer, isFetchForbiddenPort } from './server.js'
 export { TurnTracker } from './turn-tracker.js'
@@ -225,7 +230,16 @@ export function apply(ctx: Context, config: Config): () => void {
   const extractor = new MemoryExtractor(ctx, db)
   // M3 异步 compaction：强化衰减（确定性）+ 矛盾检测（LLM 成本按批摊薄），
   // 在提炼链尾部串行执行，绝不与提炼并行、绝不阻塞会话流
-  const compactor = new MemoryCompactor(ctx, db, () => readConfig().compactionInterval ?? 20)
+  // 记忆归并（1.1.0）：确定性聚类 + 一次 LLM 归纳 → 父子结构落库（可回滚）。
+  // 开关与 compactor 一样走运行期读取，设置页改完立即生效。
+  const consolidator = new MemoryConsolidator(ctx, db)
+  const compactor = new MemoryCompactor(
+    ctx,
+    db,
+    () => readConfig().compactionInterval ?? 20,
+    consolidator,
+    () => readConfig().enableAutoMerge ?? true,
+  )
 
   // 工程身份：解析当前仓库根目录 → scope 哈希 + 可读工程名。
   // 但**登记前必须先过宿主工作区白名单**：插件可能被宿主以任意工作目录拉起
@@ -500,10 +514,15 @@ export function apply(ctx: Context, config: Config): () => void {
   // v0.6.6 作用域动态感知：工具执行时按宿主 exec 上下文携带的 session 解析工程作用域；
   // 无会话线索时先取进程级身份（合法才用），孤儿进程目录一律降级白名单首位合法工作区
   // —— 严禁以 process.cwd()（如用户主目录）直接建工程，杜绝 ZhuanZ 幽灵工程再生。
-  const unregisterTools = registerMemoryTools(ctx, db, (session) => {
-    if (session && typeof session === 'object') return resolveSessionScope(session)
-    return resolveSafeScope(projectScope)
-  })
+  const unregisterTools = registerMemoryTools(
+    ctx,
+    db,
+    (session) => {
+      if (session && typeof session === 'object') return resolveSessionScope(session)
+      return resolveSafeScope(projectScope)
+    },
+    consolidator,
+  )
 
   // 阶段三：内嵌回环网络服务（零配置自启，随插件挂载自动拉起）。
   // 端口被前序 tlmemory 实例占用时健康探测确认同名进程后自动复用；

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlmemory",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "license": "MIT",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
@@ -58,6 +58,7 @@
     "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
     "verify:drawer": "node scripts/measure-drawer.mjs",
     "smoke:client": "node scripts/smoke-client.mjs",
+    "preview:merge": "node scripts/merge-preview.mjs",
     "prepublishOnly": "pnpm run build"
   },
   "keywords": [

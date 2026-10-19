@@ -41,6 +41,7 @@ const FIELD_LABEL_KEYS: Record<string, string> = {
   maxRecallCount: 'field.maxRecallCount',
   enableAutoReflection: 'field.enableAutoReflection',
   compactionInterval: 'field.compactionInterval',
+  enableAutoMerge: 'field.enableAutoMerge',
 }
 
 /** 字段补充提示（schema 的 description 之外，面板额外要交代的操作语义） */
@@ -50,6 +51,7 @@ const FIELD_HINT_KEYS: Record<string, string> = {
   maxRecallCount: 'hint.maxRecallCount',
   enableAutoReflection: 'hint.enableAutoReflection',
   compactionInterval: 'hint.compactionInterval',
+  enableAutoMerge: 'hint.enableAutoMerge',
 }
 
 const zh: Record<string, string> = {
@@ -61,11 +63,13 @@ const zh: Record<string, string> = {
   'field.maxRecallCount': '单轮召回条数',
   'field.enableAutoReflection': '自动提炼记忆',
   'field.compactionInterval': '自动提炼间隔（轮）',
+  'field.enableAutoMerge': '自动归并相近记忆',
   'hint.dbPath': '留空则使用默认路径 ~/.dsh/tlmemory.db；首次启动自动建库建表。',
   'hint.serverPort': '记忆看板服务监听的本地端口（仅回环地址）。',
   'hint.maxRecallCount': '每轮对话最多注入几条相关记忆。',
   'hint.enableAutoReflection': '开启后，对话结束会后台提炼可复用的事实与偏好。',
   'hint.compactionInterval': '每累计多少轮对话触发一次后台提炼。',
+  'hint.enableAutoMerge': '把同一主题的多条短记忆折叠成一条摘要，原句保留在库里可回滚。',
   defaultText: '默认值',
   emptyText: '未设置',
   reset: '恢复默认',
@@ -95,11 +99,13 @@ const en: Record<string, string> = {
   'field.maxRecallCount': 'Recall limit per turn',
   'field.enableAutoReflection': 'Auto-distill memories',
   'field.compactionInterval': 'Auto-distill interval (turns)',
+  'field.enableAutoMerge': 'Auto-merge similar memories',
   'hint.dbPath': 'Leave blank to use ~/.dsh/tlmemory.db; the database and tables are created on first start.',
   'hint.serverPort': 'Loopback port serving the memory dashboard.',
   'hint.maxRecallCount': 'How many related memories may be injected into one turn.',
   'hint.enableAutoReflection': 'When enabled, reusable facts and preferences are distilled after a turn.',
   'hint.compactionInterval': 'Turns accumulated before a background distillation runs.',
+  'hint.enableAutoMerge': 'Fold same-topic short memories into one summary; originals stay recoverable.',
   defaultText: 'Default',
   emptyText: 'Not set',
   reset: 'Reset to default',

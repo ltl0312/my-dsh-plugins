@@ -10,6 +10,34 @@ import crypto from 'node:crypto'
 import { openDatabase, type SqlDatabase } from './sqlite.js'
 import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './types.js'
 
+/**
+ * 检索召回的状态过滤子句（唯一写法，FTS 与 LIKE 两条路径共用）。
+ *
+ * 为什么必须排除 'merged'：1.1.0 的记忆归并是**父子结构** —— 父节点承载摘要并正常
+ * 参与召回，来源叶子保留原文但被折叠。若叶子仍能被检索命中，同一结论会以
+ * 「摘要 + 若干原句」的形态重复注入系统提示词，归并反而放大噪音。
+ * 看板读取（getNodes*）不走这里，因此折叠条目在看板上依旧可见、可回滚。
+ */
+const MERGED_EXCLUDED_SQL = "n.status NOT IN ('pending', 'merged')"
+
+/** 归并候选：一条可被折叠的叶子（已排除 pin / pending / 已折叠 / 空内容） */
+export interface MergeCandidate {
+  id: string
+  tree_type: string
+  path: string
+  name: string
+  content: string
+  keywords: string
+}
+
+/** 一次归并的落库结果 */
+export interface MergeRecord {
+  mergeId: number
+  summaryNodeId: string
+  sourceIds: string[]
+  summary: string
+}
+
 /** 工程清单自愈维护的改动明细（供日志与测试断言） */
 export interface ProjectMaintenance {
   /** 被清理掉的工程 scope（含「零记忆工程」与「不属于宿主合法工作区的孤儿工程」） */
@@ -140,6 +168,12 @@ function parsePathSegments(input: unknown): string[] {
     .filter(Boolean)
 }
 
+/** 物化路径规范化：'a/b'、'/a/b'、'/a/b/' 统一成 '/a/b/'；空结果回退 '/未分类/' */
+function normalizeTreePath(input: unknown): string {
+  const segments = parsePathSegments(input)
+  return segments.length > 0 ? `/${segments.join('/')}/` : '/未分类/'
+}
+
 export class MemoryDB {
   private db: SqlDatabase
 
@@ -237,6 +271,26 @@ export class MemoryDB {
     if (!columns.includes('last_injected_at')) {
       this.db.exec('ALTER TABLE nodes ADD COLUMN last_injected_at INTEGER NOT NULL DEFAULT 0')
     }
+
+    // M2 记忆归并迁移（1.1.0）：父子结构 —— 父节点承载合并后的摘要并正常参与召回，
+    // 来源叶子保留原文但 status='merged'（退出召回），merged_into 指回父节点，
+    // merges 表记录一次归并的全部元数据以支持回滚。全部 IF NOT EXISTS / 补列，可重复执行。
+    if (!columns.includes('merged_into')) {
+      this.db.exec('ALTER TABLE nodes ADD COLUMN merged_into INTEGER')
+    }
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS merges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tree_type TEXT NOT NULL,
+        summary_node_id INTEGER NOT NULL,
+        source_ids TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        reverted_at INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_nodes_merged_into ON nodes(merged_into);
+    `)
   }
 
   /**
@@ -448,7 +502,7 @@ export class MemoryDB {
 
     // M1 待确认区隔离：pending 记忆不参与任何检索召回（切断脏记忆自我强化的
     // 注入通道）；看板的树读取（getNodes*）不受影响，由看板展示待确认徽标。
-    const where: string[] = ["memory_fts MATCH ?", "n.status <> 'pending'"]
+    const where: string[] = ["memory_fts MATCH ?", MERGED_EXCLUDED_SQL]
     const params: unknown[] = [matchQuery]
     if (treeType) {
       where.push('n.tree_type = ?')
@@ -492,7 +546,7 @@ export class MemoryDB {
     const like = `%${escapeLikePattern(cleanQuery)}%`
 
     // M1 待确认区隔离：与 FTS 路径一致，pending 不进 LIKE 兜底召回
-    const where: string[] = ['(n.name LIKE ? OR n.content LIKE ? OR n.keywords LIKE ?)', "n.status <> 'pending'"]
+    const where: string[] = ['(n.name LIKE ? OR n.content LIKE ? OR n.keywords LIKE ?)', MERGED_EXCLUDED_SQL]
     const params: unknown[] = [like, like, like]
     if (treeType) {
       where.push('n.tree_type = ?')
@@ -1341,6 +1395,198 @@ export class MemoryDB {
     return rows.map((row) => this.rowToNode(row))
   }
 
+  /**
+   * 归并候选全集（跨所有树）：只取「可折叠」的叶子 —— 已确认、未 pin、未折叠、内容非空。
+   * 折叠状态由 status='merged' 表达，因此这里用 `merged_into IS NULL` 之外还要排 status。
+   */
+  public listMergeCandidates(): MergeCandidate[] {
+    const rows = this.db
+      .prepare(`
+        SELECT id, tree_type, path, name, content, keywords FROM nodes
+        WHERE is_leaf = 1
+          AND status = 'confirmed'
+          AND merged_into IS NULL
+          AND is_pinned = 0
+          AND content IS NOT NULL AND content <> ''
+        ORDER BY tree_type ASC, path ASC, name ASC
+      `)
+      .all() as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      id: String(row.id),
+      tree_type: String(row.tree_type),
+      path: String(row.path),
+      name: String(row.name),
+      content: String(row.content),
+      keywords: row.keywords == null ? '' : String(row.keywords),
+    }))
+  }
+
+  /** 某棵树已存在的全部路径（去重），供提炼期做路径归一，避免继续制造近义路径 */
+  public listDistinctPaths(treeType: string): string[] {
+    const rows = this.db
+      .prepare('SELECT DISTINCT path FROM nodes WHERE tree_type = ? ORDER BY path ASC')
+      .all(treeType) as Array<{ path: string }>
+    return rows.map((row) => String(row.path))
+  }
+
+  /** 归并审计记录（按时间倒序）；reverted_at 非空表示该次归并已被撤销 */
+  public listMergeRecords(limit = 20): Array<{
+    id: number
+    tree_type: string
+    summary_node_id: number
+    source_ids: string[]
+    summary: string
+    created_at: number
+    reverted_at: number | null
+  }> {
+    const rows = this.db
+      .prepare('SELECT * FROM merges ORDER BY id DESC LIMIT ?')
+      .all(Math.max(1, Math.trunc(limit))) as Array<Record<string, unknown>>
+    return rows.map((row) => {
+      let ids: string[] = []
+      try {
+        const parsed: unknown = JSON.parse(String(row.source_ids ?? '[]'))
+        if (Array.isArray(parsed)) ids = parsed.map((id) => String(id))
+      } catch {
+        ids = []
+      }
+      return {
+        id: Number(row.id),
+        tree_type: String(row.tree_type),
+        summary_node_id: Number(row.summary_node_id),
+        source_ids: ids,
+        summary: String(row.summary ?? ''),
+        created_at: Number(row.created_at ?? 0),
+        reverted_at: row.reverted_at == null ? null : Number(row.reverted_at),
+      }
+    })
+  }
+
+  /**
+   * 执行一次归并（父子结构）：
+   *   1. 校验全部来源 id 都是「同树、已确认、未折叠、未 pin」的叶子 —— 任一不满足则整次放弃；
+   *   2. 插入父节点（is_leaf=1，正常参与召回），路径取簇内公共路径；
+   *   3. 来源叶子置 status='merged' + merged_into=父节点 id（原文保留，退出召回）；
+   *   4. 写 merges 审计行。
+   * 全程单事务：不允许「父节点已建、来源未折叠」的中间态。
+   */
+  public applyMerge(input: {
+    treeType: string
+    path: string
+    name: string
+    summary: string
+    keywords: string
+    sourceIds: string[]
+    reinforceCount?: number
+  }): MergeRecord | null {
+    const ids = [...new Set(input.sourceIds.map((id) => Number(id)).filter((n) => Number.isInteger(n) && n > 0))]
+    if (ids.length < 2) return null
+    const summary = String(input.summary ?? '').trim()
+    if (summary.length < 4) return null
+
+    const placeholders = ids.map(() => '?').join(', ')
+    const rows = this.db
+      .prepare(
+        `SELECT id, tree_type, status, merged_into, is_pinned, is_leaf FROM nodes WHERE id IN (${placeholders})`,
+      )
+      .all(...ids) as Array<Record<string, unknown>>
+    if (rows.length !== ids.length) return null
+    for (const row of rows) {
+      if (String(row.tree_type) !== input.treeType) return null
+      if (String(row.status) !== 'confirmed') return null
+      if (Number(row.is_leaf) !== 1) return null
+      if (Number(row.is_pinned) !== 0) return null
+      if (row.merged_into != null) return null
+    }
+
+    const now = Date.now()
+    const parentPath = normalizeTreePath(input.path)
+    const reinforce = Math.max(1, Math.trunc(input.reinforceCount ?? ids.length))
+
+    return this.withTransaction(() => {
+      // 目录链先落地（复用既有目录行），父节点挂到链尾 —— 与看板树渲染的
+      // parent_id 契约保持一致，避免摘要节点成为「路径在树上、节点却无父」的孤儿。
+      let parentId: number | null = null
+      let walked = ''
+      for (const seg of parsePathSegments(parentPath)) {
+        walked += `/${seg}`
+        parentId = this.ensureDirectory(input.treeType, parentId, `${walked}/`, seg, 'auto')
+      }
+
+      // 同名同路径冲突（父节点名与既有叶子撞名）时追加序号，绝不覆盖既有记忆
+      let name = String(input.name ?? '').trim() || '归并摘要'
+      const exists = this.db.prepare('SELECT 1 FROM nodes WHERE tree_type = ? AND path = ? AND name = ?')
+      let suffix = 1
+      while (exists.get(input.treeType, parentPath, name) !== undefined) {
+        suffix += 1
+        name = `${String(input.name ?? '归并摘要').trim() || '归并摘要'}（归并${suffix}）`
+        if (suffix > 50) return null
+      }
+
+      const inserted = this.db
+        .prepare(`
+          INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0, 'auto', 'confirmed', ?, ?)
+        `)
+        .run(input.treeType, parentId, parentPath, name, summary, input.keywords ?? '', reinforce, now, now)
+      const summaryNodeId = Number(inserted.lastInsertRowid)
+
+      const fold = this.db.prepare("UPDATE nodes SET status = 'merged', merged_into = ?, updated_at = ? WHERE id = ?")
+      for (const id of ids) fold.run(summaryNodeId, now, id)
+
+      const mergeInsert = this.db
+        .prepare(
+          'INSERT INTO merges (tree_type, summary_node_id, source_ids, summary, created_at) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(input.treeType, summaryNodeId, JSON.stringify(ids), summary, now)
+
+      return {
+        mergeId: Number(mergeInsert.lastInsertRowid),
+        summaryNodeId: String(summaryNodeId),
+        sourceIds: ids.map((id) => String(id)),
+        summary,
+      }
+    })
+  }
+
+  /**
+   * 撤销一次归并：来源叶子恢复 confirmed、解除 merged_into，父节点删除（含 FTS 行，
+   * 由 AFTER DELETE 触发器维护）。merges 行保留并写 reverted_at 作为审计痕迹。
+   * @returns 恢复的叶子数；记录不存在 / 已撤销过时返回 null
+   */
+  public revertMerge(mergeId: number): { restored: number; removedSummary: boolean } | null {
+    const id = Number(mergeId)
+    if (!Number.isInteger(id) || id <= 0) return null
+    const record = this.db.prepare('SELECT * FROM merges WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined
+    if (record === undefined || record.reverted_at != null) return null
+
+    let sourceIds: number[] = []
+    try {
+      const parsed: unknown = JSON.parse(String(record.source_ids ?? '[]'))
+      if (Array.isArray(parsed)) sourceIds = parsed.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0)
+    } catch {
+      sourceIds = []
+    }
+    const summaryNodeId = Number(record.summary_node_id)
+    const now = Date.now()
+
+    return this.withTransaction(() => {
+      const restore = this.db.prepare(
+        "UPDATE nodes SET status = 'confirmed', merged_into = NULL, updated_at = ? WHERE id = ? AND status = 'merged'",
+      )
+      let restored = 0
+      for (const sid of sourceIds) {
+        const result = restore.run(now, sid)
+        restored += Number(result.changes ?? 0)
+      }
+      const removed = this.db.prepare('DELETE FROM nodes WHERE id = ?').run(summaryNodeId)
+      this.db.prepare('UPDATE merges SET reverted_at = ? WHERE id = ?').run(now, id)
+      return { restored, removedSummary: Number(removed.changes ?? 0) > 0 }
+    })
+  }
+
   public close(): void {
     if (this.db.open) this.db.close()
   }
@@ -1362,6 +1608,7 @@ export class MemoryDB {
       // 缺省 0 而非 Date.now()：读不到该列（旧库/旧副本）时必须表现为「未观测到注入」，
       // 绝不能凭空造出一个「刚刚注入过」的时间戳 —— 那会让检测器误判注入生效。
       last_injected_at: Number(row.last_injected_at ?? 0),
+      merged_into: row.merged_into == null ? null : Number(row.merged_into),
       created_at: Number(row.created_at ?? 0),
       updated_at: Number(row.updated_at ?? 0),
     }

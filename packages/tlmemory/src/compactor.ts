@@ -59,6 +59,10 @@ export class MemoryCompactor {
      * 固化进实例（本仓库 0.8.2 的白名单事故同型）。
      */
     private interval: number | (() => number) = 20,
+    /** 归并执行器（缺省表示不启用归并，单测与嵌入式用法不受影响） */
+    private consolidator?: { consolidate: () => Promise<{ applied: Array<{ sourceIds: string[] }> }> },
+    /** 自动归并开关读取器（Config.enableAutoMerge） */
+    private mergeEnabled?: () => boolean,
   ) {}
 
   /** 当前阈值：支持运行期动态读取，非法值兜底为 1（至少每次沉淀都检查） */
@@ -106,7 +110,29 @@ export class MemoryCompactor {
       this.ctx.logger?.warn?.('[tlmemory] compaction 矛盾检测异常（已跳过）:', (err as Error)?.message ?? err)
     }
 
+    // 记忆归并（1.1.0）：把「同一结论被切成多条一句话」的叶子折叠成一条摘要。
+    // 归并比矛盾检测更贵（一次 LLM 归纳 + 写库），因此排在最后；失败一律静默跳过，
+    // 衰减与矛盾检测的成果不受影响。开关在运行期读取（设置页改完即时生效）。
+    try {
+      if (this.consolidator !== undefined && this.mergeEnabledNow()) {
+        const report = await this.consolidator.consolidate()
+        const folded = report.applied.reduce((sum, record) => sum + record.sourceIds.length, 0)
+        if (report.applied.length > 0) {
+          this.ctx.logger?.info?.(`[tlmemory] 记忆归并：合并 ${report.applied.length} 簇 / 折叠 ${folded} 条`)
+        }
+      }
+    } catch (err) {
+      this.ctx.logger?.warn?.('[tlmemory] 记忆归并异常（已跳过）:', (err as Error)?.message ?? err)
+    }
+
     this.lastCompactionAt = startedAt
+  }
+
+  /** 归并开关：运行期回读配置，非法/缺省视为开启（与 CONFIG_DEFAULTS 一致） */
+  private mergeEnabledNow(): boolean {
+    const resolver = this.mergeEnabled
+    if (resolver === undefined) return true
+    return resolver() !== false
   }
 
   /**

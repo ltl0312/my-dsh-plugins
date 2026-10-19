@@ -90,7 +90,8 @@ export const REFLECTION_SYSTEM_PROMPT = `你是一个软件工程经验沉淀引
    - 系统校验：tree = "global" 但 tree_basis 缺失或不为 "cross-project-preference" 的条目，一律按 project 落库。
 4. 文本压缩约束：
    - content 字段必须是提炼后的原子断言或操作约束，严禁输出代码块或情绪化长文。
-   - 字符长度严格限制在 40 至 80 个中文字符以内。
+   - 字符长度限制在 60 至 200 个中文字符以内：**不要把一条结论拆成多条**。
+   - 同一结论的多个要点用中文分号「；」串联，最多 4 个要点（例如「服务仅绑 127.0.0.1；对外统一经 Nginx 反代；禁止直连公网」）。
 5. 路径分段（path_segments）通常包含 2 至 3 级中文分类名（例如 ["技术选型", "构建工具"] 或 ["用户偏好", "编码风格"]）。
 
 【输出格式】
@@ -126,6 +127,12 @@ const MAX_REFLECTIONS_PER_TURN = 5
 /** P2-5 相似沉淀去重的名称相似度阈值（Dice 系数，0~1）：≥该值视为同一经验，走强化覆盖 */
 export const DEDUP_NAME_OVERLAP = 0.5
 
+/** 单条记忆断言的字数上限（1.1.0：80 → 200，配合「多个要点用；串联」） */
+export const MAX_REFLECTION_CHARS = 200
+
+/** 路径段近义阈值：同深度的已有路径逐段 Dice 均 ≥ 该值时复用该路径（与 consolidator 同口径） */
+export const PATH_REUSE_FLOOR = 0.55
+
 /**
  * M1 待确认区下限：名称与既有叶子的相似度落在 [0.3, 0.5) 区间时，疑似
  * 「同义新条」—— 不直接入库（confirmed），降级为 pending 待确认区，
@@ -160,6 +167,37 @@ export function nameSimilarity(a: string, b: string): number {
     if (gb.has(gram)) intersection += 1
   }
   return (2 * intersection) / (ga.size + gb.size)
+}
+
+/**
+ * 路径段相似度：字符二元组 Dice 系数，**不做「互为子串即 1」短路**。
+ * 与 nameSimilarity 的差别是刻意的 —— 路径段是分类名，「部署」与「部署运维」判成
+ * 同义会把不同层级的目录并成一个，而名称去重里子串短路是为了抓「同名前缀」。
+ */
+export function segmentDice(a: string, b: string): number {
+  const left = String(a ?? '')
+  const right = String(b ?? '')
+  if (left === right) return 1
+  if (!left || !right) return 0
+  const bigrams = (value: string): string[] => {
+    const out: string[] = []
+    for (let i = 0; i < value.length - 1; i++) out.push(value.slice(i, i + 2))
+    return out
+  }
+  const ga = bigrams(left)
+  const gb = bigrams(right)
+  if (ga.length === 0 || gb.length === 0) return 0
+  const counts = new Map<string, number>()
+  for (const gram of ga) counts.set(gram, (counts.get(gram) ?? 0) + 1)
+  let hit = 0
+  for (const gram of gb) {
+    const remaining = counts.get(gram) ?? 0
+    if (remaining > 0) {
+      hit += 1
+      counts.set(gram, remaining - 1)
+    }
+  }
+  return (2 * hit) / (ga.length + gb.length)
 }
 
 /** 第一重门禁：启发式过滤网关，丢弃寒暄客套与长度不足的文本 */
@@ -502,6 +540,33 @@ export class MemoryExtractor {
     }
   }
 
+  /**
+   * 路径归一（1.1.0）：新条目若与同树既有路径**逐段近义**（同深度、逐段 Dice ≥ 0.6），
+   * 直接复用既有路径分段 —— 不再制造「部署运维 / 部署与运维」这类近义兄弟路径。
+   *
+   * 只做归一、不做新建：没有任何近义既有路径时原样返回模型给的分段。
+   * 失败静默回退（路径归一属于质量优化，不允许阻断入库）。
+   */
+  private reuseExistingPath(treeType: string, segments: string[]): string[] {
+    try {
+      const existing = this.db.listDistinctPaths(treeType)
+      if (existing.length === 0) return segments
+      const target = `/${segments.join('/')}/`
+      for (const candidate of existing) {
+        if (candidate === target) return segments
+        const parts = candidate.split('/').filter(Boolean)
+        if (parts.length !== segments.length) continue
+        if (parts.every((part, index) => segmentDice(part, segments[index]) >= PATH_REUSE_FLOOR)) {
+          traceExtract(`path-reuse: ${target} ⇒ ${candidate}`)
+          return parts
+        }
+      }
+    } catch {
+      // 忽略：归一失败不阻断入库
+    }
+    return segments
+  }
+
   private passesEitherGate(userText: string, assistantText: string): boolean {
     return passesFilterGate(userText) || passesFilterGate(assistantText)
   }
@@ -509,8 +574,9 @@ export class MemoryExtractor {
   private processSingleReflection(item: RawReflectionItem, projectScope: string): void {
     if (!item.content || !item.name) return
 
-    // 第三重门禁：物理级原子化硬截断，单条断言不允许超过 80 字
-    const boundedContent = boundContent(item.content)
+    // 第三重门禁：物理级硬截断，单条断言上限 200 字（1.1.0 由 80 放宽 —— 80 字
+    // 只够写一句，实测把「服务规约」这类结论切成 4 条近义记忆，是记忆碎片的直接来源）
+    const boundedContent = boundContent(item.content, MAX_REFLECTION_CHARS)
     if (boundedContent.length < 4) return
 
     // v0.8.2 写路径作用域闸门（确定性兜底，零成本）：global 是**需要证据**的例外，
@@ -531,7 +597,7 @@ export class MemoryExtractor {
       )
     }
 
-    const cleanSegments = sanitizePathSegments(item.path_segments)
+    const cleanSegments = this.reuseExistingPath(targetTreeType, sanitizePathSegments(item.path_segments))
     const cleanName = sanitizeName(item.name)
 
     const cleanKeywords = Array.isArray(item.keywords)

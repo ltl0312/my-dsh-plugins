@@ -75,7 +75,7 @@ maybeDescribe('产物契约（打包器改写 node: 前缀的回归护栏）', (
   //   1) Config 必须仍有 toJSON（dsh-settings/lib/index.js:538-541 会检查）；
   //   2) 每个字段必须带 meta.volatile = true（同文件 :122-131 只收 volatile 叶子，
   //      :153-158 写入时逐路径复核）。打包器如果把 meta 合并丢了，源码测试看不出来。
-  it('产物导出的 Config 可 toJSON，且五个字段都带 volatile 标记', async () => {
+  it('产物导出的 Config 可 toJSON，且六个字段都带 volatile 标记', async () => {
     const mod = (await import(pathToFileURL(esmFile).href)) as Record<string, unknown>
     const Config = mod.Config as { toJSON?: () => unknown } | undefined
     expect(typeof Config?.toJSON, 'ESM 产物必须导出带 toJSON 的 Config').toBe('function')
@@ -86,7 +86,7 @@ maybeDescribe('产物契约（打包器改写 node: 前缀的回归护栏）', (
     const root = json.refs[String(json.uid)]
     const dict = root?.dict ?? {}
     expect(Object.keys(dict).sort()).toEqual(
-      ['compactionInterval', 'dbPath', 'enableAutoReflection', 'maxRecallCount', 'serverPort'].sort(),
+      ['compactionInterval', 'dbPath', 'enableAutoMerge', 'enableAutoReflection', 'maxRecallCount', 'serverPort'].sort(),
     )
     for (const [key, uid] of Object.entries(dict)) {
       expect(json.refs[String(uid)]?.meta?.volatile, `产物里的字段 ${key} 必须 volatile`).toBe(true)
