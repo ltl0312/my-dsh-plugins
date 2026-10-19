@@ -105,7 +105,7 @@ console.log('\n[2/4] 工厂返回 apply / inject')
 const mod = entry.factory(requireStub)
 assert(typeof mod.apply === 'function', 'apply 是函数')
 assert(
-  JSON.stringify(mod.inject) === JSON.stringify(['slots', 'locale', 'remote']),
+  JSON.stringify(mod.inject) === JSON.stringify(['slots', 'locale', 'remote', 'remote.settings']),
   `inject = ${JSON.stringify(mod.inject)}`,
 )
 
