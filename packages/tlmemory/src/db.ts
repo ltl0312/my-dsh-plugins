@@ -17,8 +17,37 @@ import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './
  * 参与召回，来源叶子保留原文但被折叠。若叶子仍能被检索命中，同一结论会以
  * 「摘要 + 若干原句」的形态重复注入系统提示词，归并反而放大噪音。
  * 看板读取（getNodes*）不走这里，因此折叠条目在看板上依旧可见、可回滚。
+ *
+ * 1.3.0 起还要排除 'superseded'：矛盾检测不再把旧结论降入「待确认区」（那需要人审），
+ * 而是**自动淘汰** —— 旧条目保留原文、退出召回，并记下取代它的新条目 id。
  */
-const MERGED_EXCLUDED_SQL = "n.status NOT IN ('pending', 'merged')"
+const MERGED_EXCLUDED_SQL = "n.status NOT IN ('pending', 'merged', 'superseded')"
+
+/**
+ * 目录名近义度（二元组 Dice），与 `extractor.segmentDice` 同一口径：
+ * **不短路子串包含** —— 「部署」与「部署运维」不该因为包含关系就被判成同义，
+ * 否则 `/部署/` 会把 `/部署运维/` 整棵子树吞掉。
+ */
+function segmentDice(left: string, right: string): number {
+  const a = left.trim().toLowerCase()
+  const b = right.trim().toLowerCase()
+  if (!a || !b) return 0
+  if (a === b) return 1
+  const grams = (text: string): Map<string, number> => {
+    const out = new Map<string, number>()
+    for (let i = 0; i < text.length - 1; i++) {
+      const gram = text.slice(i, i + 2)
+      out.set(gram, (out.get(gram) ?? 0) + 1)
+    }
+    return out
+  }
+  const ga = grams(a)
+  const gb = grams(b)
+  let overlap = 0
+  for (const [gram, count] of ga) overlap += Math.min(count, gb.get(gram) ?? 0)
+  const total = Math.max(1, a.length - 1) + Math.max(1, b.length - 1)
+  return (2 * overlap) / total
+}
 
 /** 归并候选：一条可被折叠的叶子（已排除 pin / pending / 已折叠 / 空内容） */
 export interface MergeCandidate {
@@ -1319,6 +1348,56 @@ export class MemoryDB {
   }
 
   /**
+   * 自动淘汰：旧结论被新结论推翻时，不再进「待确认区」等人审，而是直接退出召回。
+   *
+   * 语义与归并（merged）区分开：merged 是「多条合成一条摘要」，superseded 是
+   * 「这一条被那一条取代」。两者都保留原文、看板可见，`merged_into` 记录取代者 id，
+   * 因此可以逐条 `restoreSuperseded` 回滚，不需要人工审核环节。
+   *
+   * 自我取代、跨树取代、id 非法一律拒绝（返回 false），避免把记忆写成环或串树。
+   */
+  public supersede(oldId: string, newId: string, reason?: string): boolean {
+    const oldNumeric = Number(oldId)
+    const newNumeric = Number(newId)
+    if (!Number.isInteger(oldNumeric) || oldNumeric <= 0) return false
+    if (!Number.isInteger(newNumeric) || newNumeric <= 0) return false
+    if (oldNumeric === newNumeric) return false
+    const oldNode = this.db.prepare('SELECT tree_type, status FROM nodes WHERE id = ?').get(oldNumeric) as
+      | { tree_type: string; status: string }
+      | undefined
+    const newNode = this.db.prepare('SELECT tree_type FROM nodes WHERE id = ?').get(newNumeric) as
+      | { tree_type: string }
+      | undefined
+    if (oldNode === undefined || newNode === undefined) return false
+    if (oldNode.tree_type !== newNode.tree_type) return false
+    if (oldNode.status === 'merged' || oldNode.status === 'superseded') return false
+    this.db
+      .prepare("UPDATE nodes SET status = 'superseded', merged_into = ?, updated_at = ? WHERE id = ?")
+      .run(newNumeric, Date.now(), oldNumeric)
+    if (reason !== undefined && reason.trim()) {
+      this.db
+        .prepare('INSERT INTO merges (tree_type, summary_node_id, source_ids, summary, created_at, reverted_at) VALUES (?,?,?,?,?,NULL)')
+        .run(oldNode.tree_type, newNumeric, JSON.stringify([oldNumeric]), reason.trim(), Date.now())
+    }
+    return true
+  }
+
+  /** 撤销自动淘汰：恢复 confirmed 与召回资格（`merges` 审计行同时标记已回滚） */
+  public restoreSuperseded(id: string): boolean {
+    const numericId = Number(id)
+    if (!Number.isInteger(numericId) || numericId <= 0) return false
+    const row = this.db.prepare('SELECT status, merged_into FROM nodes WHERE id = ?').get(numericId) as
+      | { status: string; merged_into: number | null }
+      | undefined
+    if (row === undefined || row.status !== 'superseded') return false
+    this.db.prepare("UPDATE nodes SET status = 'confirmed', merged_into = NULL, updated_at = ? WHERE id = ?").run(Date.now(), numericId)
+    this.db
+      .prepare("UPDATE merges SET reverted_at = ? WHERE reverted_at IS NULL AND source_ids = ?")
+      .run(Date.now(), JSON.stringify([numericId]))
+    return true
+  }
+
+  /**
    * 召回强化：命中的记忆叶子断言计数 +1（记忆被检索调用即视为被强化）。
    * 供召回引擎在最终命中集合上调用；非法 id 自动过滤，全非法输入零开销返回。
    */
@@ -1585,6 +1664,86 @@ export class MemoryDB {
       this.db.prepare('UPDATE merges SET reverted_at = ? WHERE id = ?').run(now, id)
       return { restored, removedSummary: Number(removed.changes ?? 0) > 0 }
     })
+  }
+
+  /**
+   * 自动进化 · 目录层归并：同一父目录下、名字近义的两个目录合成一个。
+   *
+   * 为什么需要：记忆沉淀时路径由模型给出，同一主题会被切成 `/部署运维/` 与
+   * `/运维部署/`、`/配置/` 与 `/配置规约/` 这样的近义兄弟目录，树越用越散。
+   * 归并只是**改挂父节点 + 重写子树路径**，不动任何 content，也不产生新节点，
+   * 因此零 LLM 成本、可重复执行、随时可由用户手工再拆开。
+   *
+   * 冲突处理：目标目录下已存在同名子目录时跳过该对，避免把两棵同名子树叠在一起
+   * 触发 `UNIQUE (tree_type, path, name)`。
+   */
+  public mergeSimilarDirectories(floor = 0.55): { mergedDirs: number; movedNodes: number } {
+    interface DirRow {
+      id: number
+      tree_type: string
+      parent_id: number | null
+      path: string
+      name: string
+    }
+    const dirs = this.db
+      .prepare('SELECT id, tree_type, parent_id, path, name FROM nodes WHERE is_leaf = 0')
+      .all() as unknown as DirRow[]
+    if (dirs.length === 0) return { mergedDirs: 0, movedNodes: 0 }
+
+    const groups = new Map<string, DirRow[]>()
+    for (const dir of dirs) {
+      const key = `${dir.tree_type}\u0000${dir.parent_id ?? 'root'}`
+      const list = groups.get(key)
+      if (list === undefined) groups.set(key, [dir])
+      else list.push(dir)
+    }
+
+    const countUnder = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM nodes WHERE tree_type = ? AND path LIKE ? || '%'",
+    )
+    const sizeOf = (dir: DirRow): number =>
+      Number((countUnder.get(dir.tree_type, dir.path) as { n: number } | undefined)?.n ?? 0)
+
+    let mergedDirs = 0
+    let movedNodes = 0
+    for (const list of groups.values()) {
+      if (list.length < 2) continue
+      const ordered = [...list].sort((a, b) => sizeOf(b) - sizeOf(a) || a.id - b.id)
+      const consumed = new Set<number>()
+      for (let i = 0; i < ordered.length; i++) {
+        const target = ordered[i]
+        if (consumed.has(target.id)) continue
+        for (let j = i + 1; j < ordered.length; j++) {
+          const source = ordered[j]
+          if (consumed.has(source.id)) continue
+          if (segmentDice(target.name, source.name) < floor) continue
+          const clash = this.db
+            .prepare('SELECT 1 AS ok FROM nodes WHERE tree_type = ? AND path = ? AND name = ? AND is_leaf = 0')
+            .get(target.tree_type, target.path, source.name)
+          if (clash !== undefined) continue
+
+          // 把 source 子树整体重挂到 target.path 下：路径前缀替换即可。
+          // 注意叶子节点的 path 就是「所在目录」的路径（与目录节点同值），
+          // 所以这里必须做**前缀替换**而不是拼接 source 名字，否则会拼出
+          // `/部署运维/部署与运维/` 这种指向已删除目录的悬空路径。
+          const oldPrefix = source.path
+          const newPrefix = target.path
+          const moved = this.db
+            .prepare(
+              'UPDATE nodes SET path = ? || substr(path, ?) WHERE tree_type = ? AND path LIKE ? || \'%\'',
+            )
+            .run(newPrefix, oldPrefix.length + 1, source.tree_type, oldPrefix)
+          this.db
+            .prepare('UPDATE nodes SET parent_id = ? WHERE tree_type = ? AND parent_id = ?')
+            .run(target.id, source.tree_type, source.id)
+          this.db.prepare('DELETE FROM nodes WHERE id = ?').run(source.id)
+          consumed.add(source.id)
+          mergedDirs += 1
+          movedNodes += Number(moved.changes ?? 0)
+        }
+      }
+    }
+    return { mergedDirs, movedNodes }
   }
 
   public close(): void {

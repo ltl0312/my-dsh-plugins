@@ -31,7 +31,15 @@ function makeView(overrides: Partial<NamespaceView> = {}): NamespaceView {
     ns: SETTINGS_NS,
     revision: 3,
     schema: projection,
-    value: { serverPort: 4890, maxRecallCount: 5, enableAutoReflection: true, compactionInterval: 20, enableAutoMerge: true },
+    value: {
+      serverPort: 4890,
+      maxRecallCount: 5,
+      enableAutoReflection: true,
+      compactionInterval: 20,
+      enableAutoMerge: true,
+      enableAutoEvolve: true,
+      requireReview: false,
+    },
     base: {},
     user: {},
     ...overrides,
@@ -67,7 +75,7 @@ describe('pickNamespace（命名空间定位）', () => {
 })
 
 describe('fieldsFromView（schema 投影 → 表单字段）', () => {
-  it('六个字段按 schema 顺序投影，类型与默认值正确', () => {
+  it('八个字段按 schema 顺序投影，类型与默认值正确', () => {
     const fields = fieldsFromView(makeView())
     expect(fields.map((field) => field.key)).toEqual([
       'dbPath',
@@ -76,6 +84,8 @@ describe('fieldsFromView（schema 投影 → 表单字段）', () => {
       'enableAutoReflection',
       'compactionInterval',
       'enableAutoMerge',
+      'enableAutoEvolve',
+      'requireReview',
     ])
     const byKey = new Map(fields.map((field) => [field.key, field]))
     expect(byKey.get('serverPort')).toMatchObject({ type: 'number', value: '4890', defaultText: '4890' })
@@ -212,7 +222,7 @@ describe('SettingsPanelController（状态机 + 乐观并发）', () => {
     expect(snapshot.ns).toBe(SETTINGS_NS)
     expect(snapshot.revision).toBe(3)
     expect(snapshot.writable).toBe(true)
-    expect(snapshot.fields).toHaveLength(6)
+    expect(snapshot.fields).toHaveLength(8)
     expect(snapshot.dirty).toBe(false)
     expect(snapshot.busy).toBe(false)
   })

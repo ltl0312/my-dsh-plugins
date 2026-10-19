@@ -93,7 +93,7 @@ describe('M3：矛盾检测（LLM 摊薄）', () => {
     db.close()
   })
 
-  it('互斥旧条目被降级为 pending（待确认区，退出召回），新条目保持 confirmed', async () => {
+  it('互斥旧条目被自动淘汰为 superseded（退出召回），新条目保持 confirmed', async () => {
     // compactor 先构造（确定本批窗口起点），再种入「早已存在的旧记忆」
     const compactor = new MemoryCompactor(makeCtx(''), db, 1)
     await seedOldNode(db, '包管理器选型', '本项目统一使用 npm 管理全部依赖')
@@ -121,9 +121,10 @@ describe('M3：矛盾检测（LLM 摊薄）', () => {
     ;(compactor as unknown as { ctx: Context }).ctx = makeCtx(llmOutput)
     await compactor.compact()
 
-    expect(db.getNode(oldId)!.status).toBe('pending')
+    // 默认零审核：旧结论直接被新结论取代（superseded），不进待确认区
+    expect(db.getNode(oldId)!.status).toBe('superseded')
     expect(db.getNode(newNode.id)!.status).toBe('confirmed')
-    // pending 退出召回
+    // superseded 同样退出召回
     expect(db.search('npm 管理全部依赖', { treeType: 'repo:p2t' }).map((h) => h.id)).not.toContain(oldId)
   })
 

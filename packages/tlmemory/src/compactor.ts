@@ -63,6 +63,10 @@ export class MemoryCompactor {
     private consolidator?: { consolidate: () => Promise<{ applied: Array<{ sourceIds: string[] }> }> },
     /** 自动归并开关读取器（Config.enableAutoMerge） */
     private mergeEnabled?: () => boolean,
+    /** 是否保留人审（Config.requireReview）：关闭时矛盾直接淘汰旧条目，不进待确认区 */
+    private reviewEnabled?: () => boolean,
+    /** 自动进化开关读取器（Config.enableAutoEvolve）：目录层近义合并 */
+    private evolveEnabled?: () => boolean,
   ) {}
 
   /** 当前阈值：支持运行期动态读取，非法值兜底为 1（至少每次沉淀都检查） */
@@ -104,10 +108,29 @@ export class MemoryCompactor {
     try {
       const conflicts = await this.detectConflicts()
       if (conflicts > 0) {
-        this.ctx.logger?.info?.(`[tlmemory] compaction 矛盾检测：${conflicts} 条旧记忆因与新结论互斥降入待确认区`)
+        this.ctx.logger?.info?.(
+          this.reviewEnabledNow()
+            ? `[tlmemory] compaction 矛盾检测：${conflicts} 条旧记忆因与新结论互斥降入待确认区`
+            : `[tlmemory] compaction 自动淘汰：${conflicts} 条旧记忆被新结论取代（已退出召回，可回滚）`,
+        )
       }
     } catch (err) {
       this.ctx.logger?.warn?.('[tlmemory] compaction 矛盾检测异常（已跳过）:', (err as Error)?.message ?? err)
+    }
+
+    // 自动进化（1.3.0）：目录层近义合并（`/部署运维/` ↔ `/运维部署/`）。
+    // 纯确定性、零 LLM 成本，放在 LLM 环节之前，失败也不影响后续步骤。
+    try {
+      if (this.evolveEnabledNow()) {
+        const evolved = this.db.mergeSimilarDirectories()
+        if (evolved.mergedDirs > 0) {
+          this.ctx.logger?.info?.(
+            `[tlmemory] 记忆进化：合并近义目录 ${evolved.mergedDirs} 个 / 迁移节点 ${evolved.movedNodes} 条`,
+          )
+        }
+      }
+    } catch (err) {
+      this.ctx.logger?.warn?.('[tlmemory] 记忆进化异常（已跳过）:', (err as Error)?.message ?? err)
     }
 
     // 记忆归并（1.1.0）：把「同一结论被切成多条一句话」的叶子折叠成一条摘要。
@@ -133,6 +156,28 @@ export class MemoryCompactor {
     const resolver = this.mergeEnabled
     if (resolver === undefined) return true
     return resolver() !== false
+  }
+
+  /** 人审开关：缺省关闭（1.3.0 起「自动进化、不审核」是默认行为） */
+  private reviewEnabledNow(): boolean {
+    const resolver = this.reviewEnabled
+    if (resolver === undefined) return false
+    try {
+      return resolver() === true
+    } catch {
+      return false
+    }
+  }
+
+  /** 自动进化开关：缺省开启 */
+  private evolveEnabledNow(): boolean {
+    const resolver = this.evolveEnabled
+    if (resolver === undefined) return true
+    try {
+      return resolver() !== false
+    } catch {
+      return true
+    }
   }
 
   /**
@@ -185,10 +230,17 @@ export class MemoryCompactor {
         (candidate) => candidate.oldNode.id === conflict.old_id && candidate.newNode.id === conflict.new_id,
       )
       if (pair === undefined) continue
-      if (this.db.setStatus(pair.oldNode.id, 'pending')) {
+      // 默认（requireReview=false）直接自动淘汰：旧结论退出召回、保留原文、
+      // 记下取代者，可逐条回滚。只有显式开人审时才降入待确认区。
+      const applied = this.reviewEnabledNow()
+        ? this.db.setStatus(pair.oldNode.id, 'pending')
+        : this.db.supersede(pair.oldNode.id, pair.newNode.id, conflict.reason)
+      if (applied) {
         demoted += 1
         this.ctx.logger?.info?.(
-          `[tlmemory] 记忆互斥降级待确认 [${pair.oldNode.tree_type}]: ${pair.oldNode.path}${pair.oldNode.name} ← ${conflict.reason ?? '与新结论冲突'}（新条目: ${pair.newNode.path}${pair.newNode.name}）`,
+          this.reviewEnabledNow()
+            ? `[tlmemory] 记忆互斥降级待确认 [${pair.oldNode.tree_type}]: ${pair.oldNode.path}${pair.oldNode.name} ← ${conflict.reason ?? '与新结论冲突'}（新条目: ${pair.newNode.path}${pair.newNode.name}）`
+            : `[tlmemory] 记忆自动淘汰 [${pair.oldNode.tree_type}]: ${pair.oldNode.path}${pair.oldNode.name} ← ${conflict.reason ?? '与新结论冲突'}（取代者: ${pair.newNode.path}${pair.newNode.name}）`,
         )
       }
     }

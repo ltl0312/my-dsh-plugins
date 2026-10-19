@@ -36,6 +36,16 @@ export interface Config {
    * 归并产物是父子结构且可回滚（merges 表 + revert），因此默认开启。
    */
   enableAutoMerge?: boolean
+  /**
+   * 自动进化开关（1.3.0）：开启后每轮 compaction 还会把同一父目录下的近义目录
+   * （`/部署运维/` ↔ `/运维部署/`）合并成一棵，纯确定性、零 LLM 成本、可回滚。
+   */
+  enableAutoEvolve?: boolean
+  /**
+   * 人审开关（1.3.0）：默认 **false** —— 沉淀直接入库、矛盾自动淘汰，全程无审核。
+   * 打开后恢复老行为：疑似指令式规则 / 近似重复进「待确认区」，矛盾旧条降级待确认。
+   */
+  requireReview?: boolean
 }
 
 /** 各数值/布尔字段的默认值（与 schema.default 保持一致，供读取端兜底） */
@@ -45,6 +55,8 @@ export const CONFIG_DEFAULTS = {
   enableAutoReflection: true,
   compactionInterval: 20,
   enableAutoMerge: true,
+  enableAutoEvolve: true,
+  requireReview: false,
 } as const
 
 /** 未配置 dbPath 时 MemoryDB 实际使用的路径（仅用于日志与文档，不写入 schema 默认值） */
@@ -98,6 +110,16 @@ export const Config: Schema<Config> = Schema.object({
     Schema.boolean()
       .default(CONFIG_DEFAULTS.enableAutoMerge)
       .description('是否把同一主题的多条短记忆自动归并成一条摘要（可回滚）'),
+  ),
+  enableAutoEvolve: volatile(
+    Schema.boolean()
+      .default(CONFIG_DEFAULTS.enableAutoEvolve)
+      .description('是否自动整理记忆树：合并近义目录、逐轮归纳，让结构随使用自然进化'),
+  ),
+  requireReview: volatile(
+    Schema.boolean()
+      .default(CONFIG_DEFAULTS.requireReview)
+      .description('是否保留人工审核（默认关闭：记忆直接入库、旧结论自动淘汰，全程无需确认）'),
   ),
 })
 

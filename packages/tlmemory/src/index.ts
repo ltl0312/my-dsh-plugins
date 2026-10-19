@@ -227,7 +227,7 @@ export function apply(ctx: Context, config: Config): () => void {
   const db = new MemoryDB(dbFile)
   const recallEngine = new MemoryRecallEngine(db)
   const turnTracker = new TurnTracker()
-  const extractor = new MemoryExtractor(ctx, db)
+  const extractor = new MemoryExtractor(ctx, db, () => readConfig().requireReview === true)
   // M3 异步 compaction：强化衰减（确定性）+ 矛盾检测（LLM 成本按批摊薄），
   // 在提炼链尾部串行执行，绝不与提炼并行、绝不阻塞会话流
   // 记忆归并（1.1.0）：确定性聚类 + 一次 LLM 归纳 → 父子结构落库（可回滚）。
@@ -239,6 +239,8 @@ export function apply(ctx: Context, config: Config): () => void {
     () => readConfig().compactionInterval ?? 20,
     consolidator,
     () => readConfig().enableAutoMerge ?? true,
+    () => readConfig().requireReview === true,
+    () => readConfig().enableAutoEvolve ?? true,
   )
 
   // 工程身份：解析当前仓库根目录 → scope 哈希 + 可读工程名。

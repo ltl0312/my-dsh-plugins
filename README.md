@@ -10,6 +10,11 @@
 （tlmemory → 记忆、tlsearch → 联网搜索、tlnotify → 通知助手）。tlmemory 与 tlsearch
 **零必填项**，装完即用；tlnotify 只有在想收通知时才需要配机器人，不配也不影响加载。
 
+**tlmemory 1.3.0 起「自动进化、零审核」**：记忆沉淀直接入库（不再进待确认区等人点确认），
+旧结论被新结论推翻时**自动淘汰**（`superseded`，退出召回但原文留档、可一键回滚），
+每轮 compaction 还会自动合并同一父目录下的近义目录（`/部署运维/` ↔ `/运维部署/`），
+让树随使用自然收敛。需要人工把关时，在设置页打开「保留人工审核」即回到老行为。
+
 **tlmemory 1.2.0 修正记忆归属错账**：旧版会把「不在宿主工作区名单里的目录」的记忆
 改道写进 `workspace.json` 的第一个工作区（`workspaceIds[0]`，通常是个无关的旧仓库），
 装配期还会把存量记忆整体搬过去 —— 结果各工程的记忆被逐条塞进同一棵树。1.2.0 起记忆
@@ -21,7 +26,7 @@
 
 | 插件 | 版本 | 一句话 | 详细文档 |
 |---|---|---|---|
-| `dsh-plugin-tlmemory` | 1.2.0 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
+| `dsh-plugin-tlmemory` | 1.3.0 | 无感记忆沉淀与自省管理，带一级主视口记忆看板与 SQLite FTS5 全文检索 | [`packages/tlmemory/README.md`](packages/tlmemory/README.md) |
 | `dsh-plugin-tlnotify` | 1.0.0 | 把 DSH 会话事件聚合到一个 IM 通道推到 QQ / 飞书，并且能直接回话 | [`packages/tlnotify/README.md`](packages/tlnotify/README.md) |
 | `dsh-plugin-tlsearch` | 1.0.0 | 低 Token 消耗的联网搜索，只返回清洗过的标题 / URL / 摘要 | [`packages/tlsearch/README.md`](packages/tlsearch/README.md) |
 

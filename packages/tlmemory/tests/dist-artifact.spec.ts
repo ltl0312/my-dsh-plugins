@@ -86,7 +86,16 @@ maybeDescribe('产物契约（打包器改写 node: 前缀的回归护栏）', (
     const root = json.refs[String(json.uid)]
     const dict = root?.dict ?? {}
     expect(Object.keys(dict).sort()).toEqual(
-      ['compactionInterval', 'dbPath', 'enableAutoMerge', 'enableAutoReflection', 'maxRecallCount', 'serverPort'].sort(),
+      [
+        'compactionInterval',
+        'dbPath',
+        'enableAutoEvolve',
+        'enableAutoMerge',
+        'enableAutoReflection',
+        'maxRecallCount',
+        'requireReview',
+        'serverPort',
+      ].sort(),
     )
     for (const [key, uid] of Object.entries(dict)) {
       expect(json.refs[String(uid)]?.meta?.volatile, `产物里的字段 ${key} 必须 volatile`).toBe(true)

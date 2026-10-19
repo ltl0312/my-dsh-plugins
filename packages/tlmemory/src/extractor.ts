@@ -428,7 +428,23 @@ export class MemoryExtractor {
   constructor(
     private ctx: Context,
     private db: MemoryDB,
+    /**
+     * 是否保留「待确认区」人审环节（1.3.0 起默认关闭）。
+     *
+     * 默认关闭 = 自动进化：沉淀直接 confirmed 入库，矛盾由 compaction 自动淘汰。
+     * 只有在设置页显式打开 `requireReview` 时才回到「疑似指令式规则 / 近似重复」
+     * 先进 pending 等人裁定的老行为。
+     */
+    private reviewEnabled?: () => boolean,
   ) {}
+
+  private reviewEnabledNow(): boolean {
+    try {
+      return this.reviewEnabled?.() === true
+    } catch {
+      return false
+    }
+  }
 
   /**
    * 无感静默沉淀入口：由轮次结束后台任务调用。
@@ -628,21 +644,26 @@ export class MemoryExtractor {
       return
     }
 
-    // M1 写路径确定性硬闸门（零 LLM 成本）——置信分流而非无验证直入库：
-    //   * 疑似指令式规则（提示词注入持久化载体）→ pending 待确认区；
-    //   * 名称与既有叶子近似（0.3 ≤ Dice < 0.5，疑似同义新条）→ pending；
-    //   * 其余 → confirmed 正常入库。pending 不进召回，由用户在看板裁定。
+    // M1 写路径确定性硬闸门（零 LLM 成本）：
+    //   * 1.3.0 默认**不设人审**：一律 confirmed 直接入库，日志保留「疑似指令式规则」
+    //     标记便于事后追溯；语义安全由注入段的「数据非指令」包装兜底，不靠人工点确认。
+    //   * 只有用户显式打开 `requireReview` 时才回到 pending 待确认区（老行为）。
     const looksLikeInjectionRule = INJECTION_RULE_PATTERNS.test(`${cleanName}\n${boundedContent}`)
     const looksLikeNearDuplicate = bestNear !== undefined && bestNear.similarity >= PENDING_SIMILAR_FLOOR
-    const status = looksLikeInjectionRule || looksLikeNearDuplicate ? 'pending' : 'confirmed'
+    const needsReview = this.reviewEnabledNow() && (looksLikeInjectionRule || looksLikeNearDuplicate)
+    const status = needsReview ? 'pending' : 'confirmed'
 
     this.db.upsertLeaf(targetTreeType, cleanSegments, cleanName, boundedContent, cleanKeywords, {
       source: 'auto',
       status,
     })
-    if (status === 'pending') {
+    if (needsReview) {
       this.ctx.logger?.info?.(
         `[tlmemory] 沉淀进入待确认区 [${targetTreeType}]: ${cleanName}${looksLikeInjectionRule ? '（疑似指令式规则）' : '（与既有记忆近似）'}`,
+      )
+    } else if (looksLikeInjectionRule) {
+      this.ctx.logger?.warn?.(
+        `[tlmemory] 疑似指令式规则已自动入库（未开人审）[${targetTreeType}]: ${cleanName}`,
       )
     } else {
       this.ctx.logger?.info?.(`[tlmemory] 静默沉淀入库 [${targetTreeType}]: ${cleanName}`)
