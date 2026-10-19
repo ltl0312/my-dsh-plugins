@@ -179,19 +179,28 @@ export const useMemoryStore = defineStore('memory', () => {
   )
 
   /**
-   * 从清单里挑一个「安全落点」：优先有记忆的工程（leafCount 最多），其次首个，
-   * 都没有则空串。
+   * 从清单里挑一个「安全落点」：优先**最近活跃**的工程（updatedAt 最大），
+   * 同活跃度再比记忆条数，最后才取清单首项。
+   *
+   * v1.2.0 修正：旧口径是「叶子最多的工程优先」。这在正常库里没问题，但一旦库里存在
+   * 一棵历史错账树（旧版把各工程的记忆改道写进白名单首位，见 index.ts 的
+   * resolveSafeScope 注释），它就会永远以条数优势霸占默认落点 —— 用户每次打开看板
+   * 都先撞见那堆混在一起的记忆。按「最近活跃」排序后，默认落点回到用户此刻正在用的
+   * 工程，错账树只在下拉框里作为一个可选项存在。
    *
    * 为什么必须自愈：服务端清单会随维护周期变化（工程被改名、schema 变更导致 scope
    * 归属漂移、当前选中的工程不再出现在清单里）。此时若死守旧 scope，取树会命中空
    * 结果或失效作用域，顶栏又因为「选中项不在下拉列表里」而不可点 —— 用户侧看到的是
-   * 「暂无工程记忆 + 下拉框点不开」的死锁。自动回退到清单里第一个有记忆的工程即可解开。
+   * 「暂无工程记忆 + 下拉框点不开」的死锁。自动回退到清单里一个可用工程即可解开。
    */
   function pickFallbackScope(list: ProjectDto[]): string {
     if (list.length === 0) return ''
     const withMemory = list.filter((item) => Number(item.leafCount) > 0)
     const pool = withMemory.length > 0 ? withMemory : list
-    return [...pool].sort((a, b) => Number(b.leafCount) - Number(a.leafCount))[0]?.scope ?? ''
+    const ranked = [...pool].sort(
+      (a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0) || Number(b.leafCount) - Number(a.leafCount),
+    )
+    return ranked[0]?.scope ?? ''
   }
 
   /**

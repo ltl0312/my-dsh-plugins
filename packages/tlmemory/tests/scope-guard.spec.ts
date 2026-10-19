@@ -146,10 +146,10 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
     return file
   }
 
-  it('装配期把孤儿 scope 的存量记忆归并进白名单工作区，原 scope 连根消失', () => {
+  it('装配期不再搬记忆：名单外 scope 的存量记忆原地保留，白名单工程一条不增', () => {
     setupDshHome()
     const dbPath = tempDbPath()
-    // 预置存量脏数据：宿主曾以用户主目录启动，误建 ZhuanZ 工程并误存记忆
+    // 预置存量数据：宿主曾以用户主目录启动，误建 ZhuanZ 工程并误存记忆
     const seeded = new MemoryDB(dbPath)
     seeded.registerProject(ORPHAN_SCOPE, 'ZhuanZ', ORPHAN_ROOT)
     seeded.upsertLeaf(ORPHAN_SCOPE, ['安全红线', '前端XSS'], '富文本禁v-html', '前端渲染富文本严禁使用 v-html', ['xss'])
@@ -161,20 +161,21 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
     const disposer = apply(ctx, config)
     disposer()
 
-    // 归并落库核验（重开同一文件）
+    // v1.2.0 契约：装配期**不做任何跨工程搬迁**。
+    // 旧版这里会把孤儿 scope 的记忆按「同名对齐，否则白名单首位」迁走 —— 那正是
+    // 「各工程记忆混进同一棵树」的放大器（实测 repo:72eb91503d39 被塞进 1003 条）。
     const db = new MemoryDB(dbPath)
-    expect(db.countNodes(ORPHAN_SCOPE)).toBe(0)
-    expect(db.hasProject(ORPHAN_SCOPE)).toBe(false)
+    expect(db.countNodes(ORPHAN_SCOPE)).toBe(3)
     expect(
       db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === '富文本禁v-html'),
-    ).toBe(true)
+    ).toBe(false)
     db.close()
-    // 归并有日志佐证
+    // 搬迁日志必须消失（否则说明装配期仍在搬）
     expect(
       logger.warn.mock.calls.some((call) =>
         call.some((arg) => typeof arg === 'string' && arg.includes('孤儿工程记忆已归并')),
       ),
-    ).toBe(true)
+    ).toBe(false)
   })
 
   it('会话工作区在白名单内：沉淀落库该工作区 scope', async () => {
@@ -213,7 +214,7 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
     ).toBe(true)
   })
 
-  it('会话工作区是名单外目录：严禁建幽灵工程，记忆降级写入白名单首位合法工作区', async () => {
+  it('会话工作区是名单外目录：记忆留在自身 scope，不再改道白名单首位', async () => {
     setupDshHome()
     const dbPath = tempDbPath()
     const { ctx, logger, emit } = createFakeCtx()
@@ -238,17 +239,19 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
     disposer()
 
     const db = new MemoryDB(dbPath)
-    // 记忆写入白名单工作区，孤儿 scope 全程零节点
+    // v1.2.0 契约：归属第一，宁多一个工程也不错一条记忆 —— 落在自身 scope
+    expect(
+      db.getNodesByScope(ORPHAN_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+    ).toBe(true)
+    // 白名单首位（PLUGINS_SCOPE）绝不因别人的记忆而增长
     expect(
       db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
-    ).toBe(true)
-    expect(db.countNodes(ORPHAN_SCOPE)).toBe(0)
-    expect(db.hasProject(ORPHAN_SCOPE)).toBe(false)
+    ).toBe(false)
     db.close()
-    // 防线有降级日志佐证
+    // 告警仍在（可观测性），但语义是「不改道」
     expect(
       logger.warn.mock.calls.some((call) =>
-        call.some((arg) => typeof arg === 'string' && arg.includes('已降级写入合法工作区')),
+        call.some((arg) => typeof arg === 'string' && arg.includes('不再改道')),
       ),
     ).toBe(true)
   })
@@ -381,7 +384,7 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
     expect(messages[0].role).toBe('system')
   })
 
-  it('header.cwd 指向名单外目录：防漂移闸门对新来源同样生效', async () => {
+  it('header.cwd 指向名单外目录：同样留在自身 scope（不改道）', async () => {
     setupDshHome()
     const dbPath = tempDbPath()
     const { ctx, emit } = createFakeCtx()
@@ -407,9 +410,11 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
 
     const db = new MemoryDB(dbPath)
     expect(
-      db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+      db.getNodesByScope(ORPHAN_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
     ).toBe(true)
-    expect(db.countNodes(ORPHAN_SCOPE)).toBe(0)
+    expect(
+      db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+    ).toBe(false)
     db.close()
   })
 
@@ -443,11 +448,16 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
       await new Promise((resolve) => setTimeout(resolve, 150))
       disposer()
 
-      // 回退进程身份（非仓库、名单外）→ 防漂移降级到白名单首位合法工作区
+      // 回退进程身份（非仓库、名单外）→ 记忆仍落在该身份自己的 scope 上
+      const processScope = projectScopeOf(noGit)
       const db = new MemoryDB(dbPath)
       expect(
-        db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+        db.getNodesByScope(processScope).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
       ).toBe(true)
+      // 白名单首位不被污染（旧版会把它当降落点）
+      expect(
+        db.getNodesByScope(PLUGINS_SCOPE).some((n) => n.is_leaf === 1 && n.name === 'kebab-case命名'),
+      ).toBe(false)
       db.close()
       // R-S2 可观测性：进程级身份不是仓库根 ⇒ 装配期即告警
       expect(
@@ -455,10 +465,10 @@ describe('tlmemory 作用域防漂移（装配端到端）', () => {
           call.some((arg) => typeof arg === 'string' && arg.includes('不是仓库根')),
         ),
       ).toBe(true)
-      // 降级路径日志同样在场
+      // 名单外告警仍在，但措辞是「不改道」
       expect(
         logger.warn.mock.calls.some((call) =>
-          call.some((arg) => typeof arg === 'string' && arg.includes('已降级写入合法工作区')),
+          call.some((arg) => typeof arg === 'string' && arg.includes('不再改道')),
         ),
       ).toBe(true)
     } finally {

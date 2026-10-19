@@ -302,73 +302,34 @@ export function apply(ctx: Context, config: Config): () => void {
     )
   }
 
-  // v0.6.6 防漂移降级：白名单首位合法工作区（scope + 标题）。仅在「进程/会话作用域
-  // 被判定为孤儿」时作为记忆写入的降落点 —— 严禁以用户主目录之类的名单外目录建工程。
-  // v0.8.2：降落点必须**实时解析**（读当前 `workspace.json`），否则宿主删掉/改名过
-  // 那个工作区后，降落点会指向一个已不存在的工程。
-  const fallbackWorkspace = (): { scope: string; name: string } | null => {
-    const registry = workspaceRegistryNow()
-    if (registry === null) return null
-    for (const [scope, title] of registry.scopes) {
-      return { scope, name: title }
-    }
-    return null
-  }
-  /** 启用降级工作区：首次使用时补登记（可读名 = 工作区标题），保证看板不出现裸哈希 */
-  const useFallbackWorkspace = (): string | null => {
-    const fallback = fallbackWorkspace()
-    if (!fallback) return null
-    if (!registeredScopes.has(fallback.scope)) {
-      registeredScopes.add(fallback.scope)
-      identityByScope.set(fallback.scope, { scope: fallback.scope, name: fallback.name, root: '' })
-      db.registerProject(fallback.scope, fallback.name, null)
-    }
-    return fallback.scope
-  }
   /**
-   * 作用域安全防线（防漂移最后一道闸）：候选 scope 必须属于宿主合法工作区；
-   * 名单外目录（如用户主目录 C:\Users\ZhuanZ）一律降级到白名单首位合法工作区。
-   * 白名单不可读（registry === null，isAllowedWorkspaceScope 恒 true）时维持旧行为 ——
-   * 「读不到名单」不等于「名单为空」，无从判定绝不搬家。
+   * 作用域安全防线（v1.2.0 起改为**只告警、不改道**）。
+   *
+   * 历史事故（本函数即元凶）：旧实现把「不属于宿主合法工作区」的候选 scope
+   * **改道写进白名单首位那个工程**。`workspace.json` 的 `workspaceIds` 顺序是用户
+   * 历史创建顺序，首位往往是一个与当前工作毫无关系的旧仓库 —— 于是各工程的记忆被
+   * 一条条搬进同一棵树，用户看到的就是「一千条记忆全混在一个工程里」。
+   * 实证：`repo:72eb91503d39`（hnust-easyweibo，恰好是 `workspaceIds[0]`）累计 1003
+   * 条叶子，而 `repo:08cb8c15f46d`（my-dsh-plugins）只有个位数。
+   *
+   * 现在的口径：**记忆永远留在它自己的作用域里**。名单外目录（用户主目录、临时目录）
+   * 至多产生一个「不在下拉框白名单内」的工程，这是可接受的展示噪声；把 A 工程的记忆
+   * 塞进 B 工程则是不可逆的数据污染 —— 宁可多一个工程，不可错一条归属。
+   * 幽灵工程由 `maintainProjects`（只清零节点空壳）兜底，不靠搬记忆。
    */
   const resolveSafeScope = (candidate: string): string => {
-    if (isAllowedWorkspaceScope(candidate)) return candidate
-    const fallback = useFallbackWorkspace()
-    if (fallback !== null) {
+    if (!isAllowedWorkspaceScope(candidate)) {
       ctx.logger?.warn?.(
-        `[tlmemory] 作用域 ${candidate} 不属于宿主合法工作区，已降级写入合法工作区 ${fallback}（防止生成幽灵工程）`,
+        `[tlmemory] 作用域 ${candidate} 不属于宿主已登记工作区，仍按自身作用域写入（v1.2.0 起不再改道，避免记忆混入无关工程）`,
       )
-      return fallback
     }
     return candidate
   }
 
-  // v0.6.6 孤儿工程热归并（装配期一次，幂等）：先把白名单外 scope 的存量记忆
-  // 迁入合法工作区（同名对齐优先，否则落白名单首位），随后 maintainProjects
-  // 才能安全收紧 —— 归并优先于清理，记忆一条不少，只是搬回家。
-  try {
-    const titleToScope = new Map<string, string>()
-    if (workspaceRegistry !== null) {
-      for (const [scope, title] of workspaceRegistry.scopes) {
-        titleToScope.set(title.trim().toLowerCase(), scope)
-      }
-    }
-    const merges = db.mergeOrphanScopes({
-      keepScope: projectIsAllowed ? projectScope : null,
-      // 兜底降落点：进程级工作区合法时优先（记忆大概率来自当前宿主目录），
-      // 否则取白名单首位 —— 绝不落在任何名单外目录
-      fallbackScope: (projectIsAllowed ? projectScope : fallbackWorkspace()?.scope) ?? null,
-      isScopeAllowed: workspaceRegistry === null ? null : isAllowedWorkspaceScope,
-      titleToScope: workspaceRegistry === null ? null : titleToScope,
-    })
-    for (const merged of merges) {
-      ctx.logger?.warn?.(
-        `[tlmemory] 孤儿工程记忆已归并: ${merged.from} → ${merged.to}（迁移 ${merged.movedNodes} 个节点，合并 ${merged.mergedLeaves} 条同位冲突叶子）`,
-      )
-    }
-  } catch (err) {
-    ctx.logger?.error?.('[tlmemory] 孤儿工程归并异常（跳过本轮，不影响启动）:', err)
-  }
+  // v1.2.0 移除了装配期的「孤儿工程热归并」。
+  // 旧行为：把白名单外 scope 的存量记忆按「同名对齐，否则白名单首位」迁走 —— 它既是
+  // 上面那条错账的放大器，也把「工程名撞车」当成同一工程的证据（两个不同仓库同名即
+  // 被强行合并）。`db.mergeOrphanScopes` 保留，仅由显式修复入口调用，不再随启动执行。
 
   // 工程清单自愈：清掉**零节点的空壳登记**（以用户主目录启动产生的临时登记、宿主已删除
   // 的历史目录留下的空记录）与名单内的零记忆工程，并把重名工程收敛为唯一名；
