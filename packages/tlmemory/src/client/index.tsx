@@ -41,6 +41,8 @@ import {
   legacyThemeMessage,
   parseDashboardMessage,
   probeDashboardHealth,
+  probePanelHealth,
+  HOST_HEALTH_PATH,
   themeMessage,
   type PanelState,
   type ThemeMode,
@@ -220,7 +222,7 @@ function MemoryDashboardPanel(props: { state: PanelState }): ReactElement {
   }, [])
 
   const probe = React.useCallback(() => {
-    void probeDashboardHealth(DASHBOARD_ORIGIN).then((ok) => {
+    void probePanelHealth(DASHBOARD_ORIGIN).then((ok) => {
       applyHealth(ok)
     })
   }, [applyHealth])
@@ -265,7 +267,7 @@ function MemoryDashboardPanel(props: { state: PanelState }): ReactElement {
             React.createElement(
               'span',
               { className: 'tlmemory-overlay-hint' },
-              `未能连接 ${DASHBOARD_ORIGIN}。请确认 DSH 宿主已启动（看板服务随宿主自动开启，端口被占用时已自动顺延）。`,
+              `未能连接 ${DASHBOARD_ORIGIN}（同源探针 ${HOST_HEALTH_PATH} 与直连探测均失败）。请确认 DSH 宿主已启动：看板服务随宿主自动开启，端口被占用时会自动顺延；宿主未重启时新版本的同源探针不会生效。`,
             ),
             React.createElement('button', { type: 'button', className: 'tlmemory-retry', onClick: retry }, '重试'),
           ),

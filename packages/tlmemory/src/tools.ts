@@ -23,6 +23,7 @@ import { sanitizeSegment } from "./db.js";
 import type { MemoryDB } from "./db.js";
 import type { ConsolidateReport } from './consolidator.js'
 import { expandQueryCandidates } from "./query-expand.js";
+import { isPartition } from "./partition.js";
 import type { MemoryNode, SearchResult } from "./types.js";
 
 /** MCP 规范文本内容块（与 dsh-llm 的 TextBlock 逐字段一致） */
@@ -204,6 +205,62 @@ export interface MemoryConsolidatorLike {
   revert(mergeId: number): { restored: number; removedSummary: boolean } | null
 }
 
+/**
+ * 分区目录树（tlmemory_consolidate list_partitions 的渲染器）。
+ *
+ * 存在的理由：记忆「分散、碎片化」的根因不是存不下，而是**看不见**。
+ * 模型要收敛零散记录，得先看到自己在哪个分区、哪个目录下堆了多少条。
+ * 这个视图按 scope × char_id 分组，只列目录骨架与其下的叶子，并按分区截断，
+ * 保证输出不会把上下文撑爆。
+ */
+function renderPartitionTree(db: MemoryDB): string {
+  const stats = db.partitionStats()
+  if (stats.length === 0) return '记忆库为空。'
+
+  const nodes = db.getAllNodes()
+  const buckets = new Map<string, MemoryNode[]>()
+  for (const node of nodes) {
+    const key = `${node.scope || '未分区'}\u0000${node.char_id || ''}`
+    const list = buckets.get(key) ?? []
+    list.push(node)
+    buckets.set(key, list)
+  }
+
+  const lines: string[] = ['## 记忆分区目录树']
+  for (const stat of stats) {
+    const key = `${stat.scope || '未分区'}\u0000${stat.char_id || ''}`
+    const bucket = buckets.get(key) ?? []
+    const label = stat.char_id ? `${stat.scope}(${stat.char_id})` : stat.scope || '未分区'
+    lines.push(
+      '',
+      `### ${label} — ${stat.total} 节点 / ${stat.leaves} 条记忆 / ${stat.pinned} 条置顶`,
+    )
+
+    const dirs = bucket.filter((n) => n.is_leaf !== 1).map((n) => `${n.path}${n.name}/`)
+    const leaves = bucket.filter((n) => n.is_leaf === 1)
+    const uniqueDirs = Array.from(new Set(dirs)).sort().slice(0, 12)
+    for (const dir of uniqueDirs) lines.push(`- ${dir}`)
+
+    const shown = leaves.slice(0, 24)
+    for (const leaf of shown) {
+      const pins = leaf.is_pinned ? ' [置顶]' : ''
+      lines.push(`  · ${leaf.path}${leaf.name}${pins}`)
+    }
+    if (leaves.length > shown.length) {
+      lines.push(`  … 另有 ${leaves.length - shown.length} 条记忆未列出`)
+    }
+    if (uniqueDirs.length === 12 && dirs.length > 12) {
+      lines.push(`  … 另有 ${dirs.length - 12} 个目录未列出`)
+    }
+  }
+  lines.push(
+    '',
+    '收敛建议：同一目录下 >3 条同主题零散记录时，用 dry_run=true 预览归并；',
+    '跨目录重复主题请改写为一条结构化记忆，复用同一 path 让 upsert 自动收敛。',
+  )
+  return lines.join('\n')
+}
+
 export function registerMemoryTools(
   ctx: Context,
   db: MemoryDB,
@@ -248,7 +305,29 @@ export function registerMemoryTools(
         keywords: {
           type: "array",
           items: { type: "string" },
-          description: "检索关键词列表",
+          description: "检索关键词列表（可含 2 字短词，短词走 LIKE 兜底）",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Trigram 检索标签：3~5 个 ≥3 字的标准名词或同义短语（如 橡木蛋糕卷、失熵症），缺省由 keywords 自动派生",
+        },
+        char_id: {
+          type: "string",
+          description:
+            "角色 ID（scope 为 rp / lore 时必填，如 firefly）；由路径第 2 段自动推导，显式传入优先",
+        },
+        scope: {
+          type: "string",
+          enum: ["core", "work", "rp", "lore"],
+          description:
+            "物理分区：core 用户画像/全局前提、work 工程与运维、rp 角色扮演动态记忆、lore 角色静态设定。缺省由路径首段推导（/rp/… /lore/… /work/… /core/…）",
+        },
+        pinned: {
+          type: "boolean",
+          description:
+            "置顶：RP 态每轮无条件注入的常驻记忆（角色核心羁绊 / 用户画像），慎用",
         },
       },
       required: [
@@ -267,18 +346,29 @@ export function registerMemoryTools(
         rule_name: string;
         content: string;
         keywords: string[];
+        tags?: string[];
+        char_id?: string;
+        scope?: "core" | "work" | "rp" | "lore";
+        pinned?: boolean;
       },
       exec?: unknown,
     ) {
-      // v0.6.6 作用域防漂移：宿主 exec 上下文携带 session 时按会话解析工程作用域，
-      // 多 workspace 宿主下记忆归属不再退化为进程启动目录（ZhuanZ 事故根因）
-      const targetTree =
-        args.tree_scope === "global" ? "global" : resolveScope(extractExecSession(exec));
       // P2-12：净化统一复用 db.ts 的 sanitizeSegment（此前内联正则缺连字符
       // `-`，含连字符的规则名经工具链路会被剥成连写词）
       const sanitizedSegments = args.path_segments.map((s) => sanitizeSegment(s));
       const sanitizedName = sanitizeSegment(args.rule_name);
       const boundedContent = args.content.slice(0, 80);
+
+      // 角色分区（rp / lore）必须落 global 树：它们是**跨工程**的，
+      // 若按 project 落进 repo:<hash>，同一个角色在另一个仓库里就读不到自己的记忆，
+      // 角色隔离会退化成「隔离成两套记忆」。
+      const headSegment = String(sanitizedSegments[0] ?? "").toLowerCase();
+      const roleScoped = headSegment === "rp" || headSegment === "lore";
+      const targetTree = roleScoped
+        ? "global"
+        : args.tree_scope === "global"
+          ? "global"
+          : resolveScope(extractExecSession(exec));
 
       const node = db.upsertLeaf(
         targetTree,
@@ -290,7 +380,13 @@ export function registerMemoryTools(
         // 工具是**模型显式调用**的手工写入，必须落 'manual' —— 落 'auto' 会让它
         // 与 turn/end 后台提炼链路在库中无法区分，直接毁掉 source='auto' 这个
         // 「自动记录」判定标记。显式传参也让此处语义不随 db 缺省值变动而漂移。
-        { source: 'manual' },
+        {
+          source: 'manual',
+          tags: args.tags,
+          scope: args.scope,
+          charId: args.char_id,
+          pinned: args.pinned === true,
+        },
       );
 
       // 契约 A：恒返回 MCP 信封，绝不返回裸对象
@@ -316,6 +412,17 @@ export function registerMemoryTools(
           enum: ["all", "global", "project"],
           description: "查询范围，默认 all 覆盖全局与当前工程",
         },
+        partitions: {
+          type: "array",
+          items: { type: "string", enum: ["core", "work", "rp", "lore"] },
+          description:
+            "物理分区过滤：rp 态建议 ['rp','lore','core']，work 态建议 ['work','core']；缺省不限分区",
+        },
+        char_id: {
+          type: "string",
+          description:
+            "角色隔离：只召回该角色或共享层（char_id 为空串的 core）的记忆；rp/lore 检索应显式传入",
+        },
         limit: {
           type: "number",
           description: "最大检索结果数，默认 5",
@@ -328,6 +435,8 @@ export function registerMemoryTools(
       args: {
         query: string;
         scope?: "all" | "global" | "project";
+        partitions?: string[];
+        char_id?: string;
         limit?: number;
       },
       exec?: unknown,
@@ -336,6 +445,13 @@ export function registerMemoryTools(
       let treeType: string | undefined;
       if (args.scope === "global") treeType = "global";
       if (args.scope === "project") treeType = currentScope;
+
+      // 分区/角色过滤：只接受合法分区名，过滤非法值而不是整批拒绝 ——
+      // 检索是只读操作，宁可退化成「不过滤」也不要因为一个错字让整次召回失败。
+      const partitions = Array.isArray(args.partitions)
+        ? args.partitions.map((p) => String(p).trim()).filter((p) => isPartition(p))
+        : undefined;
+      const charId = String(args.char_id ?? "").trim() || undefined;
 
       const maxCount = args.limit || 5;
       const rawQuery = String(args.query ?? "").trim();
@@ -346,7 +462,7 @@ export function registerMemoryTools(
       const candidates = expandQueryCandidates(rawQuery);
       const merged = new Map<string, SearchResult>();
       for (const candidate of candidates) {
-        for (const hit of db.search(candidate, { treeType, limit: maxCount })) {
+        for (const hit of db.search(candidate, { treeType, partitions, charId, limit: maxCount })) {
           const key = `${hit.tree_type}:${hit.path}${hit.name}`;
           const prev = merged.get(key);
           if (!prev || hit.score > prev.score) merged.set(key, hit);
@@ -539,12 +655,25 @@ export function registerMemoryTools(
               type: "number",
               description: "撤销指定归并（merges 表 id），恢复来源记忆并删除摘要节点",
             },
+            list_partitions: {
+              type: "boolean",
+              description:
+                "true 时只列出各物理分区（core/work/rp/lore）的目录树与计数，不做归并",
+            },
           },
         },
         output: toolOutput(),
         async execute(
-          args: { dry_run?: boolean; limit?: number; revert_merge_id?: number },
+          args: {
+            dry_run?: boolean
+            limit?: number
+            revert_merge_id?: number
+            list_partitions?: boolean
+          },
         ) {
+          if (args?.list_partitions) {
+            return toToolResult(renderPartitionTree(db))
+          }
           if (args?.revert_merge_id != null) {
             const reverted = consolidator.revert(Number(args.revert_merge_id));
             if (reverted === null) {

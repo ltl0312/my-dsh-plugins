@@ -28,6 +28,12 @@ export interface MemoryNodeDto {
   status?: string
   /** 检索结果附带的重合度评分（/api/search 返回 SearchResult 时存在） */
   score?: number
+  /** 物理分区（v2）：core / work / rp / lore */
+  scope?: string
+  /** 角色归属（v2）：rp / lore 分区下为角色 id，其余为空串 */
+  char_id?: string
+  /** trigram 检索标签（v2）：每词 ≥3 字，参与 FTS 且 bm25 权重最高 */
+  tags?: string | null
 }
 
 /** GET /api/projects 的条目：工程作用域的对外摘要 */
@@ -44,6 +50,21 @@ export interface ProjectDto {
   nodeCount: number
   leafCount: number
   updatedAt: number
+}
+
+/**
+ * GET /api/partitions 的条目：物理分区（core / work / rp / lore）× 角色 的统计。
+ *
+ * 与 ProjectDto 正交：projects 回答「这条记忆属于哪个工程」，partitions 回答
+ * 「这条记忆是干什么用的」。角色扮演记忆（rp/lore）刻意挂在 global 树下以便
+ * 跨工程可见，因此在工程维度上永远只能看到一大坨 global，分区维度才是它的家。
+ */
+export interface PartitionStat {
+  scope: string
+  charId: string
+  total: number
+  leaves: number
+  pinned: number
 }
 
 /** 顶部作用域页签：工程记忆 / 全局偏好 */
@@ -92,6 +113,12 @@ export const useMemoryStore = defineStore('memory', () => {
   const actionError = ref('')
   /** 详情抽屉当前展示的记忆项；null 表示抽屉关闭 */
   const selectedNode = ref<MemoryNodeDto | null>(null)
+  /** 物理分区清单（/api/partitions）：空数组表示服务端尚未应答或库为空 */
+  const partitionStats = ref<PartitionStat[]>([])
+  /** 当前激活的分区 scope（空串 = 不按分区过滤，回到工程/全局维度） */
+  const activePartition = ref<string>('')
+  /** 当前激活的角色（仅在 rp / lore 分区下有意义） */
+  const activeCharId = ref<string>('')
 
   /**
    * 工程下拉的选项清单。
@@ -142,6 +169,34 @@ export const useMemoryStore = defineStore('memory', () => {
     return 'scope=project'
   })
 
+  /**
+   * 分区查询串（v2）：空串表示按工程/全局维度看，非空时覆盖 scopeQuery。
+   * 角色记忆挂在 global 树下，工程维度只能看到「一整棵 global」，
+   * 按 scope+char_id 取才能把流萤的条目从旧全局记忆里剥出来。
+   */
+  const partitionQuery = computed<string>(() => {
+    if (!activePartition.value) return ''
+    const params = [`partition=${encodeURIComponent(activePartition.value)}`]
+    if (activeCharId.value) params.push(`char_id=${encodeURIComponent(activeCharId.value)}`)
+    return params.join('&')
+  })
+
+  /** 实际发给 /api/nodes 与 /api/search 的作用域串：分区优先，其次工程/全局 */
+  const effectiveQuery = computed<string>(() => partitionQuery.value || scopeQuery.value)
+
+  /** 分区模式的标题（替代工程名展示）：把「rp/firefly」翻译成人话 */
+  const partitionLabel = computed<string>(() => {
+    if (!activePartition.value) return ''
+    const labels: Record<string, string> = {
+      core: '核心画像',
+      work: '工程运维',
+      rp: '角色扮演',
+      lore: '世界观设定',
+    }
+    const base = labels[activePartition.value] ?? activePartition.value
+    return activeCharId.value ? `${base} · ${activeCharId.value}` : base
+  })
+
   /** 图谱根节点标题 / 列表分组标题 */
   const scopeLabel = computed<string>(() => {
     if (currentTree.value === 'global') return '全局偏好'
@@ -152,11 +207,15 @@ export const useMemoryStore = defineStore('memory', () => {
   })
 
   /** 当前作用域内的节点（后端已按作用域收敛，这里仅做防御式过滤） */
-  const scopedNodes = computed<MemoryNodeDto[]>(() =>
-    currentTree.value === 'global'
+  const scopedNodes = computed<MemoryNodeDto[]>(() => {
+    // 分区模式不退化成 tree_type 过滤：work 分区横跨各 repo:<hash> 树，
+    // rp/lore 虽然落在 global 树下但语义上不属于「全局偏好」，
+    // 再按 tree_type 切一刀只会把刚捞出来的条目又抹掉。
+    if (activePartition.value) return nodes.value
+    return currentTree.value === 'global'
       ? nodes.value.filter((node) => node.tree_type === 'global')
-      : nodes.value.filter((node) => node.tree_type !== 'global'),
-  )
+      : nodes.value.filter((node) => node.tree_type !== 'global')
+  })
 
   /**
    * 当前作用域内**真正的记忆条目**：只保留叶子节点（is_leaf === 1）。
@@ -254,7 +313,7 @@ export const useMemoryStore = defineStore('memory', () => {
    */
   async function fetchNodes() {
     try {
-      const res = await fetch(`/api/nodes?${scopeQuery.value}`)
+      const res = await fetch(`/api/nodes?${effectiveQuery.value}`)
       if (!res.ok) {
         nodes.value = []
         return
@@ -267,10 +326,43 @@ export const useMemoryStore = defineStore('memory', () => {
     }
   }
 
+  /** 拉取物理分区清单（core / work / rp / lore 的条数与角色归属） */
+  async function fetchPartitions() {
+    try {
+      const res = await fetch('/api/partitions')
+      if (!res.ok) {
+        partitionStats.value = []
+        return
+      }
+      const json = (await res.json()) as { data?: PartitionStat[] }
+      partitionStats.value = Array.isArray(json.data) ? json.data : []
+    } catch (e) {
+      console.error('拉取分区统计失败:', e)
+      partitionStats.value = []
+    }
+  }
+
+  /**
+   * 切换分区筛选：scope 传空串即退出分区模式，回到工程/全局维度。
+   * rp / lore 分区下 charId 才有意义；其它分区传空串（core/work 没有角色归属）。
+   */
+  async function setPartition(scope: string, charId = '') {
+    const next = scope === activePartition.value && charId === activeCharId.value ? '' : scope
+    activePartition.value = next
+    activeCharId.value = next ? charId : ''
+    await fetchNodes()
+    await refreshSearch()
+  }
+
+  /** 当前激活的分区角色是否匹配某个角色 id（模板里给角色胶囊加选中态用） */
+  function isActiveChar(charId: string): boolean {
+    return activePartition.value !== '' && activeCharId.value === charId
+  }
+
   /** 首次加载：工程清单与节点树并行拉取，最后统一确定默认选中工程 */
   async function bootstrap() {
     const scopeBefore = currentProjectScope.value
-    await Promise.all([fetchProjects(), fetchNodes()])
+    await Promise.all([fetchProjects(), fetchNodes(), fetchPartitions()])
     if (!currentProjectScope.value) {
       // 后端未上报当前工程：退回到清单里第一个有记忆的工程（含节点反推的兜底项），
       // 都比「没有可选项」要好 —— 下拉框必须有落点。
@@ -470,7 +562,7 @@ export const useMemoryStore = defineStore('memory', () => {
     const controller = new AbortController()
     searchAbort = controller
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&${scopeQuery.value}`, {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&${effectiveQuery.value}`, {
         signal: controller.signal,
       })
       if (controller.signal.aborted) return
@@ -659,6 +751,12 @@ export const useMemoryStore = defineStore('memory', () => {
     currentProject,
     currentWorkspaceName,
     scopeQuery,
+    effectiveQuery,
+    partitionQuery,
+    partitionStats,
+    activePartition,
+    activeCharId,
+    partitionLabel,
     scopeLabel,
     scopedNodes,
     memoryNodes,
@@ -667,6 +765,9 @@ export const useMemoryStore = defineStore('memory', () => {
     actionError,
     fetchProjects,
     fetchNodes,
+    fetchPartitions,
+    setPartition,
+    isActiveChar,
     bootstrap,
     selectProject,
     activateProject,

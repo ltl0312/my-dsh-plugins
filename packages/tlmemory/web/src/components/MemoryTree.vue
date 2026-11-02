@@ -118,6 +118,16 @@ function requestDelete(node: MemoryNodeDto) {
               />
             </svg>
             <span class="tlm-leaf-name">{{ item.node.name }}</span>
+            <!-- 分区徽章（v2）：未按分区筛选时，标出这条记忆属于 core/work/rp/lore。
+                 角色分区额外带角色 id —— 角色记忆挂在 global 树下，没有这枚徽章
+                 就会和旧全局偏好混成一坨，看不出「这是流萤的」。 -->
+            <span
+              v-if="!store.activePartition && item.node.scope && item.node.scope !== 'core'"
+              class="tlm-partition-badge"
+              :title="`分区：${item.node.scope}${item.node.char_id ? ` / ${item.node.char_id}` : ''}`"
+            >
+              {{ item.node.scope }}{{ item.node.char_id ? `·${item.node.char_id}` : '' }}
+            </span>
             <span
               v-if="item.node.status === 'pending'"
               class="tlm-badge-pending"

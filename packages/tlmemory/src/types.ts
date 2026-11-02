@@ -51,6 +51,22 @@ export interface MemoryNode {
   is_leaf: number             // 0: 分类目录, 1: 记忆叶子
   content: string | null      // 原子断言规则（严格限制在80字以内）
   keywords: string | null     // 关键词，空格分隔
+  /**
+   * 四大物理分区（1.4.0）：'core' | 'work' | 'rp' | 'lore'。
+   * 由 partition.ts 的 derivePartition 从「树类型 + 路径前缀」推导，写入时落库、
+   * 存量迁移时回填。它是 rp/lore 与 work 之间**检索层面的硬隔离**，
+   * 而不是靠调用方自觉传 tree_type。
+   */
+  scope: string
+  /** 角色 id（仅 rp/lore 有意义；其余分区恒为空串）。多角色共库时的隔离键 */
+  char_id: string
+  /**
+   * Trigram 检索标签串（空格分隔，每词 ≥3 字）。
+   * 与 keywords 的分工：keywords 是历史上沉淀链路产出的关键词（可能是 2 字短词），
+   * tags 是**专为 trigram 索引**准备的长词标签，参与 bm25 加权（权重高于正文）。
+   * 两者都进 FTS，但只有 tags 会给到最高列权重。
+   */
+  tags: string | null
   reinforce_count: number     // 强化权重计数（召回排序权重；重沉淀/去重强化会加、衰减会减）
   is_pinned: number           // 是否强制置顶 (0/1)
   /** 来源标记：'auto'（静默沉淀）/'manual'（看板/工具手工），审计与撤回的基础 */
@@ -77,6 +93,17 @@ export interface SearchOptions {
   treeType?: string
   pathPrefix?: string
   limit?: number
+  /**
+   * 分区过滤（1.4.0）：限定命中的 scope 集合。
+   * 未传时由调用方（工具层 / tlrp 桥接层）按当前运行模式折算成默认集合，
+   * 存储层不猜模式 —— 那样会把宿主语义漏进数据库。
+   */
+  partitions?: string[]
+  /**
+   * 角色过滤：非空时只返回 char_id 等于该值或为空的记录（通用记录对任何角色可见）。
+   * 空串或 undefined 表示不按角色过滤。
+   */
+  charId?: string
 }
 
 export interface SearchResult extends MemoryNode {
@@ -118,13 +145,29 @@ export interface SaveMemoryArgs {
   rule_name: string
   content: string
   keywords: string[]
+  /**
+   * 分区（1.4.0，可选）：显式声明落哪个分区。
+   * 省略时由路径前缀推导（/rp/firefly/… → rp，/lore/… → lore，/work/… → work），
+   * 再退到树类型（global → core，repo:* → work）。显式值与路径前缀冲突时以路径为准，
+   * 因为路径是用户在调用里逐字写下的、最不可能被误判的证据。
+   */
+  scope?: string
+  /** 角色 id（1.4.0，可选）：rp/lore 分区必须给，否则记录对所有角色可见 */
+  char_id?: string
+  /** Trigram 标签（1.4.0，可选）：每词 ≥3 字，省略时回落 keywords */
+  tags?: string[]
 }
 
 /** tlmemory_query 工具入参 */
 export interface QueryMemoryArgs {
   query: string
+  /** 树作用域（历史字段，保留兼容）：all / global / project */
   scope?: 'all' | 'global' | 'project'
   limit?: number
+  /** 分区过滤（1.4.0）：core / work / rp / lore 的任意组合，逗号分隔或数组 */
+  partitions?: string | string[]
+  /** 角色过滤（1.4.0）：限定时只返回本角色与无主记录 */
+  char_id?: string
 }
 
 // ---------------------------------------------------------------------------

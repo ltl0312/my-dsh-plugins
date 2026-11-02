@@ -127,11 +127,18 @@ export function dashboardUrl(origin: string = DASHBOARD_ORIGIN): string {
  * dump + JSON 序列化，纯为判断在线与否 —— 现切到服务端专用轻量探针端点。
  * 任何网络/CORS/超时异常一律视为离线，绝不向上抛错（浏览器侧静默降级）。
  */
+export type HealthFetcher = (
+  url: string,
+  init?: { signal?: AbortSignal },
+) => Promise<{ status: number }>
+
+/** 默认取数器（浏览器 fetch；单测替换成假实现） */
+export const defaultHealthFetcher: HealthFetcher = (url, init) => fetch(url, init)
+
 export async function probeDashboardHealth(
   origin: string = DASHBOARD_ORIGIN,
   timeoutMs: number = PROBE_TIMEOUT_MS,
-  fetcher: (url: string, init?: { signal?: AbortSignal }) => Promise<{ status: number }> = (url, init) =>
-    fetch(url, init),
+  fetcher: HealthFetcher = defaultHealthFetcher,
 ): Promise<boolean> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -143,6 +150,47 @@ export async function probeDashboardHealth(
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * 宿主同源活性端点（由本插件在 DSH `webServer` 上注册，见 src/index.ts）。
+ *
+ * 为什么需要它：看板是**跨源**回环 http://127.0.0.1:4890，宿主页面探它要连过 CORS、
+ * 页面 `connect-src`、浏览器私有网络策略三道闸；任何一道在当前宿主/外壳组合下被拦，
+ * fetch 只会抛异常，面板就只能一直显示「服务未启动」—— 服务本身其实是健康的。
+ * 同源端点没有预检、没有跨源限制，也不依赖「构建期内联端口」这个假设，
+ * 因此优先探测它；失败再回退直连探测（兼容未注册该端点的旧版宿主）。
+ */
+export const HOST_HEALTH_PATH = '/api/tlmemory/health'
+
+/** 探测宿主同源活性端点（宿主自己的 server 提供，端口跟随宿主，天然同源） */
+export async function probeHostHealth(
+  timeoutMs: number = PROBE_TIMEOUT_MS,
+  fetcher: HealthFetcher = defaultHealthFetcher,
+): Promise<boolean> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetcher(HOST_HEALTH_PATH, { signal: controller.signal })
+    return res.status >= 200 && res.status < 300
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 面板活性总探针：先同源端点，再回退跨源直连。
+ * 任一命中 2xx 即判定在线（两路都是只读 GET，代价可忽略）。
+ */
+export async function probePanelHealth(
+  origin: string = DASHBOARD_ORIGIN,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
+  fetcher: HealthFetcher = defaultHealthFetcher,
+): Promise<boolean> {
+  if (await probeHostHealth(timeoutMs, fetcher)) return true
+  return probeDashboardHealth(origin, timeoutMs, fetcher)
 }
 
 /** 中心列占用状态机（打开 / 关闭 / 切换 + 订阅），与 DOM 完全解耦 */

@@ -76,7 +76,7 @@ export type { ProjectPruneOptions, OrphanMergeOptions, OrphanMergeResult } from 
 export { Config } from './config.js'
 
 export const name = 'tlmemory'
-export const inject = ['tools', 'llm', 'systemPrompt']
+export const inject = ['tools', 'llm', 'systemPrompt', 'webServer']
 
 /** 工程身份三元组：不可读的 scope 哈希 + 可读工程名 + 物理根目录 */
 export interface ProjectIdentity {
@@ -503,6 +503,61 @@ export function apply(ctx: Context, config: Config): () => void {
   )
   void server.start()
 
+  /**
+   * 同源活性端点（v2.2.0）：在看板服务之外，额外在**宿主自己的 webServer** 上开一条
+   * 只读探针 `/api/tlmemory/health`。
+   *
+   * 动机（2026-11-02 实证）：面板「● 服务未启动」而 `curl 127.0.0.1:4890/api/health`
+   * 回 200 —— 服务健康，是**跨源探测**被拦。宿主页面 → 跨端口回环要同时过 CORS、
+   * 页面 connect-src 与浏览器私有网络策略，任一收紧就只剩「离线」。同源端点把这些
+   * 变量全部消掉：请求打到宿主自己那个源，端口随宿主、无预检、无 connect-src 限制。
+   *
+   * 客户端侧见 src/client/logic.ts 的 probeHostHealth / probePanelHealth（同源优先、
+   * 直连回退）。宿主未注入 webServer 时静默跳过，行为退回旧版直连探测。
+   */
+  // 宿主可能未暴露 effect（旧版 cordis）：有则走 effect 托管生命周期，无则直接注册
+  // 并把注销收敛进 apply 的 Disposer（见下方 disposeHealthRoute()）。
+  const effectHost = ctx as unknown as {
+    effect?: (callback: () => () => void, label?: string) => () => void
+  }
+  const registerHealthRoute = (): (() => void) => {
+    const webServer = (ctx as unknown as {
+      webServer?: { register?: (route: unknown) => () => void }
+    }).webServer
+    if (typeof webServer?.register !== 'function') {
+      ctx.logger?.warn?.(
+        '[tlmemory] 宿主未提供 webServer 服务，同源探针端点已跳过（面板回退直连探测）',
+      )
+      return () => {}
+    }
+    const dashboardPort = readConfig().serverPort ?? 4890
+    return webServer.register({
+      kind: 'exact',
+      path: '/api/tlmemory/health',
+      handler: (
+        _req: unknown,
+        res: { writeHead: (status: number, headers: Record<string, string>) => void; end: (body: string) => void },
+      ) => {
+        const body = JSON.stringify({
+          ok: true,
+          service: 'tlmemory',
+          dashboard: `http://127.0.0.1:${dashboardPort}`,
+          partitions: db.partitionStats(),
+        })
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(body)
+      },
+    })
+  }
+  // 有 effect 则托管生命周期，无则立即注册并交由 apply 的 Disposer 注销
+  const disposeHealthRoute =
+    typeof effectHost.effect === 'function'
+      ? effectHost.effect(registerHealthRoute, 'tlmemory: host same-origin health route')
+      : registerHealthRoute()
+
   // 会话事件流监听（官方契约：'session/event'(session, event)）。
   // 根上下文监听器观察全部会话；易失监听抛错会被宿主隔离，但本插件仍采用
   // 防御式读取 + 双保险 try-catch，保证事件热路径零异常上抛。
@@ -577,6 +632,7 @@ export function apply(ctx: Context, config: Config): () => void {
     unregisterSection()
     unregisterTools()
     unregisterSessionEvent()
+    disposeHealthRoute()
     turnTracker.reset()
     server.stop()
     void extractionChain

@@ -558,6 +558,112 @@ body {
 
 /* --- 搜索 ----------------------------------------------------------------- */
 
+/* --- 物理分区筛选条（v2：core / work / rp / lore + 角色胶囊） --------------- */
+
+.tlm-partitions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--tlm-border-soft);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tlm-partitions::-webkit-scrollbar {
+  display: none;
+}
+
+.tlm-partitions-label {
+  flex: none;
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--tlm-fg-faint);
+  text-transform: uppercase;
+}
+
+.tlm-partitions-sep {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  background: var(--tlm-border-soft);
+  margin: 0 2px;
+}
+
+.tlm-partition-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--tlm-border);
+  background: var(--tlm-surface);
+  color: var(--tlm-fg-muted);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.tlm-partition-chip:hover {
+  background: var(--tlm-surface-hover);
+  color: var(--tlm-fg);
+}
+
+.tlm-partition-chip.is-active {
+  background: var(--tlm-accent);
+  border-color: var(--tlm-accent);
+  color: var(--tlm-accent-fg);
+}
+
+.tlm-partition-count {
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.tlm-partition-char {
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+}
+
+.tlm-partition-clear {
+  flex: none;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: none;
+  background: none;
+  color: var(--tlm-fg-faint);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.tlm-partition-clear:hover {
+  color: var(--tlm-fg-muted);
+}
+
+.tlm-partition-badge {
+  flex: none;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--tlm-accent);
+  color: var(--tlm-accent-fg);
+  font-family: var(--tlm-mono);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+/* 行内徽章只是标注，不能抢记忆标题的注意力：顶栏那枚才用强调色 */
+.tlm-leaf .tlm-partition-badge {
+  background: var(--tlm-surface-strong);
+  color: var(--tlm-fg-muted);
+}
+
 .tlm-searchbar {
   flex: none;
   padding: 10px 12px;

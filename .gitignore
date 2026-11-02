@@ -157,3 +157,8 @@ vite.config.ts.timestamp-*
 # 规则来源：2026-09-18 约定「doc 里面的文档都不提交」
 /doc/
 
+
+# tlmemory 本地数据库备份 / 打包产物 / 时间戳备份（不随仓库分发）
+.backup-tlmemory/
+.pkg-out/
+*.bak-*

@@ -507,6 +507,33 @@ export class MemoryServer {
         return
       }
 
+      // 物理分区清单（core / work / rp / lore，v2 新增）：驱动看板的「分区」筛选条。
+      // 与 /api/projects 正交 —— projects 是工程维度（tree_type），partitions 是记忆用途
+      // 维度（scope + char_id）。角色记忆落在 global 树下，按工程维度永远找不到，
+      // 只能由本接口汇报，否则看板界面上「流萤分区」不存在。
+      if (req.method === 'GET' && pathname === '/api/partitions') {
+        const stats = this.db.partitionStats()
+        const characters = new Map<string, { charId: string; leaves: number; pinned: number }>()
+        for (const row of stats) {
+          if (!row.char_id) continue
+          const item = characters.get(row.char_id) ?? { charId: row.char_id, leaves: 0, pinned: 0 }
+          item.leaves += row.leaves
+          item.pinned += row.pinned
+          characters.set(row.char_id, item)
+        }
+        this.sendJson(res, 200, {
+          data: stats.map((row) => ({
+            scope: row.scope,
+            charId: row.char_id,
+            total: row.total,
+            leaves: row.leaves,
+            pinned: row.pinned,
+          })),
+          characters: [...characters.values()],
+        })
+        return
+      }
+
       // 工程作用域清单：驱动看板下拉框，并回报宿主当前所在工程（默认选中项）。
       // 读取流程（v0.6.6 归并优先）：
       //   1. 先把白名单外孤儿 scope 的记忆整体迁入合法工作区（同名对齐优先，
@@ -609,6 +636,15 @@ export class MemoryServer {
         const scope = (url.searchParams.get('scope') ?? '').trim()
         const projectParam = (url.searchParams.get('project') ?? '').trim()
         const legacy = (url.searchParams.get('tree') ?? url.searchParams.get('treeType') ?? '').trim()
+        // 物理分区筛选（v2）：?partition=rp&char_id=firefly。
+        // 与工程维度正交，命中时直接短路 —— 角色记忆挂在 global 树下，
+        // 走工程分支只会得到「整棵 global 树」，分不出流萤的条目。
+        const partition = (url.searchParams.get('partition') ?? '').trim()
+        if (partition) {
+          const charId = (url.searchParams.get('char_id') ?? '').trim()
+          this.sendJson(res, 200, { data: this.db.getNodesByPartition(partition, charId) })
+          return
+        }
 
         // 显式工程名 / scope 原文：收敛到唯一工程
         if (projectParam) {
@@ -650,6 +686,15 @@ export class MemoryServer {
         const scope = (url.searchParams.get('scope') ?? '').trim()
         const projectParam = (url.searchParams.get('project') ?? '').trim()
         const legacy = (url.searchParams.get('tree') ?? url.searchParams.get('treeType') ?? '').trim()
+        // 分区检索（v2）：?partition=rp&char_id=firefly —— 与工程维度正交，命中即短路
+        const partition = (url.searchParams.get('partition') ?? '').trim()
+        if (partition) {
+          const charId = (url.searchParams.get('char_id') ?? '').trim()
+          this.sendJson(res, 200, {
+            data: this.db.search(query, { partitions: [partition], charId, limit: 40 }),
+          })
+          return
+        }
 
         let treeType: string | undefined
         if (projectParam) {
@@ -671,7 +716,6 @@ export class MemoryServer {
         this.sendJson(res, 200, { data: hits })
         return
       }
-
       // 工程重命名（projectKey + newName 形态；与 PATCH /api/projects 等价兼容，
       // 看板工程下拉框的「重命名」入口走此端点）
       if (req.method === 'POST' && pathname === '/api/projects/rename') {

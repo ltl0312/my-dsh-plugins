@@ -97,7 +97,8 @@ window.__ModuleLoader__.load({
       function dashboardUrl(origin = DASHBOARD_ORIGIN) {
         return `${origin.replace(/\/+$/, "")}/`;
       }
-      async function probeDashboardHealth(origin = DASHBOARD_ORIGIN, timeoutMs = PROBE_TIMEOUT_MS, fetcher = (url, init) => fetch(url, init)) {
+      var defaultHealthFetcher = (url, init) => fetch(url, init);
+      async function probeDashboardHealth(origin = DASHBOARD_ORIGIN, timeoutMs = PROBE_TIMEOUT_MS, fetcher = defaultHealthFetcher) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
@@ -108,6 +109,23 @@ window.__ModuleLoader__.load({
         } finally {
           clearTimeout(timer);
         }
+      }
+      var HOST_HEALTH_PATH = "/api/tlmemory/health";
+      async function probeHostHealth(timeoutMs = PROBE_TIMEOUT_MS, fetcher = defaultHealthFetcher) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetcher(HOST_HEALTH_PATH, { signal: controller.signal });
+          return res.status >= 200 && res.status < 300;
+        } catch {
+          return false;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      async function probePanelHealth(origin = DASHBOARD_ORIGIN, timeoutMs = PROBE_TIMEOUT_MS, fetcher = defaultHealthFetcher) {
+        if (await probeHostHealth(timeoutMs, fetcher)) return true;
+        return probeDashboardHealth(origin, timeoutMs, fetcher);
       }
       function createPanelState(initial = false) {
         let open = initial;
@@ -1554,7 +1572,7 @@ window.__ModuleLoader__.load({
           }
         }, []);
         const probe = import_react2.default.useCallback(() => {
-          void probeDashboardHealth(DASHBOARD_ORIGIN).then((ok) => {
+          void probePanelHealth(DASHBOARD_ORIGIN).then((ok) => {
             applyHealth(ok);
           });
         }, [applyHealth]);
@@ -1588,7 +1606,7 @@ window.__ModuleLoader__.load({
             import_react2.default.createElement(
               "span",
               { className: "tlmemory-overlay-hint" },
-              `\u672A\u80FD\u8FDE\u63A5 ${DASHBOARD_ORIGIN}\u3002\u8BF7\u786E\u8BA4 DSH \u5BBF\u4E3B\u5DF2\u542F\u52A8\uFF08\u770B\u677F\u670D\u52A1\u968F\u5BBF\u4E3B\u81EA\u52A8\u5F00\u542F\uFF0C\u7AEF\u53E3\u88AB\u5360\u7528\u65F6\u5DF2\u81EA\u52A8\u987A\u5EF6\uFF09\u3002`
+              `\u672A\u80FD\u8FDE\u63A5 ${DASHBOARD_ORIGIN}\uFF08\u540C\u6E90\u63A2\u9488 ${HOST_HEALTH_PATH} \u4E0E\u76F4\u8FDE\u63A2\u6D4B\u5747\u5931\u8D25\uFF09\u3002\u8BF7\u786E\u8BA4 DSH \u5BBF\u4E3B\u5DF2\u542F\u52A8\uFF1A\u770B\u677F\u670D\u52A1\u968F\u5BBF\u4E3B\u81EA\u52A8\u5F00\u542F\uFF0C\u7AEF\u53E3\u88AB\u5360\u7528\u65F6\u4F1A\u81EA\u52A8\u987A\u5EF6\uFF1B\u5BBF\u4E3B\u672A\u91CD\u542F\u65F6\u65B0\u7248\u672C\u7684\u540C\u6E90\u63A2\u9488\u4E0D\u4F1A\u751F\u6548\u3002`
             ),
             import_react2.default.createElement("button", { type: "button", className: "tlmemory-retry", onClick: retry }, "\u91CD\u8BD5")
           )

@@ -58,6 +58,62 @@ function cycleTheme(): void {
   themePref.value = next
 }
 
+/** 分区中文名（与 tlrp / tlmemory 分区语义一一对应） */
+const PARTITION_TITLES: Record<string, string> = {
+  core: '核心画像',
+  work: '工程运维',
+  rp: '角色扮演',
+  lore: '世界观设定',
+}
+
+/**
+ * 分区胶囊：只列出**真的有记忆**的分区（零条分区不占位），条数按叶子计。
+ * 分区与工程正交 —— rp/lore 的角色记忆挂在 global 树下，按工程维度看不见，
+ * 这一条筛选条才是它们在界面上的入口。
+ */
+const partitionChips = computed(() => {
+  const totals = new Map<string, number>()
+  for (const row of store.partitionStats) {
+    if (!row.scope) continue
+    totals.set(row.scope, (totals.get(row.scope) ?? 0) + Number(row.leaves ?? 0))
+  }
+  return ['core', 'work', 'rp', 'lore']
+    .filter((scope) => (totals.get(scope) ?? 0) > 0)
+    .map((scope) => ({ scope, title: PARTITION_TITLES[scope] ?? scope, leaves: totals.get(scope) ?? 0 }))
+})
+
+/** 角色胶囊：rp/lore 分区里出现过的角色（其它分区没有角色归属） */
+const charChips = computed(() => {
+  const totals = new Map<string, number>()
+  for (const row of store.partitionStats) {
+    if (!row.charId) continue
+    if (row.scope !== 'rp' && row.scope !== 'lore') continue
+    totals.set(row.charId, (totals.get(row.charId) ?? 0) + Number(row.leaves ?? 0))
+  }
+  return [...totals.entries()].map(([charId, leaves]) => ({ charId, leaves }))
+})
+
+/** 角色分区的默认角色：点「角色扮演 / 世界观设定」时自动带上第一个角色 */
+const defaultCharId = computed<string>(() => charChips.value[0]?.charId ?? '')
+
+/** 点分区胶囊：已激活则退出分区模式；rp/lore 自动带默认角色 */
+function choosePartition(scope: string): void {
+  const needsChar = scope === 'rp' || scope === 'lore'
+  void store.setPartition(scope, needsChar ? store.activeCharId || defaultCharId.value : '')
+}
+
+/** 点角色胶囊：在当前分区内切换角色（未选分区时落到 rp） */
+function chooseChar(charId: string): void {
+  const scope = store.activePartition === 'rp' || store.activePartition === 'lore' ? store.activePartition : 'rp'
+  void store.setPartition(scope, charId)
+}
+
+/** 全局偏好胶囊：先退出分区模式，再切树 */
+function chooseGlobal(): void {
+  if (store.activePartition) void store.setPartition('')
+  void store.toggleGlobal()
+}
+
 onMounted(() => {
   // 先接主题再取数据：避免首屏用错配色。
   disposeThemeBridge = setupThemeBridge()
@@ -79,6 +135,7 @@ onBeforeUnmount(() => {
         TL·MEMORY
         <!-- 只统计真正的记忆条目（叶子）；目录骨架不是记忆，不该混进「N 条」 -->
         <span class="tlm-brand-count">{{ store.memoryNodes.length }} 条</span>
+        <span v-if="store.partitionLabel" class="tlm-partition-badge">{{ store.partitionLabel }}</span>
       </span>
       <span class="tlm-spacer" />
 
@@ -90,9 +147,9 @@ onBeforeUnmount(() => {
       <button
         type="button"
         class="tlm-pill"
-        :aria-pressed="store.currentTree === 'global'"
+        :aria-pressed="store.currentTree === 'global' && !store.activePartition"
         title="查看跨工程通用的全局偏好"
-        @click="store.toggleGlobal()"
+        @click="chooseGlobal"
       >
         全局偏好
       </button>
@@ -167,6 +224,48 @@ onBeforeUnmount(() => {
         </svg>
       </button>
     </header>
+
+    <!-- 物理分区筛选条（v2）：core / work / rp / lore，右侧挂角色胶囊。
+         分区维度与工程维度正交 —— 角色扮演记忆挂在 global 树下，工程下拉框里
+         只能看到「一整棵 global」，这里是它唯一的入口。 -->
+    <div v-if="partitionChips.length > 0" class="tlm-partitions">
+      <span class="tlm-partitions-label">分区</span>
+      <button
+        v-for="chip in partitionChips"
+        :key="chip.scope"
+        type="button"
+        class="tlm-partition-chip"
+        :class="{ 'is-active': store.activePartition === chip.scope }"
+        :aria-pressed="store.activePartition === chip.scope"
+        :title="`只看 ${chip.title} 分区（${chip.leaves} 条）`"
+        @click="choosePartition(chip.scope)"
+      >
+        {{ chip.title }}
+        <span class="tlm-partition-count">{{ chip.leaves }}</span>
+      </button>
+      <span v-if="charChips.length > 0" class="tlm-partitions-sep" aria-hidden="true" />
+      <button
+        v-for="char in charChips"
+        :key="char.charId"
+        type="button"
+        class="tlm-partition-chip tlm-partition-char"
+        :class="{ 'is-active': store.isActiveChar(char.charId) }"
+        :aria-pressed="store.isActiveChar(char.charId)"
+        :title="`切换到角色「${char.charId}」的分区记忆（${char.leaves} 条）`"
+        @click="chooseChar(char.charId)"
+      >
+        {{ char.charId }}
+      </button>
+      <button
+        v-if="store.activePartition"
+        type="button"
+        class="tlm-partition-clear"
+        title="退出分区筛选，回到工程/全局维度"
+        @click="store.setPartition('')"
+      >
+        退出分区
+      </button>
+    </div>
 
     <div class="tlm-searchbar">
       <input

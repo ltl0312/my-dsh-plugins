@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import { openDatabase, type SqlDatabase } from './sqlite.js'
+import { derivePartition, normalizeCharId, type MemoryPartition } from './partition.js'
 import type { MemoryNode, ProjectSummary, SearchOptions, SearchResult } from './types.js'
 
 /**
@@ -155,6 +156,64 @@ const REINFORCE_WEIGHT = 0.1
 const REINFORCE_SCORE_CAP = 10
 /** 短词 LIKE 回退检索的固定基线分（LIKE 无相关性排序语义，取正值小基线） */
 const LIKE_FALLBACK_SCORE = 1
+
+/**
+ * 查询串拆词：把整句/短语拆成若干「核心词」供 FTS OR 匹配。
+ *
+ * 为什么必须拆：FTS5 trigram 的 MATCH 是按**词元序列**做子串匹配的，
+ * 把整句 `"上次说的橡木蛋糕卷在哪"` 当短语送进去，要求索引里存在这条完整
+ * 序列，实际命中率为零。拆成词后各自成一个 trigram 短语，OR 起来才有召回。
+ *
+ * 长段（无分隔符的中文句子）：按 4 字窗口、步长 3 切分，兼顾覆盖率与数量上限。
+ * 任何非字母数字字符（空白、标点、斜杠）都视为分隔符。
+ */
+function splitQueryTerms(text: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const push = (term: string): void => {
+    const clean = term.trim()
+    if (!clean || seen.has(clean)) return
+    seen.add(clean)
+    out.push(clean)
+  }
+  for (const seg of text.split(/[^\p{L}\p{N}_]+/u)) {
+    if (!seg) continue
+    const chars = [...seg]
+    if (chars.length <= 6) {
+      push(seg)
+      continue
+    }
+    for (let i = 0; i + 4 <= chars.length && out.length < 8; i += 3) {
+      push(chars.slice(i, i + 4).join(''))
+    }
+  }
+  return out.slice(0, 8)
+}
+
+/**
+ * 分区/角色过滤（FTS 与 LIKE 两条路径共用，唯一写法）。
+ *
+ * 两个刻意的设计：
+ * 1. 分区**不进 FTS 倒排**，只在 nodes 上做等值过滤 —— 把 scope 塞进索引会让
+ *    「搜任何词都命中整片 scope=rp」变成假命中源。走 idx_nodes_partition 更快也更准。
+ * 2. `char_id = '' ` 的行对任何角色都可见：scope='core' 的全局画像、以及迁移期
+ *    尚未绑定角色的历史记忆都属于这一类，隔离不能把它们一起屏蔽掉。
+ */
+function appendPartitionFilter(
+  where: string[],
+  params: unknown[],
+  partitions?: string[],
+  charId?: string,
+): void {
+  if (Array.isArray(partitions) && partitions.length > 0) {
+    where.push(`n.scope IN (${partitions.map(() => '?').join(', ')})`)
+    params.push(...partitions)
+  }
+  if (charId) {
+    where.push("(n.char_id = ? OR n.char_id = '')")
+    params.push(charId)
+  }
+}
 
 /**
  * P2-12 统一路径分段净化函数（单一事实来源）：
@@ -320,6 +379,92 @@ export class MemoryDB {
 
       CREATE INDEX IF NOT EXISTS idx_nodes_merged_into ON nodes(merged_into);
     `)
+
+    // ── v2 迁移（1.4.0）：物理分区 scope / 角色隔离 char_id / Trigram 标签 tags ──
+    //
+    // 三条硬约束，任何一条破了都会毁存量数据：
+    // 1. 只 ADD COLUMN，绝不重建 nodes 表 —— 重建要复制全表，一旦中途崩溃就是
+    //    「表没了、数据还在旧文件里」的不可恢复态。
+    // 2. 回填必须幂等且可续跑：以 `scope = ''` 作为「尚未回填」的判定，
+    //    因为 derivePartition 的返回值永不为空串。中断后重跑不会覆盖已迁移行。
+    // 3. FTS 表重建放在回填**之后**：回填会触发 trg_nodes_au，而旧触发器只写 5 列。
+    //    先换 FTS 再回填的话，旧触发器会因为列数不符而抛错，整个迁移中断。
+    if (!columns.includes('scope')) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN scope TEXT NOT NULL DEFAULT ''")
+    }
+    if (!columns.includes('char_id')) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN char_id TEXT NOT NULL DEFAULT ''")
+    }
+    if (!columns.includes('tags')) {
+      this.db.exec('ALTER TABLE nodes ADD COLUMN tags TEXT')
+    }
+
+    const pending = this.db
+      .prepare("SELECT COUNT(*) AS n FROM nodes WHERE scope = ''")
+      .get() as { n: number } | undefined
+    if (Number(pending?.n ?? 0) > 0) {
+      this.withTransaction(() => {
+        const rows = this.db
+          .prepare('SELECT id, tree_type, path, name, keywords, tags FROM nodes WHERE scope = \'\'')
+          .all() as Array<Record<string, unknown>>
+        // tags 的初值取 keywords：存量记忆的关键词是沉淀链路真实产出物，
+        // 直接丢空会让升级后的检索瞬间变哑；后续写入再按 trigram 口径覆盖。
+        const update = this.db.prepare(
+          "UPDATE nodes SET scope = ?, char_id = ?, tags = COALESCE(NULLIF(tags, ''), keywords, '') WHERE id = ?",
+        )
+        for (const row of rows) {
+          const identity = derivePartition({
+            treeType: String(row.tree_type ?? ''),
+            dirPath: String(row.path ?? ''),
+            name: String(row.name ?? ''),
+          })
+          update.run(identity.scope, identity.charId, Number(row.id))
+        }
+      })
+    }
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_nodes_partition ON nodes(scope, char_id);
+      CREATE INDEX IF NOT EXISTS idx_nodes_pinned ON nodes(scope, char_id, is_pinned);
+    `)
+
+    // FTS 表升级：新增 tags 列（最高列权重），分区/角色不进 FTS ——
+    // 它们是等值过滤，留在 nodes 的 WHERE 里走索引，塞进倒排只会制造假命中
+    // （例如搜「流萤」时把 scope='rp' 的行整片捞出来）。
+    const ftsColumns = (this.db.pragma('table_info(memory_fts)') as Array<{ name: string }>).map(
+      (c) => c.name,
+    )
+    if (!ftsColumns.includes('tags')) {
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS trg_nodes_ai;
+        DROP TRIGGER IF EXISTS trg_nodes_ad;
+        DROP TRIGGER IF EXISTS trg_nodes_au;
+        DROP TABLE IF EXISTS memory_fts;
+
+        CREATE VIRTUAL TABLE memory_fts USING fts5(
+          tree_type, path, name, content, keywords, tags,
+          tokenize = 'trigram'
+        );
+
+        INSERT INTO memory_fts(rowid, tree_type, path, name, content, keywords, tags)
+        SELECT id, tree_type, path, name, content, keywords, COALESCE(tags, '') FROM nodes;
+
+        CREATE TRIGGER trg_nodes_ai AFTER INSERT ON nodes BEGIN
+          INSERT INTO memory_fts(rowid, tree_type, path, name, content, keywords, tags)
+          VALUES (new.id, new.tree_type, new.path, new.name, new.content, new.keywords, COALESCE(new.tags, ''));
+        END;
+
+        CREATE TRIGGER trg_nodes_ad AFTER DELETE ON nodes BEGIN
+          DELETE FROM memory_fts WHERE rowid = old.id;
+        END;
+
+        CREATE TRIGGER trg_nodes_au AFTER UPDATE ON nodes BEGIN
+          DELETE FROM memory_fts WHERE rowid = old.id;
+          INSERT INTO memory_fts(rowid, tree_type, path, name, content, keywords, tags)
+          VALUES (new.id, new.tree_type, new.path, new.name, new.content, new.keywords, COALESCE(new.tags, ''));
+        END;
+      `)
+    }
   }
 
   /**
@@ -334,6 +479,39 @@ export class MemoryDB {
   }
 
   /**
+   * Trigram 标签归一化（唯一入口）。
+   *
+   * 为什么必须在这里强约束而不是靠调用方自觉：
+   * FTS5 trigram 分词器的索引粒度是 3 个字符，**少于 3 字符的 token 根本进不了倒排**。
+   * 调用方（尤其是模型）习惯写「流萤 萨姆」这种 2 字人名当标签，那样等于没打标签，
+   * 检索时只能掉进 LIKE 兜底（全表扫）。所以这里主动把短标签丢掉（它们仍会留在
+   * keywords 列里被 LIKE 兜底覆盖），只保留能真正进索引的长词，并按出现顺序去重。
+   */
+  private normalizeTags(tags: string[] | string | undefined, fallbackKeywords: string): string {
+    const raw = Array.isArray(tags)
+      ? tags
+      : String(tags ?? '')
+          .split(/[\s,，、;；]+/)
+          .filter(Boolean)
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const item of [raw, fallbackKeywords.split(' ')].flat()) {
+      // 标签允许中文与常规可读字符，但不允许分隔符（否则会拆成多个 token）
+      const clean = String(item ?? '')
+        .replace(/[\s,，、;；"'\\/]+/g, '')
+        .trim()
+      if (!clean) continue
+      // 短于 3 字符的 token 对 trigram 索引不可见，保留它只会制造「以为打了标签」的假象
+      if ([...clean].length < 3) continue
+      if (seen.has(clean)) continue
+      seen.add(clean)
+      out.push(clean)
+      if (out.length >= 12) break
+    }
+    return out.join(' ')
+  }
+
+  /**
    * 沿物化路径递归构建目录节点并在末端挂载/强化原子断言叶子。
    * 同 (tree_type, path, name) 冲突时执行强化：reinforce_count + 1 并更新内容与关键词。
    */
@@ -343,7 +521,18 @@ export class MemoryDB {
     name: string,
     content: string,
     keywords: string[],
-    options: { source?: string; status?: string } = {},
+    options: {
+      source?: string
+      status?: string
+      /** Trigram 标签（空格分隔的 ≥3 字词），最高列权重 */
+      tags?: string[] | string
+      /** 显式分区；缺省从路径推导 */
+      scope?: string
+      /** 角色隔离键（rp/lore 必给） */
+      charId?: string
+      /** 置顶：RP 态每轮无条件注入的常驻记忆 */
+      pinned?: boolean
+    } = {},
   ): MemoryNode {
     return this.withTransaction(() => {
       const cleanSegments = (Array.isArray(pathSegments) ? pathSegments : [])
@@ -356,6 +545,7 @@ export class MemoryDB {
         .map((k) => sanitizeSegment(k))
         .filter(Boolean)
         .join(' ')
+      const cleanTags = this.normalizeTags(options.tags, cleanKeywords)
 
       let parentId: number | null = null
       let fullPath = ''
@@ -370,7 +560,7 @@ export class MemoryDB {
         parentId = this.ensureDirectory(treeType, parentId, `${fullPath}/`, seg, options.source ?? 'manual')
       }
 
-      return this.upsertNode(
+      const node = this.upsertNode(
         treeType,
         parentId,
         `${fullPath}/`,
@@ -387,7 +577,20 @@ export class MemoryDB {
         // 真正决定行为的是这里的 JS 缺省值 —— 现两者已对齐。
         options.source ?? 'manual',
         options.status ?? 'confirmed',
+        {
+          tags: cleanTags,
+          scope: options.scope,
+          charId: options.charId,
+        },
       )
+      // 置顶是一次性的显式声明（RP 态常驻羁绊记忆），不能靠 upsertNode 的
+      // INSERT 缺省 0 来表达 —— 冲突更新分支不碰 is_pinned，否则每次重沉淀
+      // 都会把用户置顶的记忆悄悄取消置顶。
+      if (options.pinned) {
+        this.db.prepare('UPDATE nodes SET is_pinned = 1 WHERE id = ?').run(Number(node.id))
+        return { ...node, is_pinned: 1 }
+      }
+      return node
     })
   }
 
@@ -429,17 +632,34 @@ export class MemoryDB {
       }
 
       const now = Date.now()
+      const identity = derivePartition({ treeType: cleanType, dirPath: `${fullPath}/`, name: cleanName })
+      const tags = this.normalizeTags(undefined, cleanKeywords)
       const result = this.db
         .prepare(`
-          INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
-          VALUES (?, ?, ?, ?, 1, ?, ?, 1, 0, 'manual', 'confirmed', ?, ?)
+          INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, tags, scope, char_id, reinforce_count, is_pinned, source, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 1, 0, 'manual', 'confirmed', ?, ?)
           ON CONFLICT(tree_type, path, name) DO UPDATE SET
             content = excluded.content,
             keywords = excluded.keywords,
+            tags = COALESCE(NULLIF(excluded.tags, ''), tags),
+            scope = excluded.scope,
+            char_id = CASE WHEN excluded.char_id = '' THEN char_id ELSE excluded.char_id END,
             updated_at = excluded.updated_at
           RETURNING *
         `)
-        .get(cleanType, parentId, `${fullPath}/`, cleanName, cleanContent, cleanKeywords, now, now) as Record<string, unknown>
+        .get(
+          cleanType,
+          parentId,
+          `${fullPath}/`,
+          cleanName,
+          cleanContent,
+          cleanKeywords,
+          tags,
+          identity.scope,
+          identity.charId,
+          now,
+          now,
+        ) as Record<string, unknown>
       return this.rowToNode(result)
     })
   }
@@ -462,12 +682,15 @@ export class MemoryDB {
     if (existing) return Number(existing.id)
 
     const now = Date.now()
+    // 目录节点也要打分区标记：分区过滤是 `nodes WHERE scope IN (…)`，
+    // 目录若留空串，按分区读整棵树（看板/树视图）时会把骨架整个漏掉。
+    const identity = derivePartition({ treeType, dirPath, name })
     const result = this.db
       .prepare(`
-        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 0, NULL, NULL, 1, 0, ?, 'confirmed', ?, ?)
+        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, tags, scope, char_id, reinforce_count, is_pinned, source, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 0, NULL, NULL, NULL, ?, ?, 1, 0, ?, 'confirmed', ?, ?)
       `)
-      .run(treeType, parentId, dirPath, name, source, now, now)
+      .run(treeType, parentId, dirPath, name, identity.scope, identity.charId, source, now, now)
     return Number(result.lastInsertRowid)
   }
 
@@ -483,12 +706,19 @@ export class MemoryDB {
     // 否则任何新增调用点都会不知不觉被打上「自动沉淀」标记。
     source: string,
     status: string = 'confirmed',
+    extras: { tags?: string | null; scope?: string; charId?: string } = {},
   ): MemoryNode {
     const now = Date.now()
+    // 分区身份：显式入参优先，缺省从路径推导。两条路径共用 derivePartition，
+    // 保证「写入时落的分区」与「迁移回填算出的分区」永远同一套口径。
+    const derived = derivePartition({ treeType, dirPath: nodePath, name })
+    const scope = String(extras.scope ?? '').trim() || derived.scope
+    const charId = normalizeCharId(extras.charId) || derived.charId
+    const tags = String(extras.tags ?? '').trim()
     const result = this.db
       .prepare(`
-        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, reinforce_count, is_pinned, source, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
+        INSERT INTO nodes (tree_type, parent_id, path, name, is_leaf, content, keywords, tags, scope, char_id, reinforce_count, is_pinned, source, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
         ON CONFLICT(tree_type, path, name) DO UPDATE SET
           -- P2-6：同步 is_leaf。叶子与既有目录同名同路径冲突（LLM 生成分段与
           -- 名称撞车）时，INSERT 走冲突更新后该行必须转为叶子，否则内容写进去了
@@ -496,13 +726,34 @@ export class MemoryDB {
           is_leaf = excluded.is_leaf,
           content = excluded.content,
           keywords = excluded.keywords,
+          -- tags 的收敛语义：新值为空时**保留旧标签**，绝不用空串把已积累的
+          -- trigram 标签冲掉（沉淀链路大多不传 tags，冲掉等于每次重沉淀都让
+          -- 该条记忆从索引里消失）。
+          tags = COALESCE(NULLIF(excluded.tags, ''), tags),
+          scope = excluded.scope,
+          char_id = CASE WHEN excluded.char_id = '' THEN char_id ELSE excluded.char_id END,
           reinforce_count = reinforce_count + 1,
           updated_at = excluded.updated_at
           -- M1：冲突更新不动 source / status —— 既有行的审核结论（含 pending
           -- 待确认）不被后续重沉淀无声改写。
         RETURNING *
       `)
-      .get(treeType, parentId, nodePath, name, isLeaf, content, keywords, source, status, now, now) as Record<string, unknown>
+      .get(
+        treeType,
+        parentId,
+        nodePath,
+        name,
+        isLeaf,
+        content,
+        keywords,
+        tags,
+        scope,
+        charId,
+        source,
+        status,
+        now,
+        now,
+      ) as Record<string, unknown>
     return this.rowToNode(result)
   }
 
@@ -518,16 +769,23 @@ export class MemoryDB {
     const cleanQuery = String(query ?? '').trim()
     if (!cleanQuery) return []
 
-    const { treeType, pathPrefix, limit = 5 } = options
+    const { treeType, pathPrefix, limit = 5, partitions, charId } = options
+
+    // 多词自动拆解：模型经常整句塞进来（「上次说的橡木蛋糕卷在哪」），
+    // Trigram 短语匹配会把整句当成一个 token 导致零命中。拆成核心词后用 OR
+    // 连接，命中任一核心词即召回，再由 bm25 列权重排序决定相关性。
+    const terms = splitQueryTerms(cleanQuery)
+    const longTerms = terms.filter((t) => [...t].length >= 3)
+    const shortTerms = terms.filter((t) => [...t].length < 3)
 
     // FTS5 Trigram 最小检索粒度为 3 字符，1–2 字关键词会静默零命中：
     // 短词降级为 LIKE 模糊匹配（name / content / keywords 三列）兜底
-    if (cleanQuery.length < 3) {
-      return this.searchByLike(cleanQuery, options)
+    if (longTerms.length === 0) {
+      return this.searchByLike(terms.length > 0 ? terms : [cleanQuery], options)
     }
 
     // 将查询包裹为短语查询，规避 FTS5 语法注入并兼容中英文混排 Trigram 匹配
-    const matchQuery = `"${cleanQuery.replace(/"/g, '""')}"`
+    const matchQuery = longTerms.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ')
 
     // M1 待确认区隔离：pending 记忆不参与任何检索召回（切断脏记忆自我强化的
     // 注入通道）；看板的树读取（getNodes*）不受影响，由看板展示待确认徽标。
@@ -541,42 +799,80 @@ export class MemoryDB {
       where.push(`n.path LIKE ? ESCAPE '\\'`)
       params.push(`${escapeLikePattern(pathPrefix)}%`)
     }
+    appendPartitionFilter(where, params, partitions, charId)
     params.push(limit)
 
+    // bm25 列权重（列序 tree_type, path, name, content, keywords, tags）：
+    // tags 最高（人手/规则强制的检索锚点），path 次之（分区即语义），
+    // tree_type 最低（它几乎是常量，权重高只会放大噪声）。
     const rows = this.db
       .prepare(`
-        SELECT n.*, bm25(memory_fts) AS bm25_score
+        SELECT n.*, bm25(memory_fts, 0.2, 2.0, 1.5, 1.0, 1.5, 3.0) AS bm25_score
         FROM memory_fts
         JOIN nodes n ON n.id = memory_fts.rowid
         WHERE ${where.join(' AND ')}
-        ORDER BY n.is_pinned DESC, bm25(memory_fts)
+        ORDER BY n.is_pinned DESC, bm25_score
         LIMIT ?
       `)
       .all(...params) as Array<Record<string, unknown>>
 
-    return rows.map((row, index) => {
+    const scored = rows.map((row) => {
       const node = this.rowToNode(row)
       const bm25 = Number(row.bm25_score ?? 0)
       const reinforceBonus = Math.min(node.reinforce_count, REINFORCE_SCORE_CAP) * REINFORCE_WEIGHT
       return {
         ...node,
         score: Math.round((-bm25 + reinforceBonus) * 100) / 100,
-        bm25_rank: index + 1,
+        bm25_rank: 0,
       } satisfies SearchResult
     })
+
+    // 混排补齐：长词走完 FTS 后，短词（「流萤」这类 <3 字人名）仍要能命中，
+    // 否则「橡木蛋糕卷 流萤」会因为短词被丢弃而丢掉一半召回面。
+    if (shortTerms.length > 0) {
+      const likeHits = this.searchByLike(shortTerms, { ...options, limit })
+      const seen = new Set(scored.map((r) => r.id))
+      for (const hit of likeHits) {
+        if (seen.has(hit.id)) continue
+        seen.add(hit.id)
+        scored.push(hit)
+      }
+    }
+
+    return scored
+      .sort((a, b) => {
+        if (a.is_pinned !== b.is_pinned) return b.is_pinned - a.is_pinned
+        return b.score - a.score
+      })
+      .slice(0, limit)
+      .map((row, index) => ({ ...row, bm25_rank: index + 1 }))
   }
 
   /**
    * 短词（<3 字符）LIKE 回退检索：Trigram 索引无法命中的最小粒度问题在此兜底。
    * score 给固定基线（LIKE 无相关性排序语义），按强化计数与更新时间排序。
    */
-  private searchByLike(cleanQuery: string, options: SearchOptions): SearchResult[] {
-    const { treeType, pathPrefix, limit = 5 } = options
-    const like = `%${escapeLikePattern(cleanQuery)}%`
+  private searchByLike(terms: string | string[], options: SearchOptions): SearchResult[] {
+    const { treeType, pathPrefix, limit = 5, partitions, charId } = options
+    const list = (Array.isArray(terms) ? terms : [terms])
+      .map((t) => String(t ?? '').trim())
+      .filter(Boolean)
+    if (list.length === 0) return []
+
+    // 每个短词独立展开成一个 4 列 OR 组，词与词之间再 OR：
+    // 「流萤 萨姆」只要命中任一词即召回（召回优先，排序交给后面的打分）。
+    // 注意把 tags 也纳入 LIKE —— 短词的标签永远进不了 trigram 倒排，
+    // 但它们在 tags 列里仍然存在，不看这一列等于白白丢掉一条命中路径。
+    const termGroups: string[] = []
+    const params: unknown[] = []
+    for (const term of list) {
+      const like = `%${escapeLikePattern(term)}%`
+      termGroups.push('(n.name LIKE ? OR n.content LIKE ? OR n.keywords LIKE ? OR n.tags LIKE ?)')
+      params.push(like, like, like, like)
+    }
 
     // M1 待确认区隔离：与 FTS 路径一致，pending 不进 LIKE 兜底召回
-    const where: string[] = ['(n.name LIKE ? OR n.content LIKE ? OR n.keywords LIKE ?)', MERGED_EXCLUDED_SQL]
-    const params: unknown[] = [like, like, like]
+    const where: string[] = [`(${termGroups.join(' OR ')})`, MERGED_EXCLUDED_SQL]
     if (treeType) {
       where.push('n.tree_type = ?')
       params.push(treeType)
@@ -585,6 +881,7 @@ export class MemoryDB {
       where.push(`n.path LIKE ? ESCAPE '\\'`)
       params.push(`${escapeLikePattern(pathPrefix)}%`)
     }
+    appendPartitionFilter(where, params, partitions, charId)
     params.push(limit)
 
     const rows = this.db
@@ -605,6 +902,58 @@ export class MemoryDB {
         bm25_rank: index + 1,
       } satisfies SearchResult
     })
+  }
+
+  /**
+   * 置顶记忆读取（RP 态每轮无条件注入）。
+   *
+   * 与 search 的分工：这里**不做相关性筛选**，只按分区与角色取 pinned=1 的行。
+   * 它服务的是「必须每轮都在场」的信息（当前角色的核心羁绊、用户画像）。
+   * 一旦让这类信息参与检索，措辞稍变就会消失 —— 那正是人设崩坏的起点。
+   */
+  public listPinned(partitions: string[] = [], charId = '', limit = 6): MemoryNode[] {
+    const where: string[] = ['n.is_pinned = 1', 'n.is_leaf = 1', MERGED_EXCLUDED_SQL]
+    const params: unknown[] = []
+    appendPartitionFilter(where, params, partitions, charId)
+    params.push(limit)
+    const rows = this.db
+      .prepare(`
+        SELECT n.* FROM nodes n
+        WHERE ${where.join(' AND ')}
+        ORDER BY n.updated_at DESC
+        LIMIT ?
+      `)
+      .all(...params) as Array<Record<string, unknown>>
+    return rows.map((row) => this.rowToNode(row))
+  }
+
+  /** 分区统计：scope × char_id 的节点 / 叶子 / 置顶计数（取证与看板共用） */
+  public partitionStats(): Array<{
+    scope: string
+    char_id: string
+    total: number
+    leaves: number
+    pinned: number
+  }> {
+    const rows = this.db
+      .prepare(`
+        SELECT scope,
+               char_id,
+               COUNT(*) AS total,
+               SUM(CASE WHEN is_leaf = 1 THEN 1 ELSE 0 END) AS leaves,
+               SUM(CASE WHEN is_pinned = 1 THEN 1 ELSE 0 END) AS pinned
+        FROM nodes
+        GROUP BY scope, char_id
+        ORDER BY scope, char_id
+      `)
+      .all() as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      scope: String(row.scope ?? ''),
+      char_id: String(row.char_id ?? ''),
+      total: Number(row.total ?? 0),
+      leaves: Number(row.leaves ?? 0),
+      pinned: Number(row.pinned ?? 0),
+    }))
   }
 
   public getAllNodes(treeType?: string): MemoryNode[] {
@@ -628,6 +977,34 @@ export class MemoryDB {
     const rows = this.db
       .prepare("SELECT * FROM nodes WHERE tree_type <> 'global' ORDER BY tree_type, path, name")
       .all()
+    return (rows as Array<Record<string, unknown>>).map((row) => this.rowToNode(row))
+  }
+
+  /**
+   * 按**物理分区**取节点（core / work / rp / lore），与 tree_type 正交。
+   *
+   * 为什么不能复用 getAllNodes：`tree_type` 是工程维度（repo:<hash> / global），而
+   * `scope` 是记忆用途维度 —— 角色记忆（rp/lore）刻意落在 global 树下以便跨工程可见，
+   * 因此「rp 分区」在 tree_type 上根本不存在，只能按 scope 列过滤。
+   *
+   * charId 传空串表示**不限角色**（core/work 没有角色归属）；传具体值则包含该角色
+   * 的条目与共享层（char_id = ''）的条目，与检索侧 `appendPartitionFilter` 同一口径。
+   */
+  public getNodesByPartition(scope: string, charId = '', limit = 0): MemoryNode[] {
+    const cleanScope = String(scope ?? '').trim()
+    if (!cleanScope) return []
+    const params: unknown[] = [cleanScope]
+    let where = 'scope = ?'
+    const cleanChar = normalizeCharId(charId)
+    if (cleanChar) {
+      where += " AND (char_id = ? OR char_id = '')"
+      params.push(cleanChar)
+    }
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0
+    const sql =
+      `SELECT * FROM nodes WHERE ${where} ORDER BY path, name` + (cap > 0 ? ' LIMIT ?' : '')
+    if (cap > 0) params.push(cap)
+    const rows = this.db.prepare(sql).all(...params)
     return (rows as Array<Record<string, unknown>>).map((row) => this.rowToNode(row))
   }
 
@@ -1760,6 +2137,27 @@ export class MemoryDB {
       is_leaf: Number(row.is_leaf ?? 0),
       content: row.content == null ? null : String(row.content),
       keywords: row.keywords == null ? null : String(row.keywords),
+      // 旧副本 / 未迁移库读不到这三列时回落到「从路径推导」的分区身份，
+      // 而不是空串：空 scope 会让分区过滤把整行悄悄排除，看起来像「记忆丢了」。
+      scope: (() => {
+        const explicit = String(row.scope ?? '').trim()
+        if (explicit) return explicit
+        return derivePartition({
+          treeType: String(row.tree_type ?? ''),
+          dirPath: String(row.path ?? ''),
+          name: String(row.name ?? ''),
+        }).scope
+      })(),
+      char_id: (() => {
+        const explicit = normalizeCharId(row.char_id)
+        if (explicit) return explicit
+        return derivePartition({
+          treeType: String(row.tree_type ?? ''),
+          dirPath: String(row.path ?? ''),
+          name: String(row.name ?? ''),
+        }).charId
+      })(),
+      tags: row.tags == null ? null : String(row.tags),
       reinforce_count: Number(row.reinforce_count ?? 0),
       is_pinned: Number(row.is_pinned ?? 0),
       source: String(row.source ?? 'manual'),
