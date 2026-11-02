@@ -1703,6 +1703,12 @@ function createPlugin() {
         handler: async ({ agent, rawInput }) => runCommand('trigger', rawInput, agent),
       })
       register({
+        name: 'style',
+        description: '风格层开关：只带角色语言风格与表情/贴纸，不演动作（/style on|off|default|status）',
+        input: { hint: 'on|off|default|status' },
+        handler: async ({ agent, rawInput }) => runCommand('style', rawInput, agent),
+      })
+      register({
         name: 'tlrp',
         description: '查看 tlrp 状态（当前形态／路由链路／角色／情景／触发器）',
         input: { hint: '[status]' },
@@ -1710,7 +1716,7 @@ function createPlugin() {
       })
       // 每个形态声明的斜杠别名都注册成真实命令：新建形态后重载宿主即可直接敲 /形态ID。
       // 未注册到这里的自定义别名（如【排障】）仍由 agent/pre-step 的消息级解析接住，无需重载。
-      const claimed = new Set(['auto', 'mode', 'char', 'scene', 'title', 'trigger', 'tlrp'])
+      const claimed = new Set(['auto', 'mode', 'char', 'scene', 'title', 'trigger', 'style', 'tlrp'])
       for (const mode of normalizeModes(read('modes'))) {
         for (const alias of mode.commandAliases) {
           const token = asString(alias, '').trim()
@@ -1767,6 +1773,55 @@ function createPlugin() {
           if (body) forward(agent, body)
           const label = lockId === 'auto' ? '自动路由（auto）' : `${resolvedTarget.name}（${lockId}）`
           return { kind: 'success', text: `tlrp 已切换到 ${label}${body ? '，并把本轮正文交给模型' : ''}` }
+        }
+        if (kind === 'style') {
+          const raw = asString(rawInput, '').trim().toLowerCase()
+          const session = state.sessionState(agent)
+          const modeDef = current.modeDef
+          const globalDefault = asString(read('styleLayerDefault'), 'off')
+          const modeLayerText = modeDef ? `${modeDef.styleLayer}` : '（当前无形态）'
+          if (!raw || raw === 'status') {
+            const resolved = resolveStyleLayer({
+              modeLayer: modeDef?.styleLayer,
+              globalDefault,
+              sessionOverride: session?.styleLayer ?? 'inherit',
+            })
+            const current1 = current.style ?? {}
+            return {
+              kind: 'success',
+              text: [
+                'tlrp 风格层',
+                `- 本轮生效：${resolved.on ? '开' : '关'}（来源：${styleLayerSourceText(resolved.source)}）`,
+                `- 当前形态自身设置：${modeLayerText}`,
+                `- 全局默认（styleLayerDefault）：${globalDefault}`,
+                `- 会话覆盖（/style）：${session?.styleLayer ?? '未设置'}`,
+                `- 表情包 ${current1.stickerCount ?? 0} 张；图库 ${current1.galleryCount ?? 0} 张；每轮最多 ${asString(read('maxStickersPerTurn'), '2')} 张`,
+                '用法：/style on 开、/style off 关、/style default 交回形态与全局、/style status 查看',
+              ].join('\n'),
+            }
+          }
+          if (raw === 'default' || raw === 'inherit' || raw === 'reset' || raw === 'auto') {
+            if (session) {
+              session.styleLayer = null
+              session.updatedAt = Date.now()
+            }
+            const resolved = resolveStyleLayer({ modeLayer: modeDef?.styleLayer, globalDefault, sessionOverride: 'inherit' })
+            return {
+              kind: 'success',
+              text: `tlrp 风格层已交回形态与全局设置：当前${resolved.on ? '开' : '关'}（来源：${styleLayerSourceText(resolved.source)}）`,
+            }
+          }
+          if (raw !== 'on' && raw !== 'off') {
+            return { kind: 'error', text: '用法：/style on|off|default|status' }
+          }
+          if (session) {
+            session.styleLayer = raw
+            session.updatedAt = Date.now()
+          }
+          return {
+            kind: 'success',
+            text: `tlrp 风格层已在本会话${raw === 'on' ? '开启' : '关闭'}（只影响语言风格与贴图，不改形态红线）`,
+          }
         }
         if (kind === 'char') {
           const wanted = asString(rawInput, '')
@@ -1829,6 +1884,7 @@ function createPlugin() {
         statusLines.push('- 本轮形态：' + (current.mode === 'off' ? '禁用' : currentName + '（' + current.mode + '）') + '（' + current.reason + '）')
         statusLines.push('- 激活角色：' + current.character.name + '（' + current.character.id + '）')
         statusLines.push('- 当前情景：' + current.scene)
+        statusLines.push('- 风格层：' + (current.style?.on ? '开' : '关') + '（来源：' + styleLayerSourceText(current.style?.source) + '；表情包 ' + (current.style?.stickerCount ?? 0) + ' 张／图库 ' + (current.style?.galleryCount ?? 0) + ' 张）')
         statusLines.push('- 已注册形态：' + modes.length + ' 个')
         for (const mode of modes) {
           const flags = []
@@ -1922,6 +1978,7 @@ function createPlugin() {
           footerLabel: s.footerLabel,
           mode: s.mode,
           modeDef: s.modeDef,
+          style: s.style,
           now: s.now,
           cwd: s.cwd,
           reason: s.reason,
@@ -1955,6 +2012,7 @@ function createPlugin() {
         scene: s.scene,
         footerEnabled: s.footerEnabled,
         footerLabel: s.footerLabel,
+        style: { on: s.style.on, source: s.style.source, stickerCount: s.style.stickerCount, galleryCount: s.style.galleryCount },
         triggers: asArray(s.triggers).map((trigger) => ({ id: trigger.id, injectText: trigger.injectText })),
         characterBlock,
         directive,
@@ -1985,6 +2043,7 @@ function createPlugin() {
           allowedTools: entry.allowedTools,
           enableStatusFooter: entry.enableStatusFooter,
           isDefaultFallback: entry.isDefaultFallback,
+          styleLayer: entry.styleLayer,
         })),
 
       /** 扁平化状态快照，外部通道做状态卡片用。 */
@@ -2003,6 +2062,10 @@ function createPlugin() {
           scene: payload.scene,
           footerEnabled: payload.footerEnabled,
           footerLabel: payload.footerLabel,
+          styleLayer: payload.style.on,
+          styleLayerSource: payload.style.source,
+          stickers: payload.style.stickerCount,
+          gallery: payload.style.galleryCount,
           triggers: payload.triggers.map((trigger) => trigger.id),
           now: payload.now,
           cwd: payload.cwd,
@@ -2053,7 +2116,7 @@ function createPlugin() {
         } else if (name === 'auto') {
           kind = 'auto'
           rawArg = parsed.body
-        } else if (name === 'char' || name === 'scene' || name === 'title' || name === 'trigger') {
+        } else if (name === 'char' || name === 'scene' || name === 'title' || name === 'trigger' || name === 'style') {
           kind = name
         } else if (parsed.mode) {
           // 用户自建的形态别名（/debug、【排障】）也走同一条路径
@@ -2144,11 +2207,11 @@ function createPlugin() {
                   const targetMode = asString(parsed.mode, '')
                   let kind
                   if (name === 'status' || name === 'tlrp') kind = 'status'
-                  else if (name === 'char' || name === 'scene' || name === 'title' || name === 'trigger') kind = name
+                  else if (name === 'char' || name === 'scene' || name === 'title' || name === 'trigger' || name === 'style') kind = name
                   else if (name === 'auto' || targetMode === 'auto') kind = 'auto'
                   else kind = 'mode'
                   const arg =
-                    kind === 'char' || kind === 'scene' || kind === 'title' || kind === 'trigger'
+                    kind === 'char' || kind === 'scene' || kind === 'title' || kind === 'trigger' || kind === 'style'
                       ? parsed.arg
                       : parsed.body
                   await runCommand(kind, arg, agent, targetMode)
@@ -2162,10 +2225,11 @@ function createPlugin() {
                     const label = targetMode
                       ? findMode(modes, targetMode) ?? matchModeAlias(modes, targetMode)
                       : null
-                    const rewritten = rewriteFirstUserMessage(
-                      messages,
-                      `（对方用 ${parsed.command} ${label ? `切换到了「${label.name}」` : '切换了运行形态'}，本轮没有附加正文）`,
-                    )
+                    const fallbackText =
+                      kind === 'style'
+                        ? `（对方用 ${parsed.command} 调整了风格层开关，本轮没有附加正文）`
+                        : `（对方用 ${parsed.command} ${label ? `切换到了「${label.name}」` : '切换了运行形态'}，本轮没有附加正文）`
+                    const rewritten = rewriteFirstUserMessage(messages, fallbackText)
                     if (rewritten !== undefined) return { ...decision, messages: rewritten }
                   }
                   return decision
@@ -2480,6 +2544,15 @@ module.exports = {
   renderModeDirective,
   renderOffDirective,
   renderTurnContext,
+  renderStyleBlock,
+  STYLE_LAYER_FLAGS,
+  STICKER_EXTENSIONS,
+  normalizeStyleLayerFlag,
+  resolveStyleLayer,
+  styleLayerSourceText,
+  stickerDirOf,
+  galleryDirOf,
+  scanStickerLibrary,
   formatNow,
   messageText,
   turnTextOf,

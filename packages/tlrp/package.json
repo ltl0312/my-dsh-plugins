@@ -40,13 +40,14 @@
     "scripts/rewrite-persona.mjs",
     "scripts/client-check.mjs",
     "test/core.test.mjs",
-    "test/memory-bridge.test.mjs"
+    "test/memory-bridge.test.mjs",
+    "test/style.test.mjs"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/core.test.mjs test/memory-bridge.test.mjs",
+    "test": "node --test test/core.test.mjs test/memory-bridge.test.mjs test/style.test.mjs",
     "check:apply": "node scripts/apply-check.mjs",
     "check:mutate": "node scripts/mutate-check.mjs",
     "check:client": "node scripts/client-check.mjs",
