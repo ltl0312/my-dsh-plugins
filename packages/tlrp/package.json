@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-tlrp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "DSH 核心角色扮演与多形态矩阵引擎：注册 tlrp 设置命名空间、可自由增删的 modes 形态矩阵、/mode 与形态别名指令拦截、{{tlrp_character}}/{{tlrp_directive}}/{{tlrp_memory_context}}/{{now}} 动态变量、每轮尾部实时状态与 tlmemory 记忆桥注入，并按形态的 toolPolicy 物理拦截工具。",
   "license": "MIT",
   "publishConfig": {
