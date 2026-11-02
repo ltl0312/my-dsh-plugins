@@ -212,7 +212,7 @@ export interface NotificationAction {
  * （「已发给 X」「已允许」「没有可投递的会话」）。它走完全相同的通道与分片
  * 管道，但不属于任何会话事件，所以单独列一个值而不是硬塞进 EventKind。
  */
-export type NotificationKind = EventKind | 'echo'
+export type NotificationKind = EventKind | 'echo' | 'chat'
 
 /** 送进通道的最终形态。 */
 export interface Notification {
@@ -305,7 +305,7 @@ export interface Channel {
 // 配置（设计方案 §4.6）
 // ---------------------------------------------------------------------------
 
-export type ChannelType = 'qq' | 'feishu'
+export type ChannelType = 'qq' | 'feishu' | 'onebot'
 
 export interface ChannelConfig {
   id: string
@@ -366,6 +366,63 @@ export interface ChannelConfig {
    * 「QQ 原生 Markdown」一节。
    */
   markdown?: boolean
+  // ---- 夺舍 QQ（OneBot v11：NapCat / Lagrange / go-cqhttp 系）----
+  /**
+   * 是否开启「夺舍 QQ 直接对话」。
+   *
+   * 与官方机器人通道是两条独立的路：官方 Bot 走开放平台被动回复窗口（有发言
+   * 配额、要审核），夺舍 QQ 走 OneBot 协议直连一个**真人 QQ 号**，想说什么说什么。
+   * 默认关：它要求的 QQ 号与凭据属于用户自己的账号，不该被静默启用。
+   */
+  takeoverEnabled?: boolean
+  /** 被夺舍的 QQ 号（OneBot 的 `self_id`）。回声锁与群 @ 判定都靠它。 */
+  selfId?: string
+  /** 反向 WS 的挂载路径，默认 `/tlnotify/onebot/ws`；OneBot 端填同一个地址。 */
+  wsPath?: string
+  /** 正向 WS 地址（`ws://host:3001`）；填了就由我们主动连过去，与反向二选一。 */
+  wsUrl?: string
+  /** OneBot HTTP API 地址（`http://host:3000`）；发消息与输入状态都走它。 */
+  httpUrl?: string
+  /** OneBot 的 access_token；留空表示服务端未开启鉴权。 */
+  accessToken?: string
+  /**
+   * 允许私聊直接对话的 QQ 号。
+   *
+   * `['*']` = 任何人（**不建议**，等于把模型暴露给所有陌生人）；留空 = 谁都不放行。
+   */
+  allowedPrivateUsers?: string[]
+  /** 允许触发对话的群号；留空 = 任何群都不响应。 */
+  allowedGroups?: string[]
+  /** 群聊触发方式：被 @ 或以 `groupPrefix` 开头 / 只认前缀 / 全部消息都算。 */
+  groupTriggerMode?: 'at_or_prefix' | 'prefix_only' | 'all'
+  /** 群聊触发前缀，默认角色名「流萤」。 */
+  groupPrefix?: string
+  /** 出站 Markdown 策略：原生 MD 节点 / 失败自动回退 / 直接纯文本。 */
+  mdRenderMode?: 'native_md' | 'auto_fallback' | 'plain'
+  /** 对话固定使用的 DSH 会话 id；留空则用 `session.targetSessionId` / 最近会话。 */
+  chatSessionId?: string
+  /**
+   * 这条通道自己的「直接对话」开关组。
+   *
+   * 挂在通道上而不是全局：一个通道是不是聊天窗口，取决于它连的是什么。
+   * 官方 Bot 走通知订阅，夺舍 QQ 才是真人对话；同一个人完全可能挂三个通知
+   * 机器人、只让其中一个能聊天。缺省时由 `config.ts` 的 `defaultChatMode()` 补齐。
+   */
+  chat?: ChatModeConfig
+  /**
+   * 这条通道在 tlrp 里用哪个角色（`tlrp` 的 `characters[].id`）。
+   *
+   * 空串/缺省 = 跟随 tlrp 的全局 `activeCharacterId`。挂在通道上是因为
+   * 「通知用的机器人」和「聊天用的机器人」往往不是同一个号，角色也该分开。
+   */
+  tlrpCharacterId?: string
+  /**
+   * 这条通道在 tlrp 里用哪个形态（`tlrp` 的 `modes[].id`，如 `rp`/`work`/`sam`）。
+   *
+   * 空串/缺省 = 跟随 tlrp 的全局 `mode`（通常 `auto`，按关键词自动判定）。
+   * 填具体 id 就是给这条通道锁死形态——群里排障用 `work`、私聊陪聊用 `rp`。
+   */
+  tlrpMode?: string
   // ---- 飞书 ----
   /** 飞书自建应用 App ID。 */
   feishuAppId?: string
@@ -435,6 +492,41 @@ export interface GlobalModeConfig {
   includeSessionLabel: boolean
   includeSummaryLine: boolean
   includeSubagent: boolean
+}
+
+/**
+ * 直接对话（Interactive Chat）全局设置。
+ *
+ * 与「通知」是两回事：通知是 DSH 有事要告诉你，对话是你在 QQ 里问 DSH。虽然
+ * 共用同一个通道，但对话要多走一遍**模型回合**，所以它的开关、超时与护栏都在
+ * 这里，而不是散落在每个通道里。
+ */
+export interface ChatModeConfig {
+  /** 对话总开关；关掉后 OneBot 通道只做通知，入站消息一律无视。 */
+  enabled: boolean
+  /**
+   * 等待模型回复的上限毫秒数。
+   *
+   * 超时不代表失败：DSH 的回合可能还在跑，只是没在时限内收尾。超时后仍然
+   * 会把已产出的内容发出去（有内容）或回一句「还在想」（没内容），绝不静默丢弃。
+   */
+  replyTimeoutMs: number
+  /**
+   * 是否把 `tlrp` 的模式判定、触发词与角色设定注入到 QQ 对话里。
+   *
+   * 开着时，QQ 里说话与在本机会话里说话看到的是同一个「她」；关掉则 QQ 只
+   * 走裸模型，不注入任何角色。缺 tlrp 服务时整段静默跳过。
+   */
+  injectTlrp: boolean
+  /**
+   * RP 态下是否屏蔽运维工具。
+   *
+   * 聊天时不该突然去翻服务器目录——这既是观感问题，也是安全问题：QQ 那一侧
+   * 的输入来自任何人（白名单内），而工具权限是本机的。
+   */
+  blockToolsInRp: boolean
+  /** 回复前是否先发一个「正在输入」提示（协议支持时）。 */
+  typingIndicator: boolean
 }
 
 export interface TlnotifyConfig {

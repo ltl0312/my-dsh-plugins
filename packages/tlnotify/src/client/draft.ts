@@ -28,7 +28,7 @@ export type ChannelView = ConfigView['channels'][number]
 /** 新建机器人时用来播种「自定义」初值的那份全局设置。 */
 export type ChannelGlobalDefaults = Pick<ConfigView, 'events' | 'content'>
 
-export type ChannelType = 'qq' | 'feishu'
+export type ChannelType = 'qq' | 'feishu' | 'onebot'
 export type FeishuReceiveIdType = 'open_id' | 'chat_id' | 'user_id' | 'union_id' | 'email'
 /** 每台机器人关心哪些会话：全局（所有）/ 只这一个 / 列表中这几个。 */
 export type SessionScope = 'all' | 'single' | 'filter'
@@ -76,6 +76,39 @@ export interface ChannelDraft {
   /** 正文内容是否覆盖全局。 */
   overrideContent: boolean
   content: ContentConfig
+  /**
+   * ── 夺舍 QQ（OneBot）──
+   *
+   * 同样只放非密钥字段：`accessToken` 由 `SecretField` 自己持有草稿，
+   * 与 `appSecret` 一致——草稿里出现密钥字段，保存一次就会把它抹成空。
+   * 两个白名单用文本域收（一行一个），和 `sessionFilter` 共用同一套解析。
+   */
+  takeoverEnabled: boolean
+  selfId: string
+  wsPath: string
+  wsUrl: string
+  httpUrl: string
+  /** 文本域：允许私聊对话的 QQ 号，一行一个；`*` 表示任何人。 */
+  allowedPrivateUsers: string
+  /** 文本域：允许触发对话的群号，一行一个。 */
+  allowedGroups: string
+  groupTriggerMode: 'at_or_prefix' | 'prefix_only' | 'all'
+  groupPrefix: string
+  mdRenderMode: 'native_md' | 'auto_fallback' | 'plain'
+  chatSessionId: string
+  // ── 直接对话（这条通道专属）────────────────────────────────────────
+  // 展平成独立字段而不是嵌一个对象：草稿的每一项都直接绑一个输入控件，
+  // 嵌套对象会让 `onChange` 得逐层展开，容易漏掉一层就静默丢改动。
+  chatEnabled: boolean
+  chatReplyTimeoutMs: number
+  chatInjectTlrp: boolean
+  chatBlockToolsInRp: boolean
+  chatTypingIndicator: boolean
+  // ── 这条通道在 tlrp 里用哪个角色与形态 ─────────────────────────────
+  // 空串 = 跟随 tlrp 自己的全局设置。存 id 而不是名字：名字是给人看的，
+  // 改个称呼不该让已有配置失配。
+  tlrpCharacterId: string
+  tlrpMode: string
 }
 
 export function formatSessionFilter(list: readonly string[] | undefined): string {
@@ -115,6 +148,24 @@ export function toDraft(channel: ChannelView): ChannelDraft {
     events: { ...channel.events },
     overrideContent: channel.overrideContent,
     content: { ...channel.content },
+    takeoverEnabled: channel.takeoverEnabled === true,
+    selfId: channel.selfId ?? '',
+    wsPath: channel.wsPath ?? '',
+    wsUrl: channel.wsUrl ?? '',
+    httpUrl: channel.httpUrl ?? '',
+    allowedPrivateUsers: formatSessionFilter(channel.allowedPrivateUsers),
+    allowedGroups: formatSessionFilter(channel.allowedGroups),
+    groupTriggerMode: channel.groupTriggerMode ?? 'at_or_prefix',
+    groupPrefix: channel.groupPrefix ?? '',
+    mdRenderMode: channel.mdRenderMode ?? 'auto_fallback',
+    chatSessionId: channel.chatSessionId ?? '',
+    chatEnabled: channel.chat?.enabled ?? true,
+    chatReplyTimeoutMs: channel.chat?.replyTimeoutMs ?? 120_000,
+    chatInjectTlrp: channel.chat?.injectTlrp ?? true,
+    chatBlockToolsInRp: channel.chat?.blockToolsInRp ?? true,
+    chatTypingIndicator: channel.chat?.typingIndicator ?? true,
+    tlrpCharacterId: channel.tlrpCharacterId ?? '',
+    tlrpMode: channel.tlrpMode ?? '',
   }
 }
 
@@ -159,6 +210,27 @@ export function toPatch(draft: ChannelDraft): ChannelPatch {
     events: draft.overrideEvents ? { ...draft.events } : null,
     overrideContent: draft.overrideContent,
     content: draft.overrideContent ? { ...draft.content } : null,
+    takeoverEnabled: draft.takeoverEnabled,
+    selfId: draft.selfId.trim(),
+    wsPath: draft.wsPath.trim(),
+    wsUrl: draft.wsUrl.trim(),
+    httpUrl: draft.httpUrl.trim(),
+    // 两个白名单走和 `sessionFilter` 同一套解析：一行一个，也认逗号。
+    allowedPrivateUsers: parseSessionFilter(draft.allowedPrivateUsers),
+    allowedGroups: parseSessionFilter(draft.allowedGroups),
+    groupTriggerMode: draft.groupTriggerMode,
+    groupPrefix: draft.groupPrefix.trim(),
+    mdRenderMode: draft.mdRenderMode,
+    chatSessionId: draft.chatSessionId.trim(),
+    chat: {
+      enabled: draft.chatEnabled,
+      replyTimeoutMs: draft.chatReplyTimeoutMs,
+      injectTlrp: draft.chatInjectTlrp,
+      blockToolsInRp: draft.chatBlockToolsInRp,
+      typingIndicator: draft.chatTypingIndicator,
+    },
+    tlrpCharacterId: draft.tlrpCharacterId.trim(),
+    tlrpMode: draft.tlrpMode.trim(),
   }
 }
 
@@ -207,6 +279,26 @@ export function createDraft(
     events: { ...global.events },
     overrideContent: false,
     content: { ...global.content },
+    // 夺舍 QQ 的初值：默认**只走反向 WS**（不用填 wsUrl，NapCat/Lagrange 主动连进来
+    // 就能用），白名单留空＝谁都不能触发——这是最安全的默认，用户必须显式放行。
+    takeoverEnabled: false,
+    selfId: '',
+    wsPath: '/tlnotify/onebot/ws',
+    wsUrl: '',
+    httpUrl: '',
+    allowedPrivateUsers: '',
+    allowedGroups: '',
+    groupTriggerMode: 'at_or_prefix',
+    groupPrefix: '流萤',
+    mdRenderMode: 'auto_fallback',
+    chatSessionId: '',
+    chatEnabled: true,
+    chatReplyTimeoutMs: 120_000,
+    chatInjectTlrp: true,
+    chatBlockToolsInRp: true,
+    chatTypingIndicator: true,
+    tlrpCharacterId: '',
+    tlrpMode: '',
   }
 }
 

@@ -11,6 +11,7 @@
 import type {
   ChannelConfig,
   ChannelType,
+  ChatModeConfig,
   ContentConfig,
   EventsConfig,
   TlnotifyConfig,
@@ -29,7 +30,7 @@ import type {
 // 恰好住在 config.ts（那边顶层有 node:fs/os/path 的 import）。这里只取这几个，
 // 不调用任何 IO —— rpc.ts 仍然是「只做校验与脱敏」的纯逻辑。客户端不 import 本
 // 文件（浏览器侧用的是 `src/client/rpc.ts`），所以带不进任何 node 内建模块。
-import { defaultContent, defaultEvents, resolveChannelSettings } from './config.js'
+import { defaultChatMode, defaultContent, defaultEvents, resolveChannelSettings } from './config.js'
 
 // ---------------------------------------------------------------------------
 // 信封
@@ -109,8 +110,29 @@ export function redactChannel(
     feishuReceiveIdType: config.feishuReceiveIdType ?? 'open_id',
     mode: config.mode ?? 'active',
     ...(config.bindUrl ? { bindUrl: config.bindUrl } : {}),
+    // ── 夺舍 QQ（OneBot）──
+    // 只有填了的才回：`undefined` 让设置页能区分「没配」和「配成了空串」。
+    ...(config.takeoverEnabled === true ? { takeoverEnabled: true } : {}),
+    ...(config.selfId ? { selfId: config.selfId } : {}),
+    ...(config.wsPath ? { wsPath: config.wsPath } : {}),
+    ...(config.wsUrl ? { wsUrl: config.wsUrl } : {}),
+    ...(config.httpUrl ? { httpUrl: config.httpUrl } : {}),
+    ...(Array.isArray(config.allowedPrivateUsers) && config.allowedPrivateUsers.length > 0
+      ? { allowedPrivateUsers: [...config.allowedPrivateUsers] }
+      : {}),
+    ...(Array.isArray(config.allowedGroups) && config.allowedGroups.length > 0
+      ? { allowedGroups: [...config.allowedGroups] }
+      : {}),
+    ...(config.groupTriggerMode ? { groupTriggerMode: config.groupTriggerMode } : {}),
+    ...(config.groupPrefix ? { groupPrefix: config.groupPrefix } : {}),
+    ...(config.mdRenderMode ? { mdRenderMode: config.mdRenderMode } : {}),
+    ...(config.chatSessionId ? { chatSessionId: config.chatSessionId } : {}),
+    chat: { ...(config.chat ?? defaultChatMode()) },
+    ...(config.tlrpCharacterId ? { tlrpCharacterId: config.tlrpCharacterId } : {}),
+    ...(config.tlrpMode ? { tlrpMode: config.tlrpMode } : {}),
     appSecret: secretState(config.appSecret),
     feishuAppSecret: secretState(config.feishuAppSecret),
+    accessToken: secretState(config.accessToken),
   }
 }
 
@@ -138,13 +160,17 @@ export function redactConfig(config: TlnotifyConfig, dataDir: string): StatePayl
 // 校验小工具
 // ---------------------------------------------------------------------------
 
-const CHANNEL_TYPES: readonly ChannelType[] = Object.freeze(['qq', 'feishu'] as const)
+const CHANNEL_TYPES: readonly ChannelType[] = Object.freeze(['qq', 'feishu', 'onebot'] as const)
 const RECEIVE_ID_TYPES = ['open_id', 'chat_id', 'user_id', 'union_id', 'email'] as const
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const
 const RUN_MODES = ['global', 'session'] as const
 const FALLBACKS = ['latest', 'intervention', 'none'] as const
 const VERBOSITIES = ['brief', 'normal'] as const
 const CHANNEL_MODES = ['active', 'passive'] as const
+/** 群聊触发方式：被艾特或带前缀 / 只认前缀 / 所有消息。 */
+const GROUP_TRIGGER_MODES = ['at_or_prefix', 'prefix_only', 'all'] as const
+/** 发回 QQ 时的 Markdown 策略。 */
+const MD_RENDER_MODES = ['native_md', 'auto_fallback', 'plain'] as const
 
 class Rejection extends Error {
   readonly path: string
@@ -329,6 +355,35 @@ function applyGlobal(current: TlnotifyConfig, raw: unknown): TlnotifyConfig['glo
   return next
 }
 
+/**
+ * 一条通道的「直接对话」开关组。
+ *
+ * 就地合并而不是整表替换：五个字段各自独立，界面上改一个开关不该把另外四个
+ * 一起重置。`replyTimeoutMs` 单独夹在 5s – 600s 之间——它是 `setTimeout` 的
+ * 实参，填错一个数量级就会让「等回复」变成「一直等」或者「立刻超时」。
+ */
+function applyChat(current: ChatModeConfig, raw: unknown): ChatModeConfig {
+  const patch = asRecord(raw, 'chat')
+  assertKnownKeys(
+    patch,
+    ['enabled', 'replyTimeoutMs', 'injectTlrp', 'blockToolsInRp', 'typingIndicator'],
+    'chat.',
+  )
+  const next = { ...current }
+  if (patch.enabled !== undefined) next.enabled = requireBoolean(patch.enabled, 'chat.enabled')
+  if (patch.replyTimeoutMs !== undefined) {
+    const value = patch.replyTimeoutMs
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Rejection('chat.replyTimeoutMs', 'number')
+    }
+    next.replyTimeoutMs = Math.min(600_000, Math.max(5_000, Math.round(value)))
+  }
+  for (const key of ['injectTlrp', 'blockToolsInRp', 'typingIndicator'] as const) {
+    if (patch[key] !== undefined) next[key] = requireBoolean(patch[key], `chat.${key}`)
+  }
+  return next
+}
+
 function applySession(current: TlnotifyConfig, raw: unknown): TlnotifyConfig['session'] {
   const patch = asRecord(raw, 'session')
   assertKnownKeys(patch, ['targetSessionId', 'context'], 'session.')
@@ -391,6 +446,23 @@ const CHANNEL_PATCH_KEYS: readonly string[] = Object.freeze([
   'feishuReceiveIdType',
   'mode',
   'bindUrl',
+  // ── 夺舍 QQ（OneBot）──
+  'takeoverEnabled',
+  'selfId',
+  'wsPath',
+  'wsUrl',
+  'httpUrl',
+  'accessToken',
+  'allowedPrivateUsers',
+  'allowedGroups',
+  'groupTriggerMode',
+  'groupPrefix',
+  'mdRenderMode',
+  'chatSessionId',
+  'chat',
+  // ── 这条通道专属的 tlrp 角色与形态：空串 = 跟随 tlrp 全局设置 ──
+  'tlrpCharacterId',
+  'tlrpMode',
 ] as const)
 
 const SESSION_SCOPES = ['all', 'single', 'filter'] as const
@@ -497,12 +569,48 @@ function applyChannelPatch(base: ChannelConfig | undefined, raw: unknown, index:
     'bindUrl',
     // 单会话模式绑定的会话 id；空串 = 清空（清空后单会话模式谁都不推）。
     'sessionId',
+    // ── 夺舍 QQ（OneBot）：全是文本字段，空串即清空 ──
+    'selfId',
+    'wsPath',
+    'wsUrl',
+    'httpUrl',
+    'accessToken',
+    'groupPrefix',
+    'chatSessionId',
+    // ── 这条通道专属的 tlrp 角色与形态：空串即「跟随 tlrp 全局设置」 ──
+    'tlrpCharacterId',
+    'tlrpMode',
   ] as const
   for (const field of textFields) {
     const value = patch[field]
     if (value === undefined) continue
     const read = readTextPatch(value as string | null | undefined, `${prefix}${field}`)
     assign(next, field, read.value)
+  }
+
+  // ── 夺舍 QQ 的开关、枚举与白名单 ────────────────────────────────────
+  // 白名单走和 `sessionFilter` 一样的写法（字符串数组），但**允许空**：空数组
+  // 的语义是「谁都不许触发」，这正是最安全的默认，不能被当成「没填」丢掉。
+  if (patch.takeoverEnabled !== undefined) {
+    next.takeoverEnabled = requireBoolean(patch.takeoverEnabled, `${prefix}takeoverEnabled`)
+  }
+  if (patch.groupTriggerMode !== undefined) {
+    next.groupTriggerMode = requireEnum(
+      patch.groupTriggerMode,
+      GROUP_TRIGGER_MODES,
+      `${prefix}groupTriggerMode`,
+    )
+  }
+  if (patch.mdRenderMode !== undefined) {
+    next.mdRenderMode = requireEnum(patch.mdRenderMode, MD_RENDER_MODES, `${prefix}mdRenderMode`)
+  }
+  for (const field of ['allowedPrivateUsers', 'allowedGroups'] as const) {
+    const value = patch[field]
+    if (value === undefined) continue
+    if (!Array.isArray(value)) reject(`${prefix}${field}`, '字符串数组')
+    next[field] = value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0)
   }
 
   // ── 每机器人独立设置 ──────────────────────────────────────────────────
@@ -559,6 +667,10 @@ function applyChannelPatch(base: ChannelConfig | undefined, raw: unknown, index:
   }
   if (patch.mode !== undefined) {
     next.mode = requireEnum(patch.mode, CHANNEL_MODES, `${prefix}mode`)
+  }
+  // 「直接对话」跟着通道走：就地合并，缺省用默认值兜底（老配置里没有这块）。
+  if (patch.chat !== undefined) {
+    next.chat = applyChat(next.chat ?? defaultChatMode(), patch.chat)
   }
 
   // 注意：这里**不**校验「类型与凭据是否配套」。用户从 QQ 切到飞书时必然会经过

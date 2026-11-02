@@ -439,6 +439,7 @@ export function SettingsPage(props: SettingsPageProps): React.ReactElement {
         views={config.channels}
         global={{ events: config.events, content: config.content }}
         defaultChannelId={config.defaultChannelId}
+        {...(state.tlrp ? { tlrpCatalogue: state.tlrp } : {})}
         busy={busy}
         secretEpoch={secretEpoch}
         qr={qr}

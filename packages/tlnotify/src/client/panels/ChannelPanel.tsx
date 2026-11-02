@@ -50,8 +50,10 @@ export interface ProvisionState {
   message?: string
 }
 
-export type SecretFieldName = 'appSecret' | 'feishuAppSecret'
-export type BotTab = 'rules' | 'sessions' | 'advanced'
+// 三种通道的凭据各自独立：QQ 走 `appSecret`、飞书走 `feishuAppSecret`、OneBot 走
+// `accessToken`。这个类型只用来描述「哪一格密钥」，值本身永远由宿主保存、不回显。
+export type SecretFieldName = 'appSecret' | 'feishuAppSecret' | 'accessToken'
+export type BotTab = 'rules' | 'sessions' | 'chat' | 'advanced'
 
 /**
  * 「选会话」三件套。
@@ -103,12 +105,21 @@ export interface ChannelPanelProps {
   onQrClose: () => void
   onProvision: (id: string) => void
   onProvisionClose: () => void
+  /**
+   * tlrp 提供的角色与形态清单，用来把「角色 / 形态」两个输入框渲染成下拉。
+   *
+   * 缺席（tlrp 没装或被读失败）时退化成纯文本输入——手抄 id 虽然难用，
+   * 但比一个空下拉框或者报错好。
+   */
+  tlrpCatalogue?: { characters: { id: string; name: string }[]; modes: { id: string; name: string }[] }
 }
 
-const RAIL_TYPES: readonly ChannelType[] = ['qq', 'feishu']
+const RAIL_TYPES: readonly ChannelType[] = ['qq', 'feishu', 'onebot']
 
 function railLabel(t: Translator, type: ChannelType): string {
-  return type === 'qq' ? t('railQq') : t('railFeishu')
+  // 三个分支写全：以前这里是「非 QQ 即飞书」，那种隐式兜底会把新加的类型
+  // 直接显示成「飞书」。
+  return type === 'qq' ? t('railQq') : type === 'feishu' ? t('railFeishu') : t('railOnebot')
 }
 
 export function ChannelPanel(props: ChannelPanelProps): React.ReactElement {
@@ -165,6 +176,7 @@ export function ChannelPanel(props: ChannelPanelProps): React.ReactElement {
           onChange={(patch) => update(openBot.id, patch)}
           onSecret={props.onSecret}
           onDefault={props.onDefault}
+          {...(props.tlrpCatalogue ? { tlrpCatalogue: props.tlrpCatalogue } : {})}
           onRemove={() => {
             if (typeof window !== 'undefined' && !window.confirm(t('removeConfirm'))) return
             props.onChange(drafts.filter((draft) => draft.id !== openBot.id))
@@ -177,6 +189,8 @@ export function ChannelPanel(props: ChannelPanelProps): React.ReactElement {
           <div className="tln-panel-head">
             <div className="tln-section-title">{railLabel(t, rail)}</div>
             <span className="tln-spacer" />
+            {/* 只有 QQ 有「扫码创建」这条路：OneBot 由本机的 NapCat / Lagrange 反向
+                连进来，没有平台侧的应用可扫，所以它只出现在「手动添加」的位置。 */}
             {rail === 'qq' ? (
               <Btn
                 variant="primary"
@@ -188,7 +202,7 @@ export function ChannelPanel(props: ChannelPanelProps): React.ReactElement {
               </Btn>
             ) : null}
             <Btn size="sm" disabled={props.busy} onClick={() => props.onAdd(rail, false)}>
-              {rail === 'qq' ? t('manualAdd') : t('addFeishu')}
+              {rail === 'qq' ? t('manualAdd') : rail === 'feishu' ? t('addFeishu') : t('addOnebot')}
             </Btn>
           </div>
 
@@ -266,10 +280,18 @@ function BotCard(props: BotCardProps): React.ReactElement {
   const { t, draft } = props
   const [open, setOpen] = React.useState(false)
   const [wizard, setWizard] = React.useState(false)
+  // 凭据 / 目标 / 标识三组值都按类型分开取，而且必须三分支：留一个「非 QQ 即飞书」
+  // 的兜底，OneBot 卡片就会去读飞书的密钥状态，指示灯和摘要都会说谎。
+  // OneBot 没有 AppID 也没有接收者：「目标」取 selfId（被夺舍的号），摘要里显示接入路径。
   const secretConfigured =
-    draft.type === 'qq' ? props.view?.appSecret.configured === true : props.view?.feishuAppSecret.configured === true
-  const target = draft.type === 'qq' ? draft.targetChatId : draft.feishuReceiveId
-  const appId = draft.type === 'qq' ? draft.appId : draft.feishuAppId
+    draft.type === 'qq'
+      ? props.view?.appSecret.configured === true
+      : draft.type === 'feishu'
+        ? props.view?.feishuAppSecret.configured === true
+        : props.view?.accessToken.configured === true
+  const target =
+    draft.type === 'qq' ? draft.targetChatId : draft.type === 'feishu' ? draft.feishuReceiveId : draft.selfId
+  const appId = draft.type === 'qq' ? draft.appId : draft.type === 'feishu' ? draft.feishuAppId : draft.wsPath
   const tone = draft.enabled ? (secretConfigured && target.trim().length > 0 ? 'on' : 'warn') : 'off'
 
   return (
@@ -319,9 +341,19 @@ function BotCard(props: BotCardProps): React.ReactElement {
           </Row>
 
           <div className="tln-actions">
-            <Btn size="sm" variant={wizard ? 'primary' : 'default'} disabled={props.busy} onClick={() => setWizard(!wizard)}>
-              {t('wizard')}
-            </Btn>
+            {/* OneBot 不走进接向导：那四步是「建平台应用 → 填 AppID/密钥 → 绑接收者
+                → 测试」，而 OneBot 这一侧的对应字段全在下面的专属表单里，硬套会让
+                人以为还要去飞书/QQ 开放平台注册一个应用。 */}
+            {draft.type === 'onebot' ? null : (
+              <Btn
+                size="sm"
+                variant={wizard ? 'primary' : 'default'}
+                disabled={props.busy}
+                onClick={() => setWizard(!wizard)}
+              >
+                {t('wizard')}
+              </Btn>
+            )}
             <Btn size="sm" disabled={props.busy} onClick={() => props.onOpenSettings('rules')}>
               {t('more')}
             </Btn>
@@ -353,7 +385,19 @@ function BotCard(props: BotCardProps): React.ReactElement {
 
           {props.qr ? <QrBlock t={t} qr={props.qr} onClose={props.onQrClose} /> : null}
 
-          {wizard ? (
+          {draft.type === 'onebot' ? (
+            <OneBotForm
+              t={t}
+              draft={draft}
+              view={props.view}
+              busy={props.busy}
+              secretEpoch={props.secretEpoch}
+              onChange={props.onChange}
+              onSecret={props.onSecret}
+            />
+          ) : null}
+
+          {wizard && draft.type !== 'onebot' ? (
             <SetupWizard
               t={t}
               draft={draft}
@@ -398,6 +442,9 @@ interface SetupWizardProps {
 
 function SetupWizard(props: SetupWizardProps): React.ReactElement {
   const { t, draft } = props
+  // 调用点只对 QQ / 飞书渲染这个向导（OneBot 有它自己的表单，见 OneBotForm），所以
+  // 下面按「QQ 还是飞书」二选一是成立的；如果以后要让 OneBot 也走向导，第一步是先在
+  // 这里把类型收窄成这两者，否则它的字段会悄悄落进飞书分支。
   const done = [
     props.appId.trim().length > 0,
     props.secretConfigured,
@@ -463,7 +510,7 @@ function SetupWizard(props: SetupWizardProps): React.ReactElement {
                 </a>
               </div>
             </React.Fragment>
-          ) : (
+          ) : draft.type === 'feishu' ? (
             <React.Fragment>
               <p className="tln-hint">{t('step1Feishu')}</p>
               <div className="tln-actions">
@@ -472,7 +519,7 @@ function SetupWizard(props: SetupWizardProps): React.ReactElement {
                 </a>
               </div>
             </React.Fragment>
-          ),
+          ) : null,
         )}
       </div>
 
@@ -559,6 +606,167 @@ function SetupWizard(props: SetupWizardProps): React.ReactElement {
   )
 }
 
+// ── 夺舍 QQ（OneBot）表单 ────────────────────────────────────────────────────
+
+interface OneBotFormProps {
+  t: Translator
+  draft: ChannelDraft
+  view: ChannelView | undefined
+  busy: boolean
+  secretEpoch: number
+  onChange: (patch: Partial<ChannelDraft>) => void
+  onSecret: (id: string, field: SecretFieldName, value: string) => void
+}
+
+/**
+ * OneBot 的专属字段区。
+ *
+ * 它不塞进接入向导，因为 OneBot 没有「平台应用」这一步：参数全部来自本机的
+ * NapCat / Lagrange 连接（反向 WS 主动连进来，或插件正向连过去），填错只会连不上，
+ * 不存在扫码、审核与接收者绑定。所以这块直接摊在卡片详情里——展开卡片就能改。
+ *
+ * 两个白名单用文本域而不是逐个输入：好友/群 id 动辄几十个，逐个加行的成本远高于
+ * 直接粘贴；解析口径与「会话过滤」相同，换行与逗号都能切开（见 `parseSessionFilter`）。
+ * 值原样存回草稿，`toPatch` 负责 trim 与切分——在这里提前格式化会让人打到一半的
+ * id 被吞掉。
+ */
+function OneBotForm(props: OneBotFormProps): React.ReactElement {
+  const { t, draft } = props
+  return (
+    <div className="tln-wizard">
+      <div className="tln-section-head">
+        <div className="tln-section-title">{t('railOnebot')}</div>
+      </div>
+
+      <Row label={t('onebotTakeover')} hint={t('onebotTakeoverHint')}>
+        <Check
+          checked={draft.takeoverEnabled}
+          disabled={props.busy}
+          label={draft.takeoverEnabled ? t('on') : t('off')}
+          onChange={(next) => props.onChange({ takeoverEnabled: next })}
+        />
+      </Row>
+
+      <Row label={t('onebotSelfId')} hint={t('onebotSelfIdHint')}>
+        <TextInput
+          value={draft.selfId}
+          disabled={props.busy}
+          placeholder={t('onebotSelfId')}
+          onCommit={(value) => props.onChange({ selfId: value })}
+        />
+      </Row>
+
+      <Row label={t('onebotWsPath')} hint={t('onebotWsPathHint')}>
+        <TextInput
+          value={draft.wsPath}
+          disabled={props.busy}
+          placeholder="/tlnotify/onebot/ws"
+          onCommit={(value) => props.onChange({ wsPath: value })}
+        />
+      </Row>
+
+      <Row label={t('onebotWsUrl')} hint={t('onebotWsUrlHint')}>
+        <TextInput
+          value={draft.wsUrl}
+          disabled={props.busy}
+          placeholder="ws://127.0.0.1:3001"
+          onCommit={(value) => props.onChange({ wsUrl: value })}
+        />
+      </Row>
+
+      <Row label={t('onebotHttpUrl')} hint={t('onebotHttpUrlHint')}>
+        <TextInput
+          value={draft.httpUrl}
+          disabled={props.busy}
+          placeholder="http://127.0.0.1:3000"
+          onCommit={(value) => props.onChange({ httpUrl: value })}
+        />
+      </Row>
+
+      {/*
+        密钥这一行不套 `Row` 的 label：`SecretField` 自带标签与「已设置 / 改 / 清空」
+        三态，再写一遍标签会重复。`secretEpoch` 进 key 是为了在保存成功后被重新挂载，
+        回到「未修改」外观（与 QQ 表单同一套做法）。
+      */}
+      <Row hint={t('onebotAccessTokenHint')}>
+        <SecretField
+          key={`${draft.id}:onebot:${props.secretEpoch}`}
+          label={t('onebotAccessToken')}
+          configured={props.view?.accessToken.configured === true}
+          hint={props.view?.accessToken.hint ?? ''}
+          disabled={props.busy}
+          t={t}
+          onCommit={(value) => props.onSecret(draft.id, 'accessToken', value)}
+        />
+      </Row>
+
+      <Row label={t('onebotAllowedUsers')} hint={t('onebotAllowedUsersHint')}>
+        <TextArea
+          rows={3}
+          value={draft.allowedPrivateUsers}
+          disabled={props.busy}
+          onCommit={(value) => props.onChange({ allowedPrivateUsers: value })}
+        />
+      </Row>
+
+      <Row label={t('onebotAllowedGroups')} hint={t('onebotAllowedGroupsHint')}>
+        <TextArea
+          rows={3}
+          value={draft.allowedGroups}
+          disabled={props.busy}
+          onCommit={(value) => props.onChange({ allowedGroups: value })}
+        />
+      </Row>
+
+      {/* 两处互斥枚举直接写回草稿，不持有本地 state：留一份中间态只会让
+          「刚才那下有没有保存」变模糊，而这两个值改完就该进下一条 patch。 */}
+      <Row label={t('onebotGroupTrigger')}>
+        <Seg
+          value={draft.groupTriggerMode}
+          disabled={props.busy}
+          ariaLabel={t('onebotGroupTrigger')}
+          options={[
+            { value: 'at_or_prefix' as const, label: t('onebotGroupTriggerAt') },
+            { value: 'prefix_only' as const, label: t('onebotGroupTriggerPrefix') },
+            { value: 'all' as const, label: t('onebotGroupTriggerAll') },
+          ]}
+          onChange={(value) => props.onChange({ groupTriggerMode: value })}
+        />
+      </Row>
+
+      <Row label={t('onebotGroupPrefix')} hint={t('onebotGroupPrefixHint')}>
+        <TextInput
+          value={draft.groupPrefix}
+          disabled={props.busy}
+          onCommit={(value) => props.onChange({ groupPrefix: value })}
+        />
+      </Row>
+
+      <Row label={t('onebotMdMode')} hint={t('onebotMdModeHint')}>
+        <Select
+          value={draft.mdRenderMode}
+          disabled={props.busy}
+          options={[
+            { value: 'native_md', label: t('onebotMdNative') },
+            { value: 'auto_fallback', label: t('onebotMdFallback') },
+            { value: 'plain', label: t('onebotMdPlain') },
+          ]}
+          onChange={(value) => props.onChange({ mdRenderMode: value as ChannelDraft['mdRenderMode'] })}
+        />
+      </Row>
+
+      <Row label={t('onebotChatSession')} hint={t('onebotChatSessionHint')}>
+        <TextInput
+          value={draft.chatSessionId}
+          disabled={props.busy}
+          placeholder="session-xxxxxxxx"
+          onCommit={(value) => props.onChange({ chatSessionId: value })}
+        />
+      </Row>
+    </div>
+  )
+}
+
 // ── 更多设置子页 ────────────────────────────────────────────────────────────
 
 interface BotSettingsPageProps {
@@ -576,6 +784,7 @@ interface BotSettingsPageProps {
   onDefault: (id: string | null) => void
   onRemove: () => void
   onBack: () => void
+  tlrpCatalogue?: { characters: { id: string; name: string }[]; modes: { id: string; name: string }[] }
 }
 
 function BotSettingsPage(props: BotSettingsPageProps): React.ReactElement {
@@ -583,6 +792,7 @@ function BotSettingsPage(props: BotSettingsPageProps): React.ReactElement {
   const tabs: readonly { value: BotTab; label: string }[] = [
     { value: 'rules', label: t('tabRules') },
     { value: 'sessions', label: t('tabSessions') },
+    { value: 'chat', label: t('tabChat') },
     { value: 'advanced', label: t('tabAdvanced') },
   ]
 
@@ -615,6 +825,7 @@ function BotSettingsPage(props: BotSettingsPageProps): React.ReactElement {
 
       {props.tab === 'rules' ? <RulesTab {...props} /> : null}
       {props.tab === 'sessions' ? <SessionsTab {...props} /> : null}
+      {props.tab === 'chat' ? <ChatTab {...props} /> : null}
       {props.tab === 'advanced' ? <AdvancedTab {...props} /> : null}
     </div>
   )
@@ -910,6 +1121,115 @@ function SessionsTab(props: BotSettingsPageProps): React.ReactElement {
   )
 }
 
+/**
+ * 「直接对话」页签：这条通道是不是一个能聊天的窗口。
+ *
+ * 挂在每个机器人下面而不是全局，是因为这件事取决于通道连的是什么——官方 Bot
+ * 走的是通知订阅，夺舍 QQ 才是真人对话。同一个人完全可能挂三个通知机器人、
+ * 只让其中一个能聊天。
+ */
+function ChatTab(props: BotSettingsPageProps): React.ReactElement {
+  const { t, draft } = props
+  // 空值选项固定排第一：它是「不覆盖 tlrp 全局设置」的表达，不是某个真实角色。
+  const follow = { value: '', label: t('tlrpFollowGlobal') }
+  const characterOptions = [
+    follow,
+    ...(props.tlrpCatalogue?.characters ?? []).map((item) => ({
+      value: item.id,
+      label: `${item.name}（${item.id}）`,
+    })),
+  ]
+  const modeOptions = [
+    follow,
+    ...(props.tlrpCatalogue?.modes ?? []).map((item) => ({
+      value: item.id,
+      label: `${item.name}（${item.id}）`,
+    })),
+  ]
+  const hasCharacters = (props.tlrpCatalogue?.characters.length ?? 0) > 0
+  const hasModes = (props.tlrpCatalogue?.modes.length ?? 0) > 0
+  return (
+    <React.Fragment>
+      <Note>{t('chatHint')}</Note>
+      <Row label={t('tlrpCharacter')} hint={t('tlrpCharacterHint')}>
+        {hasCharacters ? (
+          <Select
+            value={draft.tlrpCharacterId}
+            disabled={props.busy}
+            options={characterOptions}
+            onChange={(value) => props.onChange({ tlrpCharacterId: value })}
+          />
+        ) : (
+          <TextInput
+            value={draft.tlrpCharacterId}
+            disabled={props.busy}
+            placeholder={t('tlrpIdPlaceholder')}
+            onCommit={(value) => props.onChange({ tlrpCharacterId: value })}
+          />
+        )}
+      </Row>
+      <Row label={t('tlrpMode')} hint={t('tlrpModeHint')}>
+        {hasModes ? (
+          <Select
+            value={draft.tlrpMode}
+            disabled={props.busy}
+            options={modeOptions}
+            onChange={(value) => props.onChange({ tlrpMode: value })}
+          />
+        ) : (
+          <TextInput
+            value={draft.tlrpMode}
+            disabled={props.busy}
+            placeholder={t('tlrpIdPlaceholder')}
+            onCommit={(value) => props.onChange({ tlrpMode: value })}
+          />
+        )}
+      </Row>
+      <Row label={t('chatEnabled')} hint={t('chatEnabledHint')}>
+        <Check
+          checked={draft.chatEnabled}
+          disabled={props.busy}
+          label={draft.chatEnabled ? t('on') : t('off')}
+          onChange={(value) => props.onChange({ chatEnabled: value })}
+        />
+      </Row>
+      <Row label={t('chatReplyTimeout')} hint={t('chatReplyTimeoutHint')}>
+        <NumInput
+          value={draft.chatReplyTimeoutMs}
+          min={5000}
+          max={600000}
+          disabled={props.busy}
+          onCommit={(value) => props.onChange({ chatReplyTimeoutMs: value })}
+        />
+      </Row>
+      <Row label={t('chatInjectTlrp')} hint={t('chatInjectTlrpHint')}>
+        <Check
+          checked={draft.chatInjectTlrp}
+          disabled={props.busy}
+          label={draft.chatInjectTlrp ? t('on') : t('off')}
+          onChange={(value) => props.onChange({ chatInjectTlrp: value })}
+        />
+      </Row>
+      <Row label={t('chatBlockToolsInRp')} hint={t('chatBlockToolsInRpHint')}>
+        <Check
+          checked={draft.chatBlockToolsInRp}
+          disabled={props.busy}
+          label={draft.chatBlockToolsInRp ? t('on') : t('off')}
+          onChange={(value) => props.onChange({ chatBlockToolsInRp: value })}
+        />
+      </Row>
+      <Row label={t('chatTyping')} hint={t('chatTypingHint')}>
+        <Check
+          checked={draft.chatTypingIndicator}
+          disabled={props.busy}
+          label={draft.chatTypingIndicator ? t('on') : t('off')}
+          onChange={(value) => props.onChange({ chatTypingIndicator: value })}
+        />
+      </Row>
+    </React.Fragment>
+  )
+}
+
 function AdvancedTab(props: BotSettingsPageProps): React.ReactElement {
   const { t, draft } = props
   return (
@@ -1053,7 +1373,9 @@ function ProvisionBlock(props: {
           </div>
           <div className="tln-qr-side">
             <p className="tln-hint">{t('provisionHint')}</p>
-            <div className="tln-hint">{props.draft.type === 'qq' ? '' : t('provisionFeishu')}</div>
+            {/* 扫码创建的补充说明只有飞书有；写成「非 QQ 即飞书」会把 OneBot 也算进去，
+                而 OneBot 根本没有扫码创建这条路。 */}
+            <div className="tln-hint">{props.draft.type === 'feishu' ? t('provisionFeishu') : ''}</div>
           </div>
         </div>
       ) : (

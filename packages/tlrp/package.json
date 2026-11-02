@@ -1,0 +1,75 @@
+{
+  "name": "dsh-plugin-tlrp",
+  "version": "0.3.0",
+  "description": "DSH 核心角色扮演与多形态矩阵引擎：注册 tlrp 设置命名空间、可自由增删的 modes 形态矩阵、/mode 与形态别名指令拦截、{{tlrp_character}}/{{tlrp_directive}}/{{tlrp_memory_context}}/{{now}} 动态变量、每轮尾部实时状态与 tlmemory 记忆桥注入，并按形态的 toolPolicy 物理拦截工具。",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "type": "module",
+  "main": "./index.cjs",
+  "module": "./index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "require": "./index.cjs"
+    },
+    "./client": {
+      "default": "./client.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.cjs",
+    "client.js",
+    "lib/core.cjs",
+    "lib/schema.cjs",
+    "lib/resolve.cjs",
+    "lib/memory-bridge.cjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "scripts/install-into-profile.mjs",
+    "scripts/apply-check.mjs",
+    "scripts/mutate-check.mjs",
+    "scripts/rewrite-persona.mjs",
+    "scripts/client-check.mjs",
+    "test/core.test.mjs",
+    "test/memory-bridge.test.mjs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/core.test.mjs test/memory-bridge.test.mjs",
+    "check:apply": "node scripts/apply-check.mjs",
+    "check:mutate": "node scripts/mutate-check.mjs",
+    "check:client": "node scripts/client-check.mjs",
+    "install:profile": "node scripts/install-into-profile.mjs"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh-bundle",
+    "roleplay",
+    "system-prompt",
+    "tlrp"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  }
+}

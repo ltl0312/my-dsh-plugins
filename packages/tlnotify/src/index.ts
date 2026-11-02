@@ -33,6 +33,7 @@ import type { Context } from 'cordis'
 
 import type {
   ChannelConfig,
+  ChatModeConfig,
   InboundAction,
   InboundReply,
   Notification,
@@ -42,7 +43,7 @@ import type {
   TurnSnapshot,
 } from './types.js'
 import { INTERVENTION_KINDS } from './types.js'
-import { Config, configPath, ensureDir, mergeConfig, persistEffectiveConfig, readConfigFile, readJsonFile, resolveChannelSettings, resolveDataDir, saveConfigFile, statePath, writeJsonFile } from './config.js'
+import { Config, configPath, defaultChatMode, ensureDir, mergeConfig, persistEffectiveConfig, readConfigFile, readJsonFile, resolveChannelSettings, resolveDataDir, saveConfigFile, statePath, writeJsonFile } from './config.js'
 import { FileLogger, joinLog, type HostLogger } from './log.js'
 import {
   extractToolCallEvents,
@@ -63,6 +64,8 @@ import { RouteTable, matchesShortId, type RouteResolution } from './route.js'
 import { describeChannelScope, helpText, ModeState, parseCommand, type ModeCommand } from './mode.js'
 import { InteractionBridge, isInteractionAction, matchAnswer, SessionInjector, type AgentLike, type AnswerTarget, type PendingSettlement } from './inject.js'
 import { ChannelManager } from './channels/index.js'
+import { ChatRegistry, type ChatPending } from './chat.js'
+import type { OneBotRegisterUpgrade, OneBotTarget, OneBotUpgradeRoute } from './channels/onebot.js'
 import { channelCaresAboutSession, channelSessionScope } from './config.js'
 import { ProvisionManager, type ProvisionCredentials } from './provision.js'
 import {
@@ -201,6 +204,46 @@ interface AgentRegistryLike {
 
 interface LooseContext {
   on(name: string, listener: (...args: never[]) => unknown, options?: unknown): (() => void) | undefined
+}
+
+/**
+ * `tlrp` 服务的结构化视图（真实实现在 `dsh-plugin-tlrp`，插件不依赖那个包）。
+ *
+ * 只声明我们用到的两面：`parse` 判断「这行是不是 tlrp 指令」，`command` 执行它
+ * 并拿回状态回执。字段一律按可选读——服务是别的包提供的，它变了应该降级成
+ * 「当普通消息处理」，而不是让 QQ 通道整条挂掉。
+ */
+interface TlrpServiceLike {
+  readonly version?: unknown
+  parse?: (line: string) => { kind?: string; command?: string; body?: string } | undefined
+  command?: (
+    line: string,
+    agent?: unknown,
+  ) => Promise<{ ok?: boolean; handled?: boolean; kind?: string; text?: string } | undefined>
+  /**
+   * 组装「这一轮该是什么形态」。
+   *
+   * 对话模式用它把 tlrp 的判断结果拼到用户原话前面——形态、角色、命中的设定、
+   * 排版红线都在 `systemInjection` 里。字段全是可选的：tlrp 是另一个包，
+   * 它没装或版本不认识这个方法时，这句话就按普通消息发出去。
+   */
+  buildTurn?: (input?: {
+    text?: string
+    agent?: unknown
+    characterId?: string
+    mode?: string
+  }) =>
+    | {
+        mode?: unknown
+        modeName?: unknown
+        systemInjection?: unknown
+        directive?: unknown
+        character?: { id?: unknown; name?: unknown }
+        modes?: { id?: unknown; name?: unknown }[]
+      }
+    | undefined
+  /** 角色清单。用来填充设置页的下拉选项，读不到时前端退化成纯文本输入。 */
+  characters?: () => { id?: unknown; name?: unknown }[] | undefined
 }
 
 interface TlnotifyHost {
@@ -371,6 +414,13 @@ class Tlnotify {
   readonly #dataDir: string
   readonly #log: FileLogger
   readonly #accumulator = new TurnAccumulator()
+  /**
+   * 对话模式的等待表：`sessionId → 这条回复该发回哪个 QQ`。
+   *
+   * 只在 `chat.enabled` 时才会有条目；关掉对话模式它就是一张空表，
+   * `turn/end` 一次都不会查中，行为与纯通知模式完全一致。
+   */
+  readonly #chat = new ChatRegistry()
   readonly #dedupe = new Dedupe()
   readonly #gate: CompletionGate
   readonly #route: RouteTable
@@ -462,10 +512,15 @@ class Tlnotify {
       log: (message, error) => this.#log.warn(message, error),
     })
 
+    // OneBot 反向 WS 的挂载口。取不到时（CLI 部署没有 Web 载体）只影响
+    // 「夺舍 QQ 能不能收到主动上报」，其余通道照常。
+    const registerUpgrade = this.#readRegisterUpgrade()
+
     this.#channels = new ChannelManager({
       log: this.#log,
       onInbound: (channelId, reply) => this.#onInbound(channelId, reply),
       onAction: (channelId, action) => this.#onAction(channelId, action),
+      ...(registerUpgrade ? { registerUpgrade } : {}),
     })
 
     this.#provision = new ProvisionManager({
@@ -474,6 +529,94 @@ class Tlnotify {
       // `state: 'failed'` 与一条脱敏后的提示，不会冒到 RPC 层。
       onCredentials: (channelId, credentials) => this.#applyProvisionCredentials(channelId, credentials),
     })
+  }
+
+  /**
+   * 把宿主 `webServer.registerUpgrade` 转交给通道管理器。
+   *
+   * 只有 OneBot 反向 WS 需要它：夺舍 QQ 的 NapCat / Lagrange 是**主动连进来**
+   * 的，我们要在宿主的 HTTP 监听上占一条 upgrade 路径。取服务的规矩照旧——
+   * 走 `#host.get`（`ctx.get` 的契约是「取不到返回 undefined 而不抛」），
+   * 绝不直接读 `ctx.webServer`（cordis 的 Proxy 会为未 inject 的服务名抛错）。
+   *
+   * 返回 `undefined` 表示宿主没有 Web 载体（纯 CLI 部署）。这不该是错误：
+   * 此时 OneBot 退化为正向 WS / HTTP，发得出去，只是收不到主动上报。
+   */
+  /**
+   * 取 `tlrp` 服务。
+   *
+   * **每次调用都重新取**，不做字段缓存：tlrp 与本插件是两个包，加载顺序由
+   * profile 的 bundle 列表决定，构造期它可能还没 `provide`。`ctx.get` 的契约是
+   * 「取不到返回 undefined 而不抛」，所以这里也不需要重试——下一次入站消息
+   * 自然会再取一次，比后台轮询便宜得多。
+   */
+  #readTlrp(): TlrpServiceLike | undefined {
+    try {
+      const service = this.#host.get?.('tlrp') as TlrpServiceLike | undefined
+      if (!service || typeof service.command !== 'function') return undefined
+      return service
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 把 QQ 里的 `/rp` `/work` `/auto` `/char` `/scene` `/tlrp` 转交给 tlrp。
+   *
+   * 返回 `true` 表示「这条消息已经被当成指令处理掉了」，调用方不该再把它注入
+   * 会话——否则模型会把 `/work` 当成一句人话去回答，用户看到的就是「她开始
+   * 解释什么是 work」。
+   *
+   * 这里**不传 agent**：QQ 入站没有宿主会话上下文，tlrp 的 `command()` 允许
+   * `agent` 缺省，此时它只改全局配置（模式 / 角色 / 情景都是全局的，本来就
+   * 属于「改一次全体生效」）。
+   */
+  async #handleTlrpCommand(channelId: string, text: string): Promise<boolean> {
+    const tlrp = this.#readTlrp()
+    if (!tlrp?.parse || !tlrp.command) return false
+
+    let parsed: { kind?: string; command?: string } | undefined
+    try {
+      parsed = tlrp.parse(text)
+    } catch {
+      return false
+    }
+    // `kind: 'none'` = 不是指令，交回正常流程当发言处理。
+    if (!parsed || parsed.kind === 'none') return false
+
+    try {
+      const result = await tlrp.command(text)
+      const reply =
+        typeof result?.text === 'string' && result.text.trim().length > 0
+          ? result.text
+          : `tlrp 已执行 ${parsed.command ?? '指令'}`
+      this.#log.info(`tlrp 指令（${channelId}）：${parsed.command ?? ''} → ${result?.ok === false ? '失败' : '完成'}`)
+      await this.#echo(channelId, reply)
+      return true
+    } catch (error) {
+      // 指令执行失败要让人看得见，而不是静默当普通消息灌进会话。
+      this.#log.warn(`tlrp 指令 ${parsed.command ?? ''} 执行失败`, error)
+      await this.#echo(channelId, `tlrp 指令执行失败：${error instanceof Error ? error.message : String(error)}`)
+      return true
+    }
+  }
+
+  #readRegisterUpgrade(): OneBotRegisterUpgrade | undefined {
+    try {
+      const service = this.#host.get?.('webServer') as
+        | { registerUpgrade?: (route: OneBotUpgradeRoute) => () => void }
+        | undefined
+      const register = service?.registerUpgrade
+      if (typeof register !== 'function') return undefined
+      return (route) => register.call(service, route)
+    } catch (error) {
+      try {
+        this.#log.warn('取 webServer.registerUpgrade 失败，OneBot 将退化为正向 WS / HTTP', error)
+      } catch {
+        // 日志都写不出来的时候没有别的可做了。
+      }
+      return undefined
+    }
   }
 
   async start(): Promise<void> {
@@ -775,7 +918,9 @@ class Tlnotify {
 
   #rpcState(): StatePayload {
     const mode = this.#mode.snapshot()
+    const catalogue = this.#tlrpCatalogue()
     return {
+      ...(catalogue ? { tlrp: catalogue } : {}),
       config: redactConfig(this.#config, this.#dataDir),
       status: {
         running: this.#attached && !this.#disposed,
@@ -1270,9 +1415,11 @@ class Tlnotify {
         }
 
         case 'turn/end': {
-          this.#accumulator.endTurn(session.id, numberOf(data.turn), event.time)
+          // 快照要接住：对话模式的回复正文就在 `snapshot.assistantText` 里，
+          // 以前这里把它丢了，只走通知渲染（通知渲染有自己的取文路径）。
+          const snapshot = this.#accumulator.endTurn(session.id, numberOf(data.turn), event.time)
           const raw = extractTurnEnd(session, event)
-          if (raw) this.#onTurnEnd(raw)
+          if (raw) this.#onTurnEnd(raw, snapshot)
           return
         }
 
@@ -1285,7 +1432,14 @@ class Tlnotify {
     }
   }
 
-  #onTurnEnd(event: RawEvent): void {
+  #onTurnEnd(event: RawEvent, snapshot?: TurnSnapshot): void {
+    // 对话优先，而且放在 `#canPush()` 之前：这一轮是用户从 QQ 里问出来的，
+    // 回复只回那个窗口。用户把「启用通知」关掉只是想少收推送，不该连自己
+    // 刚问的那句话也收不到回答。
+    if (this.#chat.has(event.sessionId)) {
+      void this.#finishChatTurn(event.sessionId, snapshot)
+      return
+    }
     if (!this.#canPush()) return
     if (!this.#dedupe.accept(event.sessionId, event.seq)) {
       this.#log.debug(`跳过重复的结束事件 ${event.sessionId}:${event.seq}`)
@@ -1713,6 +1867,10 @@ class Tlnotify {
         return
       }
 
+      // tlrp 的控制台指令（`/rp` `/work` `/char` `/scene` …）优先于本插件自己的
+      // 指令解析：两边都认 `/` 开头，但它们管的是完全不同的东西。命中就到此为止。
+      if (await this.#handleTlrpCommand(channelId, text)) return
+
       const command = parseCommand(text)
       if (command) {
         if (command.kind === 'stop') {
@@ -1746,6 +1904,13 @@ class Tlnotify {
 
       const target = this.#resolveTarget(reply)
       if (!target.sessionId) return this.#echo(channelId, this.#noTargetText(target))
+
+      // 直接对话：用户不是在回某条具体通知，就是在跟这个角色说话。
+      // 命中就交给对话引擎——它会等这一轮跑完再把回复发回这个窗口，
+      // 期间不回「已发给 X」（那句话在对话语境里等于没回答）。
+      if (this.#chatMode(channelId).enabled && !reply.quotedMessageId) {
+        if (await this.#startChatTurn(channelId, reply, target)) return
+      }
 
       const delivered = this.#injector.deliver(target.sessionId, target.text)
       if (!delivered.ok) {
@@ -2030,6 +2195,220 @@ class Tlnotify {
    * 不走 `ChannelManager.send()`：那条路会做故障转移，回执跑到另一个通道上会
    * 让对话看起来断片。
    */
+  // ── 直接对话 ────────────────────────────────────────────────────────────
+  //
+  // 通知模式：宿主说话 → 用户被通知。
+  // 对话模式：用户说话 → 宿主回答 → 回给这个窗口。
+  //
+  // 两者只差一件事：回复要等这一轮跑完才拿得到。所以入站时先登记「这条回复该发回
+  // 哪里」，`turn/end` 时再取走。登记表在 `chat.ts`，这里只管判定、注入与投递。
+
+  /** 这条通道指定的对话会话；没配就返回 undefined，交给路由去算。 */
+  #chatSessionOf(channelId: string): string | undefined {
+    const config = this.#config.channels.find((item) => item.id === channelId)
+    const pinned = config?.chatSessionId?.trim()
+    return pinned && pinned.length > 0 ? pinned : undefined
+  }
+
+  /**
+   * 取这条通道的「直接对话」开关组。
+   *
+   * 对话设置挂在通道上而不是全局：一条通道是不是聊天窗口，取决于它连的是什么。
+   * 老配置里没有这块，所以缺省用 `defaultChatMode()` 兜底——这样升级上来的用户
+   * 不会因为少一个字段就突然失去对话能力。
+   */
+  #chatMode(channelId: string): ChatModeConfig {
+    const config = this.#config.channels.find((item) => item.id === channelId)
+    return config?.chat ?? defaultChatMode()
+  }
+
+  /**
+   * 把 tlrp 的形态指令拼到用户原话前面。
+   *
+   * 拼在**前面**而不是后面：模型对「开场那段设定」的遵循度明显高于结尾，而这里
+   * 要塞的正是「你是谁、用什么语气、哪些工具不能碰」。原话放在最后紧贴用户消息，
+   * 免得被设定淹掉。
+   */
+  #withTlrp(text: string, channelId: string): string {
+    if (!this.#chatMode(channelId).injectTlrp) return text
+    const tlrp = this.#readTlrp()
+    if (!tlrp?.buildTurn) return text
+    try {
+      // 这条通道可能自己指定了角色与形态（群里排障锁 work、私聊陪聊锁 rp）。
+      // 空串一律不传——让 tlrp 回落到它自己的全局设置，而不是被空值覆盖。
+      const pinned = this.#tlrpPins(channelId)
+      const turn = tlrp.buildTurn({ text, ...pinned })
+      const block = typeof turn?.systemInjection === 'string' ? turn.systemInjection.trim() : ''
+      return block.length > 0 ? `${block}\n\n${text}` : text
+    } catch (error) {
+      // tlrp 的形态判定炸了不该拖垮整条 QQ 链路：这句话按普通消息发出去，
+      // 顶多这一轮少了角色设定，用户还能收到回答。
+      this.#log.warn('tlrp 组装本轮失败，按普通消息发出', error)
+      return text
+    }
+  }
+
+  /** 这条通道钉死的 tlrp 角色与形态；没配就不出现该键，交给 tlrp 走全局。 */
+  #tlrpPins(channelId: string): { characterId?: string; mode?: string } {
+    const config = this.#config.channels.find((item) => item.id === channelId)
+    const characterId = config?.tlrpCharacterId?.trim() ?? ''
+    const mode = config?.tlrpMode?.trim() ?? ''
+    return {
+      ...(characterId.length > 0 ? { characterId } : {}),
+      ...(mode.length > 0 ? { mode } : {}),
+    }
+  }
+
+  /**
+   * 问活着的 tlrp 要一份角色与形态清单，供设置页下拉使用。
+   *
+   * 读不到（tlrp 没装、版本太老、抛错）就整个缺席，前端退化成纯文本输入——
+   * 缺一份候选列表不该让设置页报错。
+   */
+  #tlrpCatalogue(): StatePayload['tlrp'] {
+    const tlrp = this.#readTlrp()
+    if (!tlrp) return undefined
+    const pick = (rows: unknown): { id: string; name: string }[] =>
+      Array.isArray(rows)
+        ? rows
+            .map((row) => {
+              const item = row as { id?: unknown; name?: unknown } | undefined
+              const id = typeof item?.id === 'string' ? item.id.trim() : ''
+              if (id.length === 0) return undefined
+              const name = typeof item?.name === 'string' && item.name.trim().length > 0 ? item.name.trim() : id
+              return { id, name }
+            })
+            .filter((row): row is { id: string; name: string } => row !== undefined)
+        : []
+    try {
+      const characters = pick(tlrp.characters?.())
+      const modes = pick(tlrp.buildTurn?.({ text: '' })?.modes)
+      if (characters.length === 0 && modes.length === 0) return undefined
+      return { characters, modes }
+    } catch (error) {
+      this.#log.warn('读取 tlrp 角色/形态清单失败，设置页下拉将退化为文本输入', error)
+      return undefined
+    }
+  }
+
+  /** 切换「正在输入…」；通道不支持或没开这项就静默跳过。 */
+  async #typing(
+    channelId: string,
+    chatId: string | undefined,
+    groupId: string | undefined,
+    active: boolean,
+  ): Promise<void> {
+    if (!this.#chatMode(channelId).typingIndicator) return
+    if (!chatId && !groupId) return
+    const channel = this.#channels.channel(channelId)
+    if (!channel) return
+    const onebot = channel as unknown as {
+      beginTyping?: (target: OneBotTarget) => Promise<void>
+      endTyping?: (target: OneBotTarget) => Promise<void>
+    }
+    // 群里发「正在输入」得指名群号，否则会跑到私聊窗口去。
+    const target: OneBotTarget = groupId ? { kind: 'group', groupId } : { kind: 'private', userId: chatId ?? '' }
+    try {
+      if (active) await onebot.beginTyping?.(target)
+      else await onebot.endTyping?.(target)
+    } catch (error) {
+      this.#log.debug(`切换「正在输入」失败（${channelId}）：${String(error)}`)
+    }
+  }
+
+  /**
+   * 把一条 QQ 消息当成「跟这个角色说的一句话」送进会话。
+   *
+   * 返回 `false` 表示没接管（关着、没目标、送不进去），调用方继续走通知路径。
+   */
+  async #startChatTurn(channelId: string, reply: InboundReply, target: RouteResolution): Promise<boolean> {
+    const sessionId = this.#chatSessionOf(channelId) ?? target.sessionId
+    if (!sessionId) return false
+    if (!this.#injector.isLive(sessionId)) {
+      this.#log.debug(`会话 ${sessionId} 不在线，这条消息仍按通知路径投递`)
+      return false
+    }
+
+    const groupId = (reply as { groupId?: string }).groupId
+    const chatId = reply.senderId
+    const mode = this.#chatMode(channelId)
+    const text = this.#withTlrp(target.text, channelId)
+
+    const entry = this.#chat.begin({
+      sessionId,
+      channelId,
+      ...(chatId ? { chatId } : {}),
+      timeoutMs: mode.replyTimeoutMs,
+      onTimeout: (id, expired) => {
+        void this.#onChatTimeout(id, expired)
+      },
+    })
+    this.#log.info(
+      `对话（${channelId}）：${this.#label(sessionId)} 开始生成，` +
+        `最多等 ${mode.replyTimeoutMs}ms`,
+    )
+
+    // 先亮「正在输入」再投递：投递会立刻唤醒 driver，晚一步就赶不上等待那段了。
+    await this.#typing(channelId, chatId, groupId, true)
+
+    const delivered = this.#injector.deliver(sessionId, text)
+    if (!delivered.ok) {
+      this.#chat.take(sessionId)
+      await this.#typing(channelId, chatId, groupId, false)
+      await this.#echo(channelId, `发给 ${this.#label(sessionId)} 失败：${delivered.reason}`)
+      return true
+    }
+    void entry
+    return true
+  }
+
+  /**
+   * 这一轮结束了，把正文发回对话窗口。
+   *
+   * 不走 `#gate`：那条路是通知（带标题、按钮、去重键、订阅过滤），而用户此刻
+   * 只想要一句回答。两者同时发会把同一个回复变成一条回答加一条通知。
+   */
+  async #finishChatTurn(sessionId: string, snapshot?: TurnSnapshot): Promise<void> {
+    const pending = this.#chat.take(sessionId)
+    if (!pending) return
+    const groupId = undefined as string | undefined
+    await this.#typing(pending.channelId, pending.chatId, groupId, false)
+
+    const body = (snapshot?.assistantText ?? '').trim()
+    if (body.length === 0) {
+      this.#log.warn(`对话（${pending.channelId}）：${sessionId} 这一轮没有产出文字`)
+      await this.#echo(pending.channelId, '这一轮没有产出文字内容。')
+      return
+    }
+
+    const notification: Notification = {
+      title: `DSH · ${this.#label(sessionId)}`,
+      body,
+      // 两版正文一起给：`body` 是压平的纯文本（飞书只认这个），
+      // `markdown` 保留斜体动作、代码块、引用块（OneBot 通道按 mdRenderMode 用）。
+      markdown: body,
+      actions: [],
+      level: 'info',
+      sessionId,
+      tag: `chat:${sessionId}:${Date.now()}`,
+      kind: 'chat',
+    }
+    const result = await this.#channels.sendTo(pending.channelId, notification)
+    // `sendTo` 返回 undefined 就是没发出去（通道不存在 / 已停 / 内部失败都记过日志了）。
+    if (!result) {
+      this.#log.warn(`对话回复没能发出去（${pending.channelId}）`)
+    }
+  }
+
+  /** 等太久了：告诉用户一声，把等待项收掉，别让它烂在表里。 */
+  async #onChatTimeout(sessionId: string, entry: ChatPending): Promise<void> {
+    const timeoutMs = this.#chatMode(entry.channelId).replyTimeoutMs
+    this.#log.warn(`对话超时：${sessionId} 在 ${timeoutMs}ms 内没有回复`)
+    await this.#typing(entry.channelId, entry.chatId, undefined, false)
+    const seconds = Math.round(timeoutMs / 1000)
+    await this.#echo(entry.channelId, `等了 ${seconds} 秒还没回音，这一轮先放弃了。再发一句试试？`)
+  }
+
   async #echo(channelId: string, text: string): Promise<void> {
     const notification: Notification = {
       title: 'DSH · tlnotify',

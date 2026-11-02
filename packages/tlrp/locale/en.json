@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "title": "TLRP · Multi-Mode Matrix Engine",
+    "description": "Registers the tlrp settings namespace, an editable matrix of runtime modes, /mode and per-mode alias commands, live {{tlrp_character}} / {{tlrp_directive}} / {{now}} prompt variables, a per-turn tail status block, and physical tool gating driven by each mode's toolPolicy."
+  },
+  "command": {
+    "mode": "Switch to a runtime mode (/mode <mode-id>; auto restores routing)",
+    "rp": "Switch to the companion mode",
+    "work": "Switch to tactical work mode",
+    "sam": "Switch to SAM assault mode",
+    "sleep": "Switch to the medbay mode",
+    "auto": "Restore automatic semantic routing",
+    "char": "Switch the active preset character",
+    "scene": "Override the current scene",
+    "title": "Rename how the active character addresses you",
+    "trigger": "Add a keyword trigger mapping",
+    "tlrp": "Show tlrp status: current mode, routing chain, character, scene, enabled triggers"
+  }
+}

@@ -44,7 +44,7 @@
  * `rpcId` 可以回显）。
  */
 
-import type { ContentConfig, EventsConfig } from './types.js'
+import type { ChatModeConfig, ContentConfig, EventsConfig } from './types.js'
 
 /**
  * 浏览器 `rpc.call(channel, …)` 的 channel：Connection 自己挂在 `/api` 上的
@@ -144,7 +144,7 @@ export interface SecretState {
 /** 脱敏后的通道配置：密钥字段换成 {@link SecretState}。 */
 export interface RedactedChannel {
   id: string
-  type: 'qq' | 'feishu'
+  type: 'qq' | 'feishu' | 'onebot'
   enabled: boolean
   /** 别名；空串表示界面回退到 `id`。 */
   label: string
@@ -187,7 +187,43 @@ export interface RedactedChannel {
   mode: 'active' | 'passive'
   /** 用户从 IM 平台复制的绑定链接；有它才渲染二维码。 */
   bindUrl?: string
+  /**
+   * ── 夺舍 QQ（OneBot）──
+   *
+   * 下面这组字段只有 `type === 'onebot'` 才有意义，但都挂在同一个接口上：
+   * 通道类型在界面里是可以改的（先建 QQ 后端接改 onebot），拆成联合类型会让
+   * 每一次字段访问都多一层窄化，而实际收益只是省几个 `undefined`。
+   */
+  takeoverEnabled?: boolean
+  selfId?: string
+  wsPath?: string
+  wsUrl?: string
+  httpUrl?: string
+  allowedPrivateUsers?: string[]
+  allowedGroups?: string[]
+  groupTriggerMode?: 'at_or_prefix' | 'prefix_only' | 'all'
+  groupPrefix?: string
+  mdRenderMode?: 'native_md' | 'auto_fallback' | 'plain'
+  chatSessionId?: string
+  /**
+   * 这条通道的「直接对话」开关组。
+   *
+   * 服务端总会给值（配置里缺省时由 `defaultChatMode()` 补齐），所以这里
+   * 是必填——UI 直接读，不用自己兜底。
+   */
+  chat: ChatModeConfig
+  /** 这条通道用的 tlrp 角色 id；空串 = 跟随 tlrp 全局设置。 */
+  tlrpCharacterId?: string
+  /** 这条通道用的 tlrp 形态 id；空串 = 跟随 tlrp 全局设置。 */
+  tlrpMode?: string
   appSecret: SecretState
+  /**
+   * OneBot 的 access_token。
+   *
+   * 与 `appSecret` 一样只有 `{configured, hint}`，**永远不回显明文**——
+   * 界面上它由 `SecretField` 单独持有草稿，确认时发一次独立 patch。
+   */
+  accessToken: SecretState
   feishuAppSecret: SecretState
 }
 
@@ -219,8 +255,21 @@ export interface StatusSnapshot {
   }[]
 }
 
+/** tlrp 侧可供选择的下拉项。tlrp 没装或读失败时整个字段缺席，前端退化成纯文本输入。 */
+export interface TlrpCatalogue {
+  characters: { id: string; name: string }[]
+  modes: { id: string; name: string }[]
+}
+
 /** 一次 `state` 调用的完整返回值。 */
 export interface StatePayload {
+  /**
+   * tlrp 的角色与形态清单，只读、从 tlrp 服务现取。
+   *
+   * 不塞进 `config` 是因为 `redactConfig` 是纯函数（`rpc.ts` 里不持有 service），
+   * 而这份清单必须问活着的 tlrp 才知道——所以由 `#rpcState()` 在组装时补上。
+   */
+  tlrp?: TlrpCatalogue
   config: {
     enabled: boolean
     mode: 'global' | 'session'
@@ -282,7 +331,7 @@ export interface StatePayload {
  */
 export interface ChannelPatch {
   id: string
-  type?: 'qq' | 'feishu'
+  type?: 'qq' | 'feishu' | 'onebot'
   enabled?: boolean
   label?: string | null
   sessionScope?: 'all' | 'single' | 'filter'
@@ -311,6 +360,34 @@ export interface ChannelPatch {
   feishuReceiveIdType?: 'open_id' | 'chat_id' | 'user_id' | 'union_id' | 'email'
   mode?: 'active' | 'passive'
   bindUrl?: string | null
+  /**
+   * ── 夺舍 QQ（OneBot）──
+   *
+   * 省略 = 保持原值；`null` / 空串 = 清空。`accessToken` 与 `appSecret` 同一
+   * 规矩：**省略就保持原值**，所以没动过密钥的那一次保存不会把它抹掉。
+   */
+  takeoverEnabled?: boolean
+  selfId?: string | null
+  wsPath?: string | null
+  wsUrl?: string | null
+  httpUrl?: string | null
+  accessToken?: string | null
+  allowedPrivateUsers?: string[]
+  allowedGroups?: string[]
+  groupTriggerMode?: 'at_or_prefix' | 'prefix_only' | 'all'
+  groupPrefix?: string | null
+  mdRenderMode?: 'native_md' | 'auto_fallback' | 'plain'
+  chatSessionId?: string | null
+  /**
+   * 这条通道的「直接对话」开关组。
+   *
+   * 整块是「就地合并」而不是整表替换：这几个开关各自独立，改一个不该把
+   * 另外四个重置回默认值（`channels` 那种整表替换是因为列表有增删语义，
+   * 这里没有）。
+   */
+  chat?: Partial<ChatModeConfig>
+  tlrpCharacterId?: string | null
+  tlrpMode?: string | null
 }
 
 /**
@@ -334,6 +411,11 @@ export interface TlnotifyPatch {
     context?: Partial<StatePayload['config']['session']['context']>
   }
   global?: Partial<StatePayload['config']['global']>
+  /**
+   * 直接对话的开关组。
+   *
+   * 它跟着通道走，所以在 `ChannelPatch` 里（见那边注释），不在顶层。
+   */
 }
 
 /** `patch` 的返回值。 */
@@ -408,7 +490,7 @@ export interface PendingBind {
 
 export interface QrPayload {
   channelId: string
-  type: 'qq' | 'feishu'
+  type: 'qq' | 'feishu' | 'onebot'
   token: string
   expiresAt: number
   /**
@@ -472,7 +554,7 @@ export type ProvisionState =
 export interface ProvisionSnapshot {
   attemptId: string
   channelId: string
-  type: 'qq' | 'feishu'
+  type: 'qq' | 'feishu' | 'onebot'
   state: ProvisionState
   /** 二维码图片（`data:image/png;base64,…`）。 */
   qrDataUrl?: string

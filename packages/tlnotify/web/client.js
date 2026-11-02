@@ -2225,6 +2225,30 @@ window.__ModuleLoader__.load({
           }
         );
       }
+      function TextArea(props) {
+        const [draft, setDraft] = import_react.default.useState(props.value);
+        const [focused, setFocused] = import_react.default.useState(false);
+        import_react.default.useEffect(() => {
+          if (!focused) setDraft(props.value);
+        }, [props.value, focused]);
+        return /* @__PURE__ */ import_react.default.createElement(
+          "textarea",
+          {
+            className: "tln-textarea",
+            value: draft,
+            rows: props.rows ?? 3,
+            placeholder: props.placeholder,
+            disabled: props.disabled === true,
+            spellCheck: false,
+            onFocus: () => setFocused(true),
+            onBlur: () => {
+              setFocused(false);
+              if (draft !== props.value) props.onCommit(draft);
+            },
+            onChange: (event) => setDraft(event.target.value)
+          }
+        );
+      }
       function NumInput(props) {
         const [draft, setDraft] = import_react.default.useState(String(props.value));
         const [focused, setFocused] = import_react.default.useState(false);
@@ -2426,7 +2450,25 @@ window.__ModuleLoader__.load({
           // **当前正在生效的那份**，而不是内置默认——否则一开开关行为就变了。
           events: { ...channel.events },
           overrideContent: channel.overrideContent,
-          content: { ...channel.content }
+          content: { ...channel.content },
+          takeoverEnabled: channel.takeoverEnabled === true,
+          selfId: channel.selfId ?? "",
+          wsPath: channel.wsPath ?? "",
+          wsUrl: channel.wsUrl ?? "",
+          httpUrl: channel.httpUrl ?? "",
+          allowedPrivateUsers: formatSessionFilter(channel.allowedPrivateUsers),
+          allowedGroups: formatSessionFilter(channel.allowedGroups),
+          groupTriggerMode: channel.groupTriggerMode ?? "at_or_prefix",
+          groupPrefix: channel.groupPrefix ?? "",
+          mdRenderMode: channel.mdRenderMode ?? "auto_fallback",
+          chatSessionId: channel.chatSessionId ?? "",
+          chatEnabled: channel.chat?.enabled ?? true,
+          chatReplyTimeoutMs: channel.chat?.replyTimeoutMs ?? 12e4,
+          chatInjectTlrp: channel.chat?.injectTlrp ?? true,
+          chatBlockToolsInRp: channel.chat?.blockToolsInRp ?? true,
+          chatTypingIndicator: channel.chat?.typingIndicator ?? true,
+          tlrpCharacterId: channel.tlrpCharacterId ?? "",
+          tlrpMode: channel.tlrpMode ?? ""
         };
       }
       function toDrafts(config) {
@@ -2455,7 +2497,28 @@ window.__ModuleLoader__.load({
           overrideEvents: draft.overrideEvents,
           events: draft.overrideEvents ? { ...draft.events } : null,
           overrideContent: draft.overrideContent,
-          content: draft.overrideContent ? { ...draft.content } : null
+          content: draft.overrideContent ? { ...draft.content } : null,
+          takeoverEnabled: draft.takeoverEnabled,
+          selfId: draft.selfId.trim(),
+          wsPath: draft.wsPath.trim(),
+          wsUrl: draft.wsUrl.trim(),
+          httpUrl: draft.httpUrl.trim(),
+          // 两个白名单走和 `sessionFilter` 同一套解析：一行一个，也认逗号。
+          allowedPrivateUsers: parseSessionFilter(draft.allowedPrivateUsers),
+          allowedGroups: parseSessionFilter(draft.allowedGroups),
+          groupTriggerMode: draft.groupTriggerMode,
+          groupPrefix: draft.groupPrefix.trim(),
+          mdRenderMode: draft.mdRenderMode,
+          chatSessionId: draft.chatSessionId.trim(),
+          chat: {
+            enabled: draft.chatEnabled,
+            replyTimeoutMs: draft.chatReplyTimeoutMs,
+            injectTlrp: draft.chatInjectTlrp,
+            blockToolsInRp: draft.chatBlockToolsInRp,
+            typingIndicator: draft.chatTypingIndicator
+          },
+          tlrpCharacterId: draft.tlrpCharacterId.trim(),
+          tlrpMode: draft.tlrpMode.trim()
         };
       }
       function toChannelPatches(drafts) {
@@ -2495,7 +2558,27 @@ window.__ModuleLoader__.load({
           overrideEvents: false,
           events: { ...global.events },
           overrideContent: false,
-          content: { ...global.content }
+          content: { ...global.content },
+          // 夺舍 QQ 的初值：默认**只走反向 WS**（不用填 wsUrl，NapCat/Lagrange 主动连进来
+          // 就能用），白名单留空＝谁都不能触发——这是最安全的默认，用户必须显式放行。
+          takeoverEnabled: false,
+          selfId: "",
+          wsPath: "/tlnotify/onebot/ws",
+          wsUrl: "",
+          httpUrl: "",
+          allowedPrivateUsers: "",
+          allowedGroups: "",
+          groupTriggerMode: "at_or_prefix",
+          groupPrefix: "\u6D41\u8424",
+          mdRenderMode: "auto_fallback",
+          chatSessionId: "",
+          chatEnabled: true,
+          chatReplyTimeoutMs: 12e4,
+          chatInjectTlrp: true,
+          chatBlockToolsInRp: true,
+          chatTypingIndicator: true,
+          tlrpCharacterId: "",
+          tlrpMode: ""
         };
       }
       function draftTitle(draft) {
@@ -2503,9 +2586,9 @@ window.__ModuleLoader__.load({
       }
     
       // src/client/panels/ChannelPanel.tsx
-      var RAIL_TYPES = ["qq", "feishu"];
+      var RAIL_TYPES = ["qq", "feishu", "onebot"];
       function railLabel(t, type) {
-        return type === "qq" ? t("railQq") : t("railFeishu");
+        return type === "qq" ? t("railQq") : type === "feishu" ? t("railFeishu") : t("railOnebot");
       }
       function ChannelPanel(props) {
         const { t, drafts } = props;
@@ -2552,6 +2635,7 @@ window.__ModuleLoader__.load({
             onChange: (patch) => update(openBot.id, patch),
             onSecret: props.onSecret,
             onDefault: props.onDefault,
+            ...props.tlrpCatalogue ? { tlrpCatalogue: props.tlrpCatalogue } : {},
             onRemove: () => {
               if (typeof window !== "undefined" && !window.confirm(t("removeConfirm"))) return;
               props.onChange(drafts.filter((draft) => draft.id !== openBot.id));
@@ -2568,7 +2652,7 @@ window.__ModuleLoader__.load({
             onClick: () => props.onAdd("qq", true)
           },
           t("scanAdd")
-        ) : null, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onAdd(rail, false) }, rail === "qq" ? t("manualAdd") : t("addFeishu"))), visible.length === 0 ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "warn" }, t("botEmpty")) : null, visible.map((draft) => /* @__PURE__ */ import_react4.default.createElement(
+        ) : null, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onAdd(rail, false) }, rail === "qq" ? t("manualAdd") : rail === "feishu" ? t("addFeishu") : t("addOnebot"))), visible.length === 0 ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: "warn" }, t("botEmpty")) : null, visible.map((draft) => /* @__PURE__ */ import_react4.default.createElement(
           BotCard,
           {
             key: draft.id,
@@ -2607,9 +2691,9 @@ window.__ModuleLoader__.load({
         const { t, draft } = props;
         const [open, setOpen] = import_react4.default.useState(false);
         const [wizard, setWizard] = import_react4.default.useState(false);
-        const secretConfigured = draft.type === "qq" ? props.view?.appSecret.configured === true : props.view?.feishuAppSecret.configured === true;
-        const target = draft.type === "qq" ? draft.targetChatId : draft.feishuReceiveId;
-        const appId = draft.type === "qq" ? draft.appId : draft.feishuAppId;
+        const secretConfigured = draft.type === "qq" ? props.view?.appSecret.configured === true : draft.type === "feishu" ? props.view?.feishuAppSecret.configured === true : props.view?.accessToken.configured === true;
+        const target = draft.type === "qq" ? draft.targetChatId : draft.type === "feishu" ? draft.feishuReceiveId : draft.selfId;
+        const appId = draft.type === "qq" ? draft.appId : draft.type === "feishu" ? draft.feishuAppId : draft.wsPath;
         const tone = draft.enabled ? secretConfigured && target.trim().length > 0 ? "on" : "warn" : "off";
         return /* @__PURE__ */ import_react4.default.createElement("article", { className: "tln-botCard", "data-open": open ? "true" : "false", "data-bot-id": draft.id }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-botCard-head" }, /* @__PURE__ */ import_react4.default.createElement("button", { type: "button", className: "tln-botCard-toggle", onClick: () => setOpen(!open) }, /* @__PURE__ */ import_react4.default.createElement(Dot, { tone }), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-botCard-name" }, draftTitle(draft)), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono tln-botCard-id" }, draft.id), props.isDefault ? /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-note tln-note-ok" }, t("isDefault")) : null, /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, target.trim().length === 0 ? t("summaryNoTarget") : appId.trim() || t("summaryOff")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-caret" }, open ? "\u25BE" : "\u25B8"))), open ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-botCard-body" }, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("botName"), hint: t("botNameHint") }, /* @__PURE__ */ import_react4.default.createElement(
           TextInput,
@@ -2638,7 +2722,16 @@ window.__ModuleLoader__.load({
               props.onChange({ id: trimmed });
             }
           }
-        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: wizard ? "primary" : "default", disabled: props.busy, onClick: () => setWizard(!wizard) }, t("wizard")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onOpenSettings("rules") }, t("more")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onTest(draft.id) }, props.busy ? t("testing") : t("test")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy || props.isDefault, onClick: () => props.onDefault(draft.id) }, t("setDefault")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "danger", disabled: props.busy, onClick: props.onRemove }, t("remove"))), props.test ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: props.test.tone === "ok" ? "ok" : "error" }, props.test.text) : null, props.provision ? /* @__PURE__ */ import_react4.default.createElement(
+        )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, draft.type === "onebot" ? null : /* @__PURE__ */ import_react4.default.createElement(
+          Btn,
+          {
+            size: "sm",
+            variant: wizard ? "primary" : "default",
+            disabled: props.busy,
+            onClick: () => setWizard(!wizard)
+          },
+          t("wizard")
+        ), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onOpenSettings("rules") }, t("more")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onTest(draft.id) }, props.busy ? t("testing") : t("test")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy || props.isDefault, onClick: () => props.onDefault(draft.id) }, t("setDefault")), /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "danger", disabled: props.busy, onClick: props.onRemove }, t("remove"))), props.test ? /* @__PURE__ */ import_react4.default.createElement(Note, { tone: props.test.tone === "ok" ? "ok" : "error" }, props.test.text) : null, props.provision ? /* @__PURE__ */ import_react4.default.createElement(
           ProvisionBlock,
           {
             t,
@@ -2648,7 +2741,18 @@ window.__ModuleLoader__.load({
             onRetry: () => props.onProvision(draft.id),
             onClose: props.onProvisionClose
           }
-        ) : null, props.qr ? /* @__PURE__ */ import_react4.default.createElement(QrBlock, { t, qr: props.qr, onClose: props.onQrClose }) : null, wizard ? /* @__PURE__ */ import_react4.default.createElement(
+        ) : null, props.qr ? /* @__PURE__ */ import_react4.default.createElement(QrBlock, { t, qr: props.qr, onClose: props.onQrClose }) : null, draft.type === "onebot" ? /* @__PURE__ */ import_react4.default.createElement(
+          OneBotForm,
+          {
+            t,
+            draft,
+            view: props.view,
+            busy: props.busy,
+            secretEpoch: props.secretEpoch,
+            onChange: props.onChange,
+            onSecret: props.onSecret
+          }
+        ) : null, wizard && draft.type !== "onebot" ? /* @__PURE__ */ import_react4.default.createElement(
           SetupWizard,
           {
             t,
@@ -2698,7 +2802,7 @@ window.__ModuleLoader__.load({
         const body = (step, children) => openStep === step ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step-body" }, children, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", onClick: () => setOpenStep(step === 4 ? 0 : step + 1) }, t("stepSkip")))) : null;
         return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-wizard" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-section-head" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-section-title" }, t("wizard")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("wizardHint"))), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step" }, stepHead(1, t("step1")), body(
           1,
-          draft.type === "qq" ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("step1Qq")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "primary", disabled: props.busy, onClick: () => props.onProvision(draft.id) }, t("scanAdd")), /* @__PURE__ */ import_react4.default.createElement("a", { className: "tln-link", href: "https://q.qq.com/qqbot/openclaw", target: "_blank", rel: "noreferrer" }, t("openQqPlatform")))) : /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("step1Feishu")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement("a", { className: "tln-link", href: "https://open.feishu.cn/app", target: "_blank", rel: "noreferrer" }, t("openFeishuPlatform"))))
+          draft.type === "qq" ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("step1Qq")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", variant: "primary", disabled: props.busy, onClick: () => props.onProvision(draft.id) }, t("scanAdd")), /* @__PURE__ */ import_react4.default.createElement("a", { className: "tln-link", href: "https://q.qq.com/qqbot/openclaw", target: "_blank", rel: "noreferrer" }, t("openQqPlatform")))) : draft.type === "feishu" ? /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("step1Feishu")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement("a", { className: "tln-link", href: "https://open.feishu.cn/app", target: "_blank", rel: "noreferrer" }, t("openFeishuPlatform")))) : null
         )), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-step" }, stepHead(2, t("step2")), body(
           2,
           /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("appId"), hint: t("step2Hint") }, /* @__PURE__ */ import_react4.default.createElement(
@@ -2745,11 +2849,123 @@ window.__ModuleLoader__.load({
           /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-actions" }, /* @__PURE__ */ import_react4.default.createElement(Btn, { size: "sm", disabled: props.busy, onClick: () => props.onTest(draft.id) }, props.busy ? t("testing") : t("test")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-hint" }, t("testHint")))
         )));
       }
+      function OneBotForm(props) {
+        const { t, draft } = props;
+        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-wizard" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-section-head" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-section-title" }, t("railOnebot"))), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotTakeover"), hint: t("onebotTakeoverHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.takeoverEnabled,
+            disabled: props.busy,
+            label: draft.takeoverEnabled ? t("on") : t("off"),
+            onChange: (next) => props.onChange({ takeoverEnabled: next })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotSelfId"), hint: t("onebotSelfIdHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.selfId,
+            disabled: props.busy,
+            placeholder: t("onebotSelfId"),
+            onCommit: (value) => props.onChange({ selfId: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotWsPath"), hint: t("onebotWsPathHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.wsPath,
+            disabled: props.busy,
+            placeholder: "/tlnotify/onebot/ws",
+            onCommit: (value) => props.onChange({ wsPath: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotWsUrl"), hint: t("onebotWsUrlHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.wsUrl,
+            disabled: props.busy,
+            placeholder: "ws://127.0.0.1:3001",
+            onCommit: (value) => props.onChange({ wsUrl: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotHttpUrl"), hint: t("onebotHttpUrlHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.httpUrl,
+            disabled: props.busy,
+            placeholder: "http://127.0.0.1:3000",
+            onCommit: (value) => props.onChange({ httpUrl: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { hint: t("onebotAccessTokenHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          SecretField,
+          {
+            key: `${draft.id}:onebot:${props.secretEpoch}`,
+            label: t("onebotAccessToken"),
+            configured: props.view?.accessToken.configured === true,
+            hint: props.view?.accessToken.hint ?? "",
+            disabled: props.busy,
+            t,
+            onCommit: (value) => props.onSecret(draft.id, "accessToken", value)
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotAllowedUsers"), hint: t("onebotAllowedUsersHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextArea,
+          {
+            rows: 3,
+            value: draft.allowedPrivateUsers,
+            disabled: props.busy,
+            onCommit: (value) => props.onChange({ allowedPrivateUsers: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotAllowedGroups"), hint: t("onebotAllowedGroupsHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextArea,
+          {
+            rows: 3,
+            value: draft.allowedGroups,
+            disabled: props.busy,
+            onCommit: (value) => props.onChange({ allowedGroups: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotGroupTrigger") }, /* @__PURE__ */ import_react4.default.createElement(
+          Seg,
+          {
+            value: draft.groupTriggerMode,
+            disabled: props.busy,
+            ariaLabel: t("onebotGroupTrigger"),
+            options: [
+              { value: "at_or_prefix", label: t("onebotGroupTriggerAt") },
+              { value: "prefix_only", label: t("onebotGroupTriggerPrefix") },
+              { value: "all", label: t("onebotGroupTriggerAll") }
+            ],
+            onChange: (value) => props.onChange({ groupTriggerMode: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotGroupPrefix"), hint: t("onebotGroupPrefixHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.groupPrefix,
+            disabled: props.busy,
+            onCommit: (value) => props.onChange({ groupPrefix: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotMdMode"), hint: t("onebotMdModeHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Select,
+          {
+            value: draft.mdRenderMode,
+            disabled: props.busy,
+            options: [
+              { value: "native_md", label: t("onebotMdNative") },
+              { value: "auto_fallback", label: t("onebotMdFallback") },
+              { value: "plain", label: t("onebotMdPlain") }
+            ],
+            onChange: (value) => props.onChange({ mdRenderMode: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("onebotChatSession"), hint: t("onebotChatSessionHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.chatSessionId,
+            disabled: props.busy,
+            placeholder: "session-xxxxxxxx",
+            onCommit: (value) => props.onChange({ chatSessionId: value })
+          }
+        )));
+      }
       function BotSettingsPage(props) {
         const { t, draft } = props;
         const tabs = [
           { value: "rules", label: t("tabRules") },
           { value: "sessions", label: t("tabSessions") },
+          { value: "chat", label: t("tabChat") },
           { value: "advanced", label: t("tabAdvanced") }
         ];
         return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-subpage" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-subpage-head" }, /* @__PURE__ */ import_react4.default.createElement("button", { type: "button", className: "tln-link", onClick: props.onBack }, t("backToList")), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-botCard-name" }, draftTitle(draft)), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-mono tln-botCard-id" }, draft.id)), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-tabs", role: "tablist" }, tabs.map((item) => /* @__PURE__ */ import_react4.default.createElement(
@@ -2764,7 +2980,7 @@ window.__ModuleLoader__.load({
             onClick: () => props.onTab(item.value)
           },
           item.label
-        ))), props.tab === "rules" ? /* @__PURE__ */ import_react4.default.createElement(RulesTab, { ...props }) : null, props.tab === "sessions" ? /* @__PURE__ */ import_react4.default.createElement(SessionsTab, { ...props }) : null, props.tab === "advanced" ? /* @__PURE__ */ import_react4.default.createElement(AdvancedTab, { ...props }) : null);
+        ))), props.tab === "rules" ? /* @__PURE__ */ import_react4.default.createElement(RulesTab, { ...props }) : null, props.tab === "sessions" ? /* @__PURE__ */ import_react4.default.createElement(SessionsTab, { ...props }) : null, props.tab === "chat" ? /* @__PURE__ */ import_react4.default.createElement(ChatTab, { ...props }) : null, props.tab === "advanced" ? /* @__PURE__ */ import_react4.default.createElement(AdvancedTab, { ...props }) : null);
       }
       function RulesTab(props) {
         const { t, draft } = props;
@@ -2956,6 +3172,100 @@ window.__ModuleLoader__.load({
           }
         )));
       }
+      function ChatTab(props) {
+        const { t, draft } = props;
+        const follow = { value: "", label: t("tlrpFollowGlobal") };
+        const characterOptions = [
+          follow,
+          ...(props.tlrpCatalogue?.characters ?? []).map((item) => ({
+            value: item.id,
+            label: `${item.name}\uFF08${item.id}\uFF09`
+          }))
+        ];
+        const modeOptions = [
+          follow,
+          ...(props.tlrpCatalogue?.modes ?? []).map((item) => ({
+            value: item.id,
+            label: `${item.name}\uFF08${item.id}\uFF09`
+          }))
+        ];
+        const hasCharacters = (props.tlrpCatalogue?.characters.length ?? 0) > 0;
+        const hasModes = (props.tlrpCatalogue?.modes.length ?? 0) > 0;
+        return /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Note, null, t("chatHint")), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("tlrpCharacter"), hint: t("tlrpCharacterHint") }, hasCharacters ? /* @__PURE__ */ import_react4.default.createElement(
+          Select,
+          {
+            value: draft.tlrpCharacterId,
+            disabled: props.busy,
+            options: characterOptions,
+            onChange: (value) => props.onChange({ tlrpCharacterId: value })
+          }
+        ) : /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.tlrpCharacterId,
+            disabled: props.busy,
+            placeholder: t("tlrpIdPlaceholder"),
+            onCommit: (value) => props.onChange({ tlrpCharacterId: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("tlrpMode"), hint: t("tlrpModeHint") }, hasModes ? /* @__PURE__ */ import_react4.default.createElement(
+          Select,
+          {
+            value: draft.tlrpMode,
+            disabled: props.busy,
+            options: modeOptions,
+            onChange: (value) => props.onChange({ tlrpMode: value })
+          }
+        ) : /* @__PURE__ */ import_react4.default.createElement(
+          TextInput,
+          {
+            value: draft.tlrpMode,
+            disabled: props.busy,
+            placeholder: t("tlrpIdPlaceholder"),
+            onCommit: (value) => props.onChange({ tlrpMode: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("chatEnabled"), hint: t("chatEnabledHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.chatEnabled,
+            disabled: props.busy,
+            label: draft.chatEnabled ? t("on") : t("off"),
+            onChange: (value) => props.onChange({ chatEnabled: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("chatReplyTimeout"), hint: t("chatReplyTimeoutHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          NumInput,
+          {
+            value: draft.chatReplyTimeoutMs,
+            min: 5e3,
+            max: 6e5,
+            disabled: props.busy,
+            onCommit: (value) => props.onChange({ chatReplyTimeoutMs: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("chatInjectTlrp"), hint: t("chatInjectTlrpHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.chatInjectTlrp,
+            disabled: props.busy,
+            label: draft.chatInjectTlrp ? t("on") : t("off"),
+            onChange: (value) => props.onChange({ chatInjectTlrp: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("chatBlockToolsInRp"), hint: t("chatBlockToolsInRpHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.chatBlockToolsInRp,
+            disabled: props.busy,
+            label: draft.chatBlockToolsInRp ? t("on") : t("off"),
+            onChange: (value) => props.onChange({ chatBlockToolsInRp: value })
+          }
+        )), /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("chatTyping"), hint: t("chatTypingHint") }, /* @__PURE__ */ import_react4.default.createElement(
+          Check,
+          {
+            checked: draft.chatTypingIndicator,
+            disabled: props.busy,
+            label: draft.chatTypingIndicator ? t("on") : t("off"),
+            onChange: (value) => props.onChange({ chatTypingIndicator: value })
+          }
+        )));
+      }
       function AdvancedTab(props) {
         const { t, draft } = props;
         return /* @__PURE__ */ import_react4.default.createElement(import_react4.default.Fragment, null, /* @__PURE__ */ import_react4.default.createElement(Row, { label: t("pushMode"), hint: t("pushModeHint") }, /* @__PURE__ */ import_react4.default.createElement(
@@ -3019,7 +3329,7 @@ window.__ModuleLoader__.load({
           return /* @__PURE__ */ import_react4.default.createElement(Note, { tone: phase === "failed" ? "error" : "warn" }, text, footer(phase !== "cancelled"));
         }
         const qrText = snapshot.qrText;
-        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card-head" }, t("provisionTitle"), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), snapshot.expiresAt ? /* @__PURE__ */ import_react4.default.createElement(Countdown, { t, until: snapshot.expiresAt }) : null), phase === "connecting" ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionConnecting")) : phase === "scanned" ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionScanned")) : qrText ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-layout" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-img" }, /* @__PURE__ */ import_react4.default.createElement(QrCode, { text: qrText })), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-side" }, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("provisionHint")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, props.draft.type === "qq" ? "" : t("provisionFeishu")))) : /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionStarting")), footer(true));
+        return /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-card-head" }, t("provisionTitle"), /* @__PURE__ */ import_react4.default.createElement("span", { className: "tln-spacer" }), snapshot.expiresAt ? /* @__PURE__ */ import_react4.default.createElement(Countdown, { t, until: snapshot.expiresAt }) : null), phase === "connecting" ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionConnecting")) : phase === "scanned" ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionScanned")) : qrText ? /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-layout" }, /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-img" }, /* @__PURE__ */ import_react4.default.createElement(QrCode, { text: qrText })), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-qr-side" }, /* @__PURE__ */ import_react4.default.createElement("p", { className: "tln-hint" }, t("provisionHint")), /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, props.draft.type === "feishu" ? t("provisionFeishu") : ""))) : /* @__PURE__ */ import_react4.default.createElement("div", { className: "tln-hint" }, t("provisionStarting")), footer(true));
       }
       function Countdown(props) {
         const [left, setLeft] = import_react4.default.useState(Math.max(0, props.until - Date.now()));
@@ -3419,6 +3729,7 @@ window.__ModuleLoader__.load({
             views: config.channels,
             global: { events: config.events, content: config.content },
             defaultChannelId: config.defaultChannelId,
+            ...state.tlrp ? { tlrpCatalogue: state.tlrp } : {},
             busy,
             secretEpoch,
             qr,
@@ -3706,6 +4017,51 @@ window.__ModuleLoader__.load({
         rtFallbackIntervention: "\u53D1\u7ED9\u6700\u8FD1\u4E00\u6B21\u9700\u8981\u4EBA\u4ECB\u5165\u7684\u4F1A\u8BDD",
         rtTableTtlDays: "\u8DEF\u7531\u8868\u4FDD\u7559\u5929\u6570\uFF081 \u2013 365\uFF09",
         rtTableTtlDaysHint: "\u8D85\u8FC7\u8FD9\u4E2A\u5929\u6570\u7684\u65E7\u901A\u77E5\u88AB\u5F15\u7528\u65F6\uFF0C\u4F1A\u8D70\u515C\u5E95\u800C\u4E0D\u662F\u9759\u9ED8\u6295\u9519\u3002",
+        // ── 直接对话（chat）────────────────────────────────────────────────
+        chatTitle: "\u76F4\u63A5\u5BF9\u8BDD",
+        chatHint: "\u6253\u5F00\u4E4B\u540E\uFF0C\u5728 IM \u91CC\u53D1\u7ED9\u673A\u5668\u4EBA\u7684\u666E\u901A\u6D88\u606F\u4F1A\u5F53\u6210\u4E00\u8F6E\u5BF9\u8BDD\u4EA4\u7ED9 DSH\uFF0C\u56DE\u590D\u518D\u53D1\u56DE\u540C\u4E00\u4E2A\u4F1A\u8BDD\u3002\u5173\u6389\u5C31\u53EA\u4FDD\u7559\u63A8\u9001\u3002",
+        chatEnabled: "\u5F00\u542F\u76F4\u63A5\u5BF9\u8BDD",
+        chatEnabledHint: "\u5173\u6389\u540E QQ/\u98DE\u4E66\u53EA\u4F1A\u6536\u5230\u901A\u77E5\uFF0C\u4F60\u8BF4\u7684\u8BDD\u4E0D\u4F1A\u88AB\u5F53\u6210\u63D0\u95EE\u3002",
+        chatReplyTimeout: "\u56DE\u590D\u8D85\u65F6\uFF08\u6BEB\u79D2\uFF09",
+        chatReplyTimeoutHint: "\u6A21\u578B\u8D85\u8FC7\u8FD9\u4E2A\u65F6\u95F4\u8FD8\u6CA1\u6709\u4EA7\u51FA\u5C31\u653E\u5F03\u5E76\u56DE\u4E00\u53E5\u300C\u8D85\u65F6\u300D\u3002\u9ED8\u8BA4 120000\uFF082 \u5206\u949F\uFF09\u3002",
+        chatInjectTlrp: "\u6CE8\u5165 tlrp \u7684\u6A21\u5F0F\u4E0E\u89D2\u8272",
+        chatInjectTlrpHint: "\u628A tlrp \u5224\u5B9A\u7684\u5F62\u6001\u3001\u547D\u4E2D\u7684\u89E6\u53D1\u8BCD\u4E0E\u89D2\u8272\u8BBE\u5B9A\u5E26\u8FDB\u8FD9\u4E00\u8F6E\u5BF9\u8BDD\uFF1B\u6CA1\u88C5 tlrp \u65F6\u81EA\u52A8\u8DF3\u8FC7\u3002",
+        chatBlockToolsInRp: "RP \u6001\u4E0B\u5C4F\u853D\u8FD0\u7EF4\u5DE5\u5177",
+        chatBlockToolsInRpHint: "\u966A\u4F34\u6001\u804A\u5929\u65F6\u4E0D\u8BE5\u7A81\u7136\u53BB\u7FFB\u670D\u52A1\u5668\u76EE\u5F55\u3002\u5173\u6389\u540E\u6A21\u578B\u5728 RP \u6001\u4E5F\u80FD\u8C03\u7528 shell \u4E0E\u6587\u4EF6\u5DE5\u5177\u3002",
+        chatTyping: "\u663E\u793A\u300C\u6B63\u5728\u8F93\u5165\u300D",
+        chatTypingHint: "\u7B49\u5F85\u6A21\u578B\u56DE\u590D\u671F\u95F4\uFF0C\u82E5 OneBot \u7AEF\u652F\u6301\u5C31\u8C03\u7528 set_input_status\u3002",
+        // ── 夺舍 QQ（onebot）────────────────────────────────────────────────
+        railOnebot: "\u593A\u820D QQ",
+        addOnebot: "\u6DFB\u52A0\u593A\u820D QQ",
+        onebotTakeover: "\u5F00\u542F\u593A\u820D QQ \u76F4\u63A5\u5BF9\u8BDD",
+        onebotTakeoverHint: "\u901A\u8FC7 OneBot \u534F\u8BAE\u76F4\u8FDE\u4E00\u4E2A\u771F\u4EBA QQ \u53F7\u3002\u9700\u8981\u5148\u5728 NapCat / Lagrange \u91CC\u914D\u597D\u8FD9\u4E2A\u63D2\u4EF6\u7684\u8FDE\u63A5\u5730\u5740\u3002",
+        onebotSelfId: "\u88AB\u593A\u820D\u7684 QQ \u53F7",
+        onebotSelfIdHint: "OneBot \u4E0A\u62A5\u91CC\u7684 self_id\u3002\u586B\u4E86\u4E4B\u540E\u624D\u80FD\u8BC6\u522B\u300C\u8FD9\u6761\u662F\u6211\u81EA\u5DF1\u53D1\u7684\u300D\u5E76\u62E6\u4F4F\u56DE\u58F0\u3002",
+        onebotWsPath: "\u53CD\u5411 WS \u8DEF\u5F84",
+        onebotWsPathHint: "NapCat / Lagrange \u53CD\u5411\u8FDE\u63A5\u5230\u8FD9\u4E2A\u8DEF\u5F84\u3002\u9ED8\u8BA4 /tlnotify/onebot/ws\u3002",
+        onebotWsUrl: "\u6B63\u5411 WS \u5730\u5740",
+        onebotWsUrlHint: "\u53EF\u9009\u3002\u586B\u4E86\u4E4B\u540E\u7531\u63D2\u4EF6\u4E3B\u52A8\u8FDE\u8FC7\u53BB\uFF08\u4F8B\u5982 ws://127.0.0.1:3001\uFF09\uFF0C\u53CD\u5411\u8DEF\u5F84\u5C31\u7A7A\u7740\u4E0D\u7528\u3002",
+        onebotHttpUrl: "HTTP API \u5730\u5740",
+        onebotHttpUrlHint: "\u53EF\u9009\u4F46\u5EFA\u8BAE\u586B\u3002\u53D1\u6D88\u606F\u8D70 HTTP \u66F4\u7A33\uFF0C\u4F8B\u5982 http://127.0.0.1:3000\u3002",
+        onebotAccessToken: "Access Token",
+        onebotAccessTokenHint: "OneBot \u7AEF\u914D\u7F6E\u7684 token\uFF0C\u4E24\u8FB9\u8981\u4E00\u81F4\uFF1B\u7559\u7A7A\u8868\u793A\u4E0D\u6821\u9A8C\u3002",
+        onebotAllowedUsers: "\u5141\u8BB8\u79C1\u804A\u7684 QQ \u53F7",
+        onebotAllowedUsersHint: "\u4E00\u884C\u4E00\u4E2A\uFF0C\u4E5F\u53EF\u4EE5\u7528\u9017\u53F7\u5206\u9694\u3002\u586B * \u8868\u793A\u4EFB\u4F55\u4EBA\u2014\u2014\u4E0D\u5EFA\u8BAE\uFF0C\u7B49\u4E8E\u628A\u81EA\u5DF1\u7684\u53F7\u5F00\u653E\u7ED9\u6240\u6709\u80FD\u7ED9\u5B83\u53D1\u6D88\u606F\u7684\u4EBA\u3002",
+        onebotAllowedGroups: "\u5141\u8BB8\u5BF9\u8BDD\u7684\u7FA4\u53F7",
+        onebotAllowedGroupsHint: "\u4E00\u884C\u4E00\u4E2A\u3002\u7559\u7A7A\u8868\u793A\u4EFB\u4F55\u7FA4\u90FD\u4E0D\u89E6\u53D1\u3002",
+        onebotGroupTrigger: "\u7FA4\u91CC\u600E\u4E48\u89E6\u53D1",
+        onebotGroupTriggerAt: "\u88AB\u827E\u7279\u6216\u5E26\u524D\u7F00",
+        onebotGroupTriggerPrefix: "\u53EA\u8BA4\u524D\u7F00",
+        onebotGroupTriggerAll: "\u6240\u6709\u6D88\u606F",
+        onebotGroupPrefix: "\u7FA4\u804A\u524D\u7F00",
+        onebotGroupPrefixHint: "\u4F8B\u5982\u586B\u300C\u6D41\u8424\u300D\uFF0C\u7FA4\u91CC\u8BF4\u300C\u6D41\u8424 \u4ECA\u5929\u597D\u7D2F\u300D\u5C31\u4F1A\u89E6\u53D1\u3002",
+        onebotMdMode: "Markdown \u6E32\u67D3",
+        onebotMdNative: "\u539F\u751F Markdown",
+        onebotMdFallback: "\u539F\u751F\u4F18\u5148\uFF0C\u5931\u8D25\u56DE\u9000\u7EAF\u6587\u672C",
+        onebotMdPlain: "\u603B\u662F\u7EAF\u6587\u672C",
+        onebotMdModeHint: "NapCat / Lagrange \u652F\u6301 markdown \u6D88\u606F\u6BB5\u65F6\u624D\u80FD\u53D1\u539F\u751F MD\uFF1B\u4E0D\u652F\u6301\u4F1A\u81EA\u52A8\u964D\u7EA7\u6210\u5E26\u7AD6\u7EBF\u8FB9\u6846\u7684\u9AD8\u4FDD\u771F\u7EAF\u6587\u672C\u3002",
+        onebotChatSession: "\u56FA\u5B9A\u4F1A\u8BDD id",
+        onebotChatSessionHint: "\u7559\u7A7A\u8868\u793A\u7528\u63D2\u4EF6\u7684\u9ED8\u8BA4\u4F1A\u8BDD\u3002",
         advanced: "\u9AD8\u7EA7",
         logLevel: "\u65E5\u5FD7\u7EA7\u522B",
         dataDir: "\u6570\u636E\u76EE\u5F55",
@@ -3731,6 +4087,14 @@ window.__ModuleLoader__.load({
         summaryNoTarget: "\u672A\u7ED1\u5B9A\u76EE\u6807",
         tabRules: "\u901A\u77E5\u89C4\u5219",
         tabSessions: "\u4F1A\u8BDD\u8FC7\u6EE4",
+        tabChat: "\u76F4\u63A5\u5BF9\u8BDD",
+        // ── 这条通道专属的 tlrp 角色与形态 ──
+        tlrpCharacter: "\u89D2\u8272",
+        tlrpCharacterHint: "\u8FD9\u6761\u901A\u9053\u5728 tlrp \u91CC\u626E\u6F14\u8C01\u3002\u7559\u7A7A\u5219\u8DDF\u968F tlrp \u81EA\u5DF1\u7684\u5168\u5C40\u89D2\u8272\u3002",
+        tlrpMode: "\u5F62\u6001",
+        tlrpModeHint: "\u8FD9\u6761\u901A\u9053\u56FA\u5B9A\u7528\u54EA\u4E2A\u5F62\u6001\u3002\u7559\u7A7A\u5219\u8DDF\u968F tlrp \u5168\u5C40\u8BBE\u7F6E\uFF08\u901A\u5E38\u662F\u81EA\u52A8\u5224\u5B9A\uFF1A\u95F2\u804A\u8D70\u966A\u4F34\u3001\u6392\u969C\u8D70\u6218\u672F\uFF09\u3002",
+        tlrpFollowGlobal: "\u8DDF\u968F\u5168\u5C40",
+        tlrpIdPlaceholder: "\u7559\u7A7A\u8DDF\u968F\u5168\u5C40\uFF0C\u6216\u624B\u586B id",
         tabAdvanced: "\u9AD8\u7EA7",
         followGlobal: "\u8DDF\u968F\u5168\u5C40",
         custom: "\u81EA\u5B9A\u4E49",
@@ -3890,6 +4254,51 @@ window.__ModuleLoader__.load({
         rtFallbackIntervention: "Send to the most recent session needing a human",
         rtTableTtlDays: "Keep the routing table for (days, 1 \u2013 365)",
         rtTableTtlDaysHint: "Quoting an older notification falls back instead of silently misrouting.",
+        // ── direct chat ──────────────────────────────────────────────────────
+        chatTitle: "Direct chat",
+        chatHint: "When on, an ordinary message you send the bot is treated as one turn handed to DSH, and the reply is sent back to the same conversation. Off means notifications only.",
+        chatEnabled: "Enable direct chat",
+        chatEnabledHint: "When off, QQ / Feishu only receive notifications and your messages are never treated as questions.",
+        chatReplyTimeout: "Reply timeout (ms)",
+        chatReplyTimeoutHint: "Give up and answer \u201Ctimed out\u201D when the model produces nothing within this window. Default 120000 (2 minutes).",
+        chatInjectTlrp: "Inject tlrp mode and character",
+        chatInjectTlrpHint: "Carry the resolved form, hit triggers and character setup into this turn; skipped automatically when tlrp is absent.",
+        chatBlockToolsInRp: "Block ops tools in RP mode",
+        chatBlockToolsInRpHint: "Companion chat should not suddenly go rummaging through server directories. When off, the model keeps shell and file tools in RP mode.",
+        chatTyping: "Show \u201Ctyping\u201D",
+        chatTypingHint: "Calls set_input_status while waiting for the model, when the OneBot side supports it.",
+        // ── take-over QQ (onebot) ────────────────────────────────────────────
+        railOnebot: "Take-over QQ",
+        addOnebot: "Add take-over QQ",
+        onebotTakeover: "Enable take-over QQ chat",
+        onebotTakeoverHint: "Connect one real QQ account through the OneBot protocol. Configure the connection address in NapCat / Lagrange first.",
+        onebotSelfId: "QQ number being taken over",
+        onebotSelfIdHint: "The self_id in OneBot reports. Required for recognising \u201Cthis one is mine\u201D and stopping the echo loop.",
+        onebotWsPath: "Reverse WS path",
+        onebotWsPathHint: "NapCat / Lagrange connects back to this path. Default /tlnotify/onebot/ws.",
+        onebotWsUrl: "Forward WS URL",
+        onebotWsUrlHint: "Optional. When set the plugin dials out instead (e.g. ws://127.0.0.1:3001) and the reverse path stays unused.",
+        onebotHttpUrl: "HTTP API URL",
+        onebotHttpUrlHint: "Optional but recommended. Sending over HTTP is more reliable, e.g. http://127.0.0.1:3000.",
+        onebotAccessToken: "Access token",
+        onebotAccessTokenHint: "Must match the token configured on the OneBot side; empty means no check.",
+        onebotAllowedUsers: "QQ numbers allowed to DM",
+        onebotAllowedUsersHint: "One per line, commas also work. \u201C*\u201D means anyone \u2014 not recommended: it opens your account to everyone who can message it.",
+        onebotAllowedGroups: "Group numbers allowed to chat",
+        onebotAllowedGroupsHint: "One per line. Empty means no group triggers anything.",
+        onebotGroupTrigger: "How groups trigger",
+        onebotGroupTriggerAt: "Mention or prefix",
+        onebotGroupTriggerPrefix: "Prefix only",
+        onebotGroupTriggerAll: "Every message",
+        onebotGroupPrefix: "Group prefix",
+        onebotGroupPrefixHint: "With \u201CFirefly\u201D, saying \u201CFirefly I am so tired\u201D in the group triggers it.",
+        onebotMdMode: "Markdown rendering",
+        onebotMdNative: "Native Markdown",
+        onebotMdFallback: "Native first, fall back to text",
+        onebotMdPlain: "Always plain text",
+        onebotMdModeHint: "Native MD needs markdown message segments from NapCat / Lagrange; otherwise it degrades to high-fidelity text with real block borders.",
+        onebotChatSession: "Pinned session id",
+        onebotChatSessionHint: "Empty means the plugin default session.",
         advanced: "Advanced",
         logLevel: "Log level",
         dataDir: "Data directory",
@@ -3915,6 +4324,13 @@ window.__ModuleLoader__.load({
         summaryNoTarget: "no target bound",
         tabRules: "Notify rules",
         tabSessions: "Sessions",
+        tabChat: "Direct chat",
+        tlrpCharacter: "Character",
+        tlrpCharacterHint: "Which tlrp character this channel plays. Leave empty to follow the tlrp global setting.",
+        tlrpMode: "Mode",
+        tlrpModeHint: "Pin this channel to one tlrp mode. Leave empty to follow the global setting (usually automatic: chat goes companion, troubleshooting goes tactical).",
+        tlrpFollowGlobal: "Follow global",
+        tlrpIdPlaceholder: "Empty = follow global, or type an id",
         tabAdvanced: "Advanced",
         followGlobal: "Follow global",
         custom: "Custom",

@@ -1,0 +1,18 @@
+# dsh-plugin-tlrp 的 bundle 声明：被列进 profile 的 dsh.profile.bundles 即激活。
+# 形态与 dsh-plugin-prompt-clock / dsh-plugin-tlmemory 一致（dsh.bundle.patch 是宿主唯一认可的激活通道）。
+#
+# 行 id 必须与插件配置 activeProfileEntryId 一致（默认 `tlrp`）：设置面板与
+# `settings.mutate(ns, ops)` 都用这个 profile 条目 id 作为命名空间。
+- insert:
+    - id: tlrp
+      name: dsh-plugin-tlrp
+
+# 覆盖写法示例（注意：匹配到同名 id 时整份 config 会被替换，不是深合并）：
+#
+# - id: tlrp
+#   config:
+#     mode: rp
+#     activeCharacterId: firefly
+#     enableStatusFooter: true
+#     customSceneOverride: 匹诺康尼·筑梦边境天台
+#     timeZone: Asia/Shanghai

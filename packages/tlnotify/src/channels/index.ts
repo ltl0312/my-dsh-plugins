@@ -24,6 +24,7 @@ import { shardNotification } from '../render.js'
 import { channelCaresAboutSession } from '../config.js'
 import { QqChannel } from './qq.js'
 import { FeishuChannel } from './feishu.js'
+import { createOneBotChannel, type OneBotRegisterUpgrade } from './onebot.js'
 
 export interface ChannelStatus {
   id: string
@@ -48,6 +49,15 @@ export interface ChannelManagerOptions {
   log: ChannelLogger
   onInbound: (channelId: string, reply: InboundReply) => void | Promise<void>
   onAction: (channelId: string, action: InboundAction) => void | Promise<void>
+  /**
+   * 宿主 `webServer.registerUpgrade` 的转交口。
+   *
+   * 只有 OneBot 反向 WS 需要它：夺舍 QQ 的 NapCat / Lagrange 是**主动连进来**
+   * 的，所以我们要在宿主的 HTTP 上占一条 upgrade 路径。管理器本身不持有 ctx，
+   * 由 `index.ts` 把 `(route) => ctx.webServer.registerUpgrade(route)` 传进来。
+   * 不传时 OneBot 通道退化为正向 WS / HTTP —— 能发消息，收不到主动上报。
+   */
+  registerUpgrade?: OneBotRegisterUpgrade
 }
 
 export class ChannelManager {
@@ -74,6 +84,18 @@ export class ChannelManager {
 
   has(channelId: string): boolean {
     return this.#channels.has(channelId)
+  }
+
+  /**
+   * 取一条通道的实例。
+   *
+   * 只有对话模式用得上：它要在「模型还在想」的这段时间里调通道自己的
+   * `beginTyping()`（能发的话就显示「对方正在输入…」），而那是通道实例的方法，
+   * 不在 `Channel` 接口上——所以这里如实返回 `undefined` 让调用方自己判类型，
+   * 而不是往公共接口里塞一个只有一家实现的成员。
+   */
+  channel(channelId: string): Channel | undefined {
+    return this.#channels.get(channelId)
   }
 
   /**
@@ -365,8 +387,15 @@ export class ChannelManager {
         return new QqChannel({ config, log: this.#scoped(config.id) })
       case 'feishu':
         return new FeishuChannel({ config, log: this.#scoped(config.id) })
+      case 'onebot':
+        // 夺舍 QQ：工厂里已经把「配置全可选 + 缺 registerUpgrade 时退化」处理过了，
+        // 这里只管把宿主能力原样递进去，不重复判断。
+        return createOneBotChannel(config, {
+          log: this.#scoped(config.id),
+          ...(this.#options.registerUpgrade ? { registerUpgrade: this.#options.registerUpgrade } : {}),
+        })
       default:
-        throw new Error(`未知的通道类型「${String(config.type)}」，目前支持 qq / feishu`)
+        throw new Error(`未知的通道类型「${String(config.type)}」，目前支持 qq / feishu / onebot`)
     }
   }
 }

@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import Schema from 'schemastery'
 import type {
   ChannelConfig,
+  ChatModeConfig,
   ContentConfig,
   EventsConfig,
   GlobalModeConfig,
@@ -114,6 +115,16 @@ export function defaultGlobalMode(): GlobalModeConfig {
  * `writtenOnly()` 的比较基准：漏掉一个键，宿主 schema 补出来的空默认值就会被当成
  * 「用户写过」，把 config.json 里的设置盖成空——默认通道被清掉就是这么来的。
  */
+export function defaultChatMode(): ChatModeConfig {
+  return {
+    enabled: true,
+    replyTimeoutMs: 120_000,
+    injectTlrp: true,
+    blockToolsInRp: true,
+    typingIndicator: true,
+  }
+}
+
 export function defaultConfig(): TlnotifyConfig {
   return {
     enabled: true,
@@ -392,9 +403,33 @@ const ContentSchema = Schema.object({
   .default(defaultContent())
   .description('正文内容')
 
+/**
+ * 「直接对话」的开关组。
+ *
+ * 它挂在**每个机器人**下面，不是全局：一个通道是不是聊天窗口，取决于那条通道
+ * 连的是什么。官方 Bot 走的是通知订阅，夺舍 QQ 才是真人对话；同一个人可能既
+ * 挂了三个通知机器人、又只让其中一个能聊天。放在全局就只能一刀切。
+ */
+const ChatModeSchema = Schema.object({
+  enabled: Schema.boolean().default(true).description('这条通道开直接对话；关掉后入站消息按普通通知路径处理'),
+  replyTimeoutMs: Schema.number()
+    .min(5_000)
+    .max(600_000)
+    .step(1_000)
+    .default(120_000)
+    .description('等待模型回复的上限毫秒数；超时会把已产出的内容发出去并提示'),
+  injectTlrp: Schema.boolean()
+    .default(true)
+    .description('把 tlrp 的模式、触发词与角色设定注入这条通道的对话（缺 tlrp 时自动跳过）'),
+  blockToolsInRp: Schema.boolean()
+    .default(true)
+    .description('RP 态下屏蔽运维工具：聊天时不该突然去翻服务器目录'),
+  typingIndicator: Schema.boolean().default(true).description('回复前发「正在输入」提示（协议支持时）'),
+})
+
 const ChannelSchema = Schema.object({
   id: Schema.string().default('').description('通道标识，唯一，用于 defaultChannelId 引用'),
-  type: Schema.union(['qq', 'feishu'] as const).default('qq').description('通道类型'),
+  type: Schema.union(['qq', 'feishu', 'onebot'] as const).default('qq').description('通道类型'),
   enabled: Schema.boolean().default(true).description('是否启用'),
   appId: Schema.string().default('').description('QQ 机器人 AppID'),
   appSecret: Schema.string().role('secret').default('').description('QQ 机器人 AppSecret'),
@@ -403,6 +438,30 @@ const ChannelSchema = Schema.object({
   markdown: Schema.boolean()
     .default(false)
     .description('QQ 用原生 Markdown 卡片发（更窄、不随窗口自适应）；关掉则发纯文本'),
+  // ---- 夺舍 QQ（OneBot v11）----
+  takeoverEnabled: Schema.boolean()
+    .default(false)
+    .description('开启夺舍 QQ 直接对话（OneBot 协议直连一个真人 QQ 号）'),
+  selfId: Schema.string().default('').description('被夺舍的 QQ 号（OneBot self_id）'),
+  wsPath: Schema.string().default('/tlnotify/onebot/ws').description('反向 WebSocket 挂载路径'),
+  wsUrl: Schema.string().default('').description('正向 WebSocket 地址（填了就不用反向）'),
+  httpUrl: Schema.string().default('').description('OneBot HTTP API 地址，例如 http://127.0.0.1:3000'),
+  accessToken: Schema.string().role('secret').default('').description('OneBot access_token；留空表示未开鉴权'),
+  allowedPrivateUsers: Schema.array(Schema.string())
+    .default([])
+    .description('允许私聊对话的 QQ 号；填 * 表示任何人（不建议）'),
+  allowedGroups: Schema.array(Schema.string()).default([]).description('允许触发对话的群号'),
+  groupTriggerMode: Schema.union(['at_or_prefix', 'prefix_only', 'all'] as const)
+    .default('at_or_prefix')
+    .description('群聊触发方式：被@或带前缀 / 只认前缀 / 全部消息'),
+  groupPrefix: Schema.string().default('流萤').description('群聊触发前缀'),
+  mdRenderMode: Schema.union(['native_md', 'auto_fallback', 'plain'] as const)
+    .default('auto_fallback')
+    .description('原生 Markdown / 失败自动回退纯文本 / 直接纯文本'),
+  chatSessionId: Schema.string().default('').description('对话固定使用的 DSH 会话 id；留空用默认会话'),
+  chat: ChatModeSchema.default(defaultChatMode()).description('直接对话（这条通道专属）'),
+  tlrpCharacterId: Schema.string().default('').description('这条通道用的 tlrp 角色 id（留空跟随 tlrp 全局设置）'),
+  tlrpMode: Schema.string().default('').description('这条通道用的 tlrp 形态 id，如 rp / work / sam（留空跟随 tlrp 全局设置）'),
   feishuAppId: Schema.string().default('').description('飞书自建应用 App ID'),
   feishuAppSecret: Schema.string().role('secret').default('').description('飞书自建应用 App Secret'),
   feishuReceiveId: Schema.string().default('').description('飞书接收方 id'),

@@ -259,7 +259,13 @@ describe('设置页 RPC 的挂载方式', () => {
     // 假服务真的走了 `owner.effect`：5 条路由各一次。
     expect(service.calls.effects).toBe(RPC_METHODS.length)
     // 假 ctx 对未声明的属性（含 `webServer`）是**抛**的：注册跑完就说明没读它。
-    expect(host.gets).not.toContain('webServer')
+    //
+    // 唯一例外是 OneBot 反向 WS 的挂载口（`#readRegisterUpgrade`）：夺舍 QQ 的
+    // NapCat / Lagrange 要主动连进来，宿主必须在 HTTP 监听上占一条 upgrade 路径，
+    // 所以构造通道管理器时会 `ctx.get('webServer')` 一次。它与 RPC 挂载无关——
+    // 这里断言它**至多一次**，而不是放宽成"随便读"：再多一次就说明有人在
+    // RPC 路径上偷偷依赖了 Web 载体。
+    expect(host.gets.filter((name) => name === 'webServer')).toHaveLength(1)
     expect(host.gets).not.toContain('client-connection')
     expect(logOf(dataDir)).toContain('设置页 RPC 已挂载')
 
