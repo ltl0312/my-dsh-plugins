@@ -14,7 +14,7 @@
     "scene": "覆盖当前所处情景",
     "title": "修改当前角色对对方的专属称呼",
     "trigger": "新增一组关键词触发映射",
-    "style": "风格层开关：只带角色语言风格与表情/本地贴纸，不演动作（/style on|off|default|status）",
+    "style": "风格层开关：只带角色语言风格与表情/本地贴纸；dialog 为对话体，只说话不写旁白、动作与环境（/style on|dialog|off|default|status）",
     "tlrp": "查看 tlrp 状态：当前形态、路由链路、角色、情景、已启用触发器"
   }
 }

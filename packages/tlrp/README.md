@@ -2,7 +2,7 @@
 
 DSH 核心角色扮演与**多形态矩阵**插件：把「当前用哪种形态说话、能动哪些工具、要不要写状态面板」从人设文本里的死规则，变成可在设置面板里自由增删改的运行时形态（Mode）。
 
-- 包名 `dsh-plugin-tlrp`，版本 `0.3.0`，零外部重型依赖
+- 包名 `dsh-plugin-tlrp`，版本 `0.4.0`，零外部重型依赖
 - 双入口：ESM `index.js` + CommonJS `index.cjs`，同一份实现源（`lib/core.cjs`）
 - 六块能力：设置命名空间 / 形态矩阵（自定义形态 + 动态指令）/ 动态提示变量 / 每轮尾部深度注入 / 按形态的工具拦截 / 多角色与触发映射表
 
@@ -39,6 +39,11 @@ tlrp 把这三件事都挪到宿主层：
 | `customSceneOverride` | string | `""` | 临时情景覆盖 |
 | `characters` | array | 内置 `firefly` + `sam_tactical` | 多角色预设库 |
 | `triggers` | array | 内置 5 组流萤触发映射 | 提示词触发映射表（动态世界书） |
+| `styleLayerDefault` | `on` \| `dialog` \| `off` | `off` | 全局风格层档位（形态与 `/style` 可各自覆盖）：`on` 只加语气与表情/贴纸，`dialog` 再进一步砍掉动作、环境、外貌与旁白 |
+| `styleEmojiHint` | string | 适度使用 emoji 的说明 | 风格层里的表情规则；留空＝本轮不用 emoji |
+| `stickerDir` | string | `""` | 表情包目录；留空落 `~/.dsh/stickers/<角色id>/` |
+| `galleryDir` | string | `""` | 图库目录；留空落 `~/.dsh/gallery/` |
+| `maxStickersPerTurn` | number | `2` | 每轮最多贴几张图（`0`＝本轮禁止贴图） |
 
 非面板字段（通过 `cordis.patch.yml` 调）：`timeZone`、`statusFooterLabel`、`registerNowVariable`、`coreSectionEnabled`、`coreSectionOrder`、`coreSectionText`、`contextOrder`、`maxTriggerInjections`、`blockedToolPatterns`、`allowedToolPatterns`、`activeProfileEntryId`。
 
@@ -65,11 +70,29 @@ Web / CLI 走 `ctx.commands.register()`（拦截层，不产生模型消息）�
 | `/char <id>` | 切换激活角色（`/char` 不带参数会列出可用 id） |
 | `/scene <描述>` | 覆盖当前情景；留空回到角色默认情景 |
 | `/tlrp status`（或 `/status`） | 打印路由锁定、本轮形态、以及**全部已注册形态**的优先级 / 工具策略 / 别名 / 触发链 |
+| `/style on` \| `dialog` \| `off` \| `default` \| `status` | 当轮覆盖风格层档位：`on` 只带语气＋表情/贴纸、`dialog` 对话体（只说出口的话，不写动作/环境/外貌/旁白）、`off` 关掉、`default` 交回「形态 → 全局」判定；不带参数等同 `status` |
 | 形态别名（动态注册） | 每个形态 `commandAliases` 里以 `/` 开头的别名都会被注册成真指令：默认有 `/rp` `/work` `/sam` `/sleep`，你新建 `debug` 形态并给它 `/debug`，就立刻多一条 `/debug` |
 
 首行标记等价于指令，但**只认已注册别名**：`【流萤】`/`【陪伴】` → `rp`、`【战术】` → `work`、`【萨姆】`/`【机甲】` → `sam`、`【医疗舱】` → `sleep`；你自己给 `debug` 形态写 `【排障】`，那 `【排障】` 就同样能切形态。
 
 旧写法（`/rp` `/work`）在默认形态表下照旧可用，因为它们就是 `rp`/`work` 形态自带的别名。
+
+## 三点五、风格层（只带语气，不演全套）
+
+风格层是叠加在形态之上的**表演强度旋钮**：它不换人设、不改工具策略，只决定「这一轮要不要写旁白」。
+
+四档，取值 `inherit` / `on` / `dialog` / `off`：
+
+| 档位 | 注入内容 |
+| --- | --- |
+| `inherit` | 跟随下一级（形态跟全局、全局 `inherit` 视作 `off`） |
+| `on` | 补语言风格（`speechStyle` + `dialogueExamples`）＋ emoji 规则 ＋ 本地表情包/图库清单；不复述人设，也不改形态原有的动作写法 |
+| `dialog` | 在 `on` 之上追加「本轮的表演强度」：只输出角色说出口的话，禁止 `*斜体动作*`、环境天气、陈设外貌、心理独白串，除非人设明确要求否则不写状态面板 |
+| `off` | 完全不注入风格块 |
+
+判定优先级：**会话 `/style` 覆盖 > 形态自带 `styleLayer` > 全局 `styleLayerDefault`**。形态自带值在设置面板的形态表单里改，全局值在「风格层（轻量注入）」分区里改，两者都不用重启。
+
+配合本地图库：把图片丢进 `~/.dsh/stickers/<角色id>/`（或自建目录并在 `stickerDir` 指定）与 `~/.dsh/gallery/`，标签＝文件名主干，插件只扫**顶层**文件（png/jpg/jpeg/webp/gif）。模型按 `![标签](绝对路径)` 的语法贴图，路径用正斜杠；客户端会把绝对路径改写成带鉴权的 `api/file` 地址，所以本地图能直接渲染。
 
 ## 四、提示变量
 
@@ -168,14 +191,14 @@ dsh --profile web --dump-config | grep -A 8 "id: tlrp"
 
 | 脚本 | 证明什么 |
 | --- | --- |
-| `node --test test/core.test.mjs` | 24 条纯逻辑单测：指令解析、形态归一化与迁移、触发匹配、三种准则渲染、模板中和、时区格式化、多角色回落 |
-| `node scripts/apply-check.mjs` | 48 条端到端检查：用**真的** `SystemPrompt` 跑 `assemble()+renderPrompt()`，证明未知变量数为 0、核心 section/角色块/时间变量都在、auto 分流、形态准则切换、按 `toolPolicy` 拦截与放行、`/mode <id>` 与自定义别名（`/debug`、`【排障】`）切形态、**自定义第 5 个形态** 的专属准则/精简人设/`block_all` 全拦、`/char` `/scene` `/tlrp` 与 `settings.mutate` 落到 `include:tlrp`、命中「橡木蛋糕卷」注入、`sam_tactical` 独立人格、关闭态不拦截 |
+| `node --test test/core.test.mjs test/memory-bridge.test.mjs test/style.test.mjs` | 47 条纯逻辑单测：指令解析、形态归一化与迁移、触发匹配、三种准则渲染、模板中和、时区格式化、多角色回落、记忆桥、风格层四档解析与归一化、贴纸库扫描、风格块渲染 |
+| `node scripts/apply-check.mjs` | 66 条端到端检查：用**真的** `SystemPrompt` 跑 `assemble()+renderPrompt()`，证明未知变量数为 0、核心 section/角色块/时间变量都在、auto 分流、形态准则切换、按 `toolPolicy` 拦截与放行、`/mode <id>` 与自定义别名（`/debug`、`【排障】`）切形态、**自定义第 5 个形态** 的专属准则/精简人设/`block_all` 全拦、`/char` `/scene` `/tlrp` 与 `settings.mutate` 落到 `include:tlrp`、`/style` 四档在 work 与 rp 两侧切换（`dialog` 会同时改掉陪伴族格式红线与斜体动作要求）、命中「橡木蛋糕卷」注入、`sam_tactical` 独立人格、关闭态不拦截 |
 | `node scripts/mutate-check.mjs` | 21 条设置写入检查：用**真的** `dsh-settings` 代码跑 `describe()+mutate()`，九个 volatile 字段逐个往返、`modes` 数组往返（含自定义形态）、`mode` 可锁定到任意形态 id、非 volatile 字段被拒绝、未被服务的 ns（`tlrp`）被拒绝、批量写入 |
-| `node scripts/client-check.mjs` | 53 条客户端渲染检查：切换栏按 `modes` 动态渲染、自定义形态出现在切换栏、形态 CRUD 按钮与编辑器字段齐全 |
+| `node scripts/client-check.mjs` | 62 条客户端渲染检查：切换栏按 `modes` 动态渲染、自定义形态出现在切换栏、形态 CRUD 按钮与编辑器字段齐全、五个分区可折叠（`aria-expanded`、`data-open`、`hidden` 兜底 CSS）、风格层分区与形态级档位选择 |
 
 ```bash
 cd ~/.dsh/profiles/desktop
-node --test "D:/Code/my-dsh-plugins/packages/tlrp/test/core.test.mjs"
+node --test "D:/Code/my-dsh-plugins/packages/tlrp/test/core.test.mjs" "D:/Code/my-dsh-plugins/packages/tlrp/test/style.test.mjs"
 node "D:/Code/my-dsh-plugins/packages/tlrp/scripts/apply-check.mjs"
 node "D:/Code/my-dsh-plugins/packages/tlrp/scripts/mutate-check.mjs"
 ```

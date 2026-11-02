@@ -355,7 +355,7 @@ try {
 check('page 视图渲染不抛错', !(page instanceof Error), page?.message);
 const pageText = collectText(page).join(' ');
 check('page 根节点带 tlrp-root', findAll(page, (n) => n.props.className === 'tlrp-root').length === 1);
-check('四个分区都在位', findAll(page, (n) => n.props.className === 'tlrp-section').length === 4,
+check('五个分区都在位', findAll(page, (n) => n.props.className === 'tlrp-section').length === 5,
 	String(findAll(page, (n) => n.props.className === 'tlrp-section').length));
 check(
 	'切换栏按 modes 动态渲染（含自动路由与全部形态名）',
@@ -396,9 +396,66 @@ try {
 }
 check('设置栏目渲染不抛错', !(section instanceof Error), section?.message);
 check('设置栏目外层是 tlrp-root', !(section instanceof Error) && findAll(section, (n) => n.props.className === 'tlrp-root').length === 1);
-check('设置栏目里有四个分区', !(section instanceof Error) && findAll(section, (n) => n.props.className === 'tlrp-section').length === 4,
+check('设置栏目里有五个分区', !(section instanceof Error) && findAll(section, (n) => n.props.className === 'tlrp-section').length === 5,
 	String(findAll(section, (n) => n.props.className === 'tlrp-section').length));
 check('设置栏目有标题文本', !(section instanceof Error) && collectText(section).join(' ').includes('TLRP 角色与双态引擎'));
+
+// ── 4c. 风格层：形态三态下拉 + 全局设置分区 ────────────────────────
+const sectionText = section instanceof Error ? '' : collectText(section).join(' ');
+check(
+	'风格层全局分区在位（默认开关/表情包/图库/每轮上限）',
+	['风格层（轻量注入）', '全局默认', '表情包目录', '图库目录', '每轮最多贴图'].every((label) => sectionText.includes(label)),
+	sectionText.slice(0, 300)
+);
+check(
+	'风格层分区写明 /style 开关',
+	sectionText.includes('/style on|off|default|status'),
+	sectionText.slice(0, 300)
+);
+check(
+	'形态表单有风格层三态',
+	['跟随全局默认', '强制开', '强制关'].every((label) => pageText.includes(label)),
+	pageText.slice(0, 300)
+);
+
+// ── 4d. 分区可收起：工具栏 + aria-expanded + 收起态摘要 ──────────────
+const sectionNodes = section instanceof Error ? [] : findAll(section, (n) => n.props.className === 'tlrp-section');
+const toggles = section instanceof Error ? [] : findAll(section, (n) => n.props.className === 'tlrp-section-toggle');
+const bodies = section instanceof Error ? [] : findAll(section, (n) => n.props.className === 'tlrp-section-body');
+check(
+	'每个分区都有收起按钮（5 个，带 aria-expanded）',
+	toggles.length === 5 && toggles.every((n) => n.props['aria-expanded'] === 'true' || n.props['aria-expanded'] === 'false'),
+	`${toggles.length} toggles`
+);
+check(
+	'分区内容始终在树里，收起只靠 hidden 标记',
+	bodies.length === 5 && sectionNodes.every((n) => ['true', 'false'].includes(n.props['data-open'])),
+	`${bodies.length} bodies`
+);
+check(
+	'有全部展开/全部收起工具栏',
+	sectionText.includes('全部展开') && sectionText.includes('全部收起'),
+	sectionText.slice(0, 200)
+);
+check(
+	'收起按钮带可访问名（chevron 只做 aria-hidden 装饰）',
+	toggles.length === 5 &&
+		toggles.every(
+			(n) => findAll(n.props.children, (c) => c.type === 'svg' && c.props['aria-hidden'] === 'true').length === 1
+		) &&
+		toggles.every((n) => collectText(n).join(' ').trim().length > 0),
+	JSON.stringify(toggles.map((n) => collectText(n).join(' ').slice(0, 40)))
+);
+check(
+	'收起态的隐藏由 CSS 兜底（hidden 属性会被 display:flex 覆盖）',
+	source.includes('.tlrp-section[data-open="false"] .tlrp-section-body { display: none; }'),
+	'缺少 [data-open="false"] .tlrp-section-body 的 display:none 规则，收起后正文仍会显示'
+);
+check(
+	'收起态摘要给出关键状态（模式/风格层/角色/触发）',
+	['当前模式', '当前判定', '角色', '触发'].every((label) => sectionText.includes(label)),
+	sectionText.slice(0, 200)
+);
 
 // ── 5. 写操作确实转发 ────────────────────────────────────────────
 const face = typeof registration.definition.inject === 'function' ? registration.definition.inject() : registration.definition.inject;

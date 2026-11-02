@@ -41,11 +41,20 @@ const baseConfig = (extra = {}) => ({
 test('resolveStyleLayer：会话覆盖 > 形态自身 > 全局默认', () => {
   assert.deepEqual(core.resolveStyleLayer({ modeLayer: 'off', globalDefault: 'on', sessionOverride: 'on' }), {
     on: true,
+    dialog: false,
     source: 'session',
   })
-  assert.deepEqual(core.resolveStyleLayer({ modeLayer: 'on', globalDefault: 'off' }), { on: true, source: 'mode' })
-  assert.deepEqual(core.resolveStyleLayer({ modeLayer: 'inherit', globalDefault: 'on' }), { on: true, source: 'global' })
-  assert.deepEqual(core.resolveStyleLayer({}), { on: false, source: 'global' })
+  assert.deepEqual(core.resolveStyleLayer({ modeLayer: 'on', globalDefault: 'off' }), {
+    on: true,
+    dialog: false,
+    source: 'mode',
+  })
+  assert.deepEqual(core.resolveStyleLayer({ modeLayer: 'inherit', globalDefault: 'on' }), {
+    on: true,
+    dialog: false,
+    source: 'global',
+  })
+  assert.deepEqual(core.resolveStyleLayer({}), { on: false, dialog: false, source: 'global' })
 })
 
 test('normalizeStyleLayerFlag 兼容布尔值与大小写，未知值回落 inherit', () => {
@@ -254,4 +263,74 @@ test('renderTurnContext 报告风格层来源与图库数量', () => {
     style: { on: false, source: 'global', block: '', stickerCount: 0, galleryCount: 0 },
   })
   assert.match(offText, /风格层：关（来源：全局 styleLayerDefault）/)
+})
+
+/* ── 对话体档（dialog）── */
+
+test('dialog 档：别名归一、优先级与三分量解析', () => {
+  assert.equal(core.normalizeStyleLayerFlag('dialog'), 'dialog')
+  assert.equal(core.normalizeStyleLayerFlag('对话体'), 'dialog')
+  assert.equal(core.normalizeStyleLayerFlag('CHAT'), 'dialog')
+
+  assert.deepEqual(core.resolveStyleLayer({ modeLayer: 'dialog', globalDefault: 'off' }), {
+    on: true,
+    dialog: true,
+    source: 'mode',
+  })
+  assert.deepEqual(core.resolveStyleLayer({ globalDefault: 'dialog' }), { on: true, dialog: true, source: 'global' })
+  assert.deepEqual(core.resolveStyleLayer({ modeLayer: 'dialog', sessionOverride: 'on' }), {
+    on: true,
+    dialog: false,
+    source: 'session',
+  })
+  assert.equal(core.styleLayerFlagText('dialog'), '对话体（只说话，不演动作与旁白）')
+})
+
+test('renderStyleBlock 对话体：换标题、给表演强度红线、禁旁白', () => {
+  const text = core.renderStyleBlock(firefly, {
+    fullPersona: true,
+    emojiHint: 'ok',
+    dialogOnly: true,
+    maxStickersPerTurn: 0,
+  })
+  assert.match(text, /### 风格层（本轮生效：对话体，只说话不演）/)
+  assert.doesNotMatch(text, /只带语言风格，不演动作/)
+  assert.match(text, /本轮的表演强度/)
+  assert.match(text, /只输出「流萤[^」]*」说出口的话，不写旁白/)
+  assert.match(text, /禁止环境与天气描写/)
+  assert.match(text, /禁止外貌与服饰特写/)
+  assert.match(text, /状态面板照旧输出/)
+
+  // 非对话体不出现这段
+  const plain = core.renderStyleBlock(firefly, { fullPersona: true, emojiHint: 'ok', maxStickersPerTurn: 0 })
+  assert.doesNotMatch(plain, /本轮的表演强度/)
+})
+
+test('snapshot 对话体：全局档位透传到 style 与状态块', () => {
+  const state = core.createState({ read: readFrom(baseConfig({ styleLayerDefault: 'dialog' })) })
+  const snap = core.snapshot(state, { session: { id: 's-dialog' } })
+  assert.equal(snap.style.on, true)
+  assert.equal(snap.style.dialog, true)
+  assert.equal(snap.style.source, 'global')
+  assert.match(snap.style.block, /对话体/)
+
+  // 形态写 off 时对话体仍然被压掉
+  const modeState = core.createState({
+    read: readFrom(
+      baseConfig({
+        styleLayerDefault: 'dialog',
+        modes: [{ id: 'work', name: '战术工作态', injectCharacterPersona: false, styleLayer: 'off' }],
+      }),
+    ),
+  })
+  const modeSnap = core.snapshot(modeState, { session: { id: 's-dialog-off' } })
+  assert.equal(modeSnap.style.on, false)
+  assert.equal(modeSnap.style.dialog, false)
+  assert.equal(modeSnap.style.block, '')
+})
+
+test('/style dialog 被解析成 dialog 档', () => {
+  const parsed = core.parseCommand('/style dialog')
+  assert.equal(parsed.command, '/style')
+  assert.equal(core.normalizeStyleLayerFlag(parsed.arg), 'dialog')
 })

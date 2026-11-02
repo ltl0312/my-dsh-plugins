@@ -58,9 +58,11 @@ function buildConfig(z) {
     bindCharacterId: z.string().default(''),
     isDefaultFallback: z.boolean().default(false),
     styleLayer: z
-      .union(['inherit', 'on', 'off'])
+      .union(['inherit', 'on', 'dialog', 'off'])
       .default('inherit')
-      .description('风格层开关（只带语言风格，不演动作）：on 强制开、off 强制关、inherit 跟随全局 styleLayerDefault。'),
+      .description(
+        '风格层开关：on 只带语气、dialog 对话体（只说话，禁旁白/动作/环境/外貌）、off 强制关、inherit 跟随全局 styleLayerDefault。',
+      ),
   })
 
   return z.object({
@@ -118,9 +120,11 @@ function buildConfig(z) {
 
     /* ── 风格层：只带语言风格 + 表情 + 本地表情包/图库 ── */
     styleLayerDefault: z
-      .union(['on', 'off'])
+      .union(['on', 'dialog', 'off'])
       .default('off')
-      .description('风格层全局默认开关：形态自己的 styleLayer 没写 on/off 时按这里走。聊天里用 /style on|off|default 临时改本会话。')
+      .description(
+        '风格层全局默认：形态自己的 styleLayer 留 inherit 时按这里走。on 只带语气、dialog 只说话（不写旁白与动作）。聊天里用 /style on|dialog|off|default 临时改本会话。',
+      )
       .volatile(),
     styleEmojiHint: z
       .string()

@@ -732,8 +732,14 @@ function findFallbackMode(modes) {
 
 /* ─────────────────────────── 风格层（只带语言风格） ─────────────────────────── */
 
-/** 风格层三态：inherit 跟随全局，on / off 由形态自己定。 */
-const STYLE_LAYER_FLAGS = ['inherit', 'on', 'off']
+/**
+ * 风格层四态：inherit 跟随全局；on 只带语气；dialog 只带语气且禁止演动作/旁白；
+ * off 关闭。dialog 是 on 的加强档 —— 同一句「像角色」，但一句旁白都不许有。
+ */
+const STYLE_LAYER_FLAGS = ['inherit', 'on', 'dialog', 'off']
+
+/** dialog 的同义写法：对话体只说话，不演旁白。 */
+const STYLE_LAYER_DIALOG_ALIASES = ['dialog', 'dialogue', 'chat', 'daily', '对话体', '对话']
 
 /** 表情包/图库认得的图片扩展名。 */
 const STICKER_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
@@ -749,20 +755,33 @@ function normalizeStyleLayerFlag(value) {
   const text = String(value ?? '')
     .trim()
     .toLowerCase()
+  if (STYLE_LAYER_DIALOG_ALIASES.includes(text)) return 'dialog'
   return STYLE_LAYER_FLAGS.includes(text) ? text : 'inherit'
 }
 
 /**
  * 解析本轮风格层是否生效。优先级：会话覆盖 > 形态自身 > 全局默认。
+ * `dialog` 是 `on` 的加强档：口吻照旧，但禁止动作、环境与外貌描写。
  * @param {{modeLayer?:unknown, globalDefault?:unknown, sessionOverride?:unknown}} input
- * @returns {{on:boolean, source:'session'|'mode'|'global'}}
+ * @returns {{on:boolean, dialog:boolean, source:'session'|'mode'|'global'}}
  */
 function resolveStyleLayer(input = {}) {
+  const pick = (layer, source) => ({ on: layer !== 'off', dialog: layer === 'dialog', source })
   const session = normalizeStyleLayerFlag(input.sessionOverride)
-  if (session !== 'inherit') return { on: session === 'on', source: 'session' }
+  if (session !== 'inherit') return pick(session, 'session')
   const modeLayer = normalizeStyleLayerFlag(input.modeLayer)
-  if (modeLayer !== 'inherit') return { on: modeLayer === 'on', source: 'mode' }
-  return { on: normalizeStyleLayerFlag(input.globalDefault) === 'on', source: 'global' }
+  if (modeLayer !== 'inherit') return pick(modeLayer, 'mode')
+  const globalLayer = normalizeStyleLayerFlag(input.globalDefault)
+  return pick(globalLayer === 'inherit' ? 'off' : globalLayer, 'global')
+}
+
+/** 风格层档位的显示文案（状态块、/style 回报共用）。 */
+function styleLayerFlagText(flag) {
+  const text = normalizeStyleLayerFlag(flag)
+  if (text === 'on') return '开（只带语气）'
+  if (text === 'dialog') return '对话体（只说话，不演动作与旁白）'
+  if (text === 'off') return '关'
+  return '跟随全局默认'
 }
 
 /** 风格层开关的来源说明（写进状态块用）。 */
@@ -1010,7 +1029,12 @@ function renderStyleBlock(character, options = {}) {
   const gallery = asArray(options.gallery)
   const maxPerTurn = Math.max(0, Math.floor(Number(options.maxStickersPerTurn ?? 0) || 0))
 
-  const lines = ['### 风格层（本轮生效：只带语言风格，不演动作）']
+  const dialogOnly = options.dialogOnly === true || normalizeStyleLayerFlag(options.styleLayer) === 'dialog'
+  const lines = [
+    dialogOnly
+      ? '### 风格层（本轮生效：对话体，只说话不演）'
+      : '### 风格层（本轮生效：只带语言风格，不演动作）',
+  ]
   if (fullPersona) {
     lines.push('- 角色设定与台词范例已在上文注入：风格层只追加表情与贴纸规则，不要重复扩写人设。')
   } else {
@@ -1021,6 +1045,18 @@ function renderStyleBlock(character, options = {}) {
     )
     if (char.speechStyle) lines.push('', '#### 语言风格与禁用项（照此执行）', char.speechStyle)
     if (char.dialogueExamples) lines.push('', '#### 台词语气锚点（学语气，不要照抄句子）', char.dialogueExamples)
+  }
+
+  if (dialogOnly) {
+    lines.push(
+      '',
+      '#### 本轮的表演强度（覆盖本形态与角色设定里一切动作、环境、外貌要求）',
+      `- 这是面对面的日常交流：只输出「${asString(char.name, char.id)}」说出口的话，不写旁白。`,
+      '- 禁止 *斜体动作*、禁止环境与天气描写（风、光、气味、温度、室内陈设）、禁止外貌与服饰特写。',
+      '- 禁止「*轻轻笑了一下*」「*沉默片刻*」这类插入；要表达停顿就断句或换行，不要用动作代替。',
+      '- 禁止整段心理独白式叙事；情绪只通过用词、语序与句尾语气体现。',
+      '- 例外：形态要求的状态面板照旧输出（那是格式，不是旁白）；称呼、禁用项与记忆写入纪律不变。',
+    )
   }
 
   lines.push('', '#### 表情')
@@ -1061,7 +1097,14 @@ function renderRpDirective(context) {
     '- 严禁出现的措辞：「作为一个 AI」「我是语言模型」「我没有实体／没有腿」「我无法离开这里」「超出我的能力范围」。',
     '',
     '### 输出形态（硬性）',
-    '- 正文用第一人称，自然穿插 *斜体包裹的微动作与感官描写*（温度、气味、视线、手套边缘、飘带晃动）。动作要有，但不要堆砌成清单。',
+    ...(context.style?.dialog
+      ? [
+          '- 本轮是对话体：只输出说出口的话。不写 *斜体动作*、不写环境与天气、不写外貌服饰、不写旁白式停顿。',
+          '- 情绪只在用词、语序、句尾语气里；需要停顿就断句或空行，不要用动作代替。',
+        ]
+      : [
+          '- 正文用第一人称，自然穿插 *斜体包裹的微动作与感官描写*（温度、气味、视线、手套边缘、飘带晃动）。动作要有，但不要堆砌成清单。',
+        ]),
     '- 严禁助理式项目符号清单（`•`／`1. 2. 3.` 这种排布），严禁客服式反问（「要不要我帮你设个提醒」「需要我继续吗」「希望对你有帮助」）。',
     '- 像在聊天软件里发消息：短句、有呼吸感，一整段说完就停。',
   ]
@@ -1240,7 +1283,11 @@ function renderTurnContext(context) {
       '- 危险操作先摊开完整命令与影响面，等对方回「确认」再执行；对方本轮已明确授权时直接执行并复述命令。',
     )
   } else if (modeDef?.family === 'rp') {
-    lines.push('- 格式红线（陪伴族）：正文必须有 *斜体微动作／感官*；严禁项目符号清单与客服式反问；严禁自称端口／Agent。')
+    lines.push(
+      context.style?.dialog
+        ? '- 格式红线（陪伴族 · 对话体）：只说话，不写 *斜体微动作*／环境／外貌／旁白；严禁项目符号清单与客服式反问；严禁自称端口／Agent。'
+        : '- 格式红线（陪伴族）：正文必须有 *斜体微动作／感官*；严禁项目符号清单与客服式反问；严禁自称端口／Agent。',
+    )
   } else {
     lines.push(`- 格式红线：严格遵循形态「${asString(modeDef?.name, mode)}」的专属准则（见上文 tlrp_directive），不套用其它形态的红线。`)
   }
@@ -1255,8 +1302,11 @@ function renderTurnContext(context) {
       const extras = []
       if (style.stickerCount > 0) extras.push(`表情包 ${style.stickerCount} 张`)
       if (style.galleryCount > 0) extras.push(`图库 ${style.galleryCount} 张`)
+      const flavor = style.dialog
+        ? '对话体：只说话，不写旁白、动作、环境与外貌'
+        : '保留角色语气与称呼'
       lines.push(
-        `- 风格层：开（来源：${styleLayerSourceText(style.source)}）：保留角色语气与称呼${extras.length > 0 ? `；可用 ${extras.join('、')}，用 ![标签](绝对路径) 贴图` : ''}。`,
+        `- 风格层：开（来源：${styleLayerSourceText(style.source)}）：${flavor}${extras.length > 0 ? `；可用 ${extras.join('、')}，用 ![标签](绝对路径) 贴图` : ''}。`,
       )
     } else {
       lines.push(`- 风格层：关（来源：${styleLayerSourceText(style?.source)}），只按本形态红线说话，不套角色口吻。`)
@@ -1413,7 +1463,7 @@ function snapshot(state, agent, overrides = {}) {
       cwd,
       turnText: '',
       memory,
-      style: { on: false, source: 'global', block: '', stickerCount: 0, galleryCount: 0 },
+      style: { on: false, dialog: false, source: 'global', block: '', stickerCount: 0, galleryCount: 0 },
     }
   }
 
@@ -1456,6 +1506,7 @@ function snapshot(state, agent, overrides = {}) {
     ? renderStyleBlock(character, {
         // 完整人设已注入时不再重复 speechStyle / dialogueExamples
         fullPersona: modeDef?.injectCharacterPersona !== false,
+        dialogOnly: styleResolved.dialog,
         emojiHint: asString(read('styleEmojiHint'), ''),
         stickers,
         gallery,
@@ -1464,6 +1515,7 @@ function snapshot(state, agent, overrides = {}) {
     : ''
   const style = {
     on: styleResolved.on,
+    dialog: styleResolved.dialog,
     source: styleResolved.source,
     block: styleBlock,
     stickerCount: stickers.length,
@@ -1704,8 +1756,8 @@ function createPlugin() {
       })
       register({
         name: 'style',
-        description: '风格层开关：只带角色语言风格与表情/贴纸，不演动作（/style on|off|default|status）',
-        input: { hint: 'on|off|default|status' },
+        description: '风格层开关：只带角色语气与表情/贴纸；dialog 为对话体，只说话不写旁白（/style on|dialog|off|default|status）',
+        input: { hint: 'on|dialog|off|default|status' },
         handler: async ({ agent, rawInput }) => runCommand('style', rawInput, agent),
       })
       register({
@@ -1791,12 +1843,12 @@ function createPlugin() {
               kind: 'success',
               text: [
                 'tlrp 风格层',
-                `- 本轮生效：${resolved.on ? '开' : '关'}（来源：${styleLayerSourceText(resolved.source)}）`,
+                `- 本轮生效：${styleLayerFlagText(resolved.dialog ? 'dialog' : resolved.on ? 'on' : 'off')}（来源：${styleLayerSourceText(resolved.source)}）`,
                 `- 当前形态自身设置：${modeLayerText}`,
                 `- 全局默认（styleLayerDefault）：${globalDefault}`,
                 `- 会话覆盖（/style）：${session?.styleLayer ?? '未设置'}`,
                 `- 表情包 ${current1.stickerCount ?? 0} 张；图库 ${current1.galleryCount ?? 0} 张；每轮最多 ${asString(read('maxStickersPerTurn'), '2')} 张`,
-                '用法：/style on 开、/style off 关、/style default 交回形态与全局、/style status 查看',
+                '用法：/style on 只带语气、/style dialog 对话体（只说话不演）、/style off 关、/style default 交回形态与全局、/style status 查看',
               ].join('\n'),
             }
           }
@@ -1808,19 +1860,20 @@ function createPlugin() {
             const resolved = resolveStyleLayer({ modeLayer: modeDef?.styleLayer, globalDefault, sessionOverride: 'inherit' })
             return {
               kind: 'success',
-              text: `tlrp 风格层已交回形态与全局设置：当前${resolved.on ? '开' : '关'}（来源：${styleLayerSourceText(resolved.source)}）`,
+              text: `tlrp 风格层已交回形态与全局设置：当前${styleLayerFlagText(resolved.dialog ? 'dialog' : resolved.on ? 'on' : 'off')}（来源：${styleLayerSourceText(resolved.source)}）`,
             }
           }
-          if (raw !== 'on' && raw !== 'off') {
-            return { kind: 'error', text: '用法：/style on|off|default|status' }
+          const flag = normalizeStyleLayerFlag(raw)
+          if (flag === 'inherit') {
+            return { kind: 'error', text: '用法：/style on|dialog|off|default|status' }
           }
           if (session) {
-            session.styleLayer = raw
+            session.styleLayer = flag
             session.updatedAt = Date.now()
           }
           return {
             kind: 'success',
-            text: `tlrp 风格层已在本会话${raw === 'on' ? '开启' : '关闭'}（只影响语言风格与贴图，不改形态红线）`,
+            text: `tlrp 风格层已在本会话切到「${styleLayerFlagText(flag)}」（只影响语气、表情与贴图，不改形态红线）`,
           }
         }
         if (kind === 'char') {
@@ -1884,7 +1937,17 @@ function createPlugin() {
         statusLines.push('- 本轮形态：' + (current.mode === 'off' ? '禁用' : currentName + '（' + current.mode + '）') + '（' + current.reason + '）')
         statusLines.push('- 激活角色：' + current.character.name + '（' + current.character.id + '）')
         statusLines.push('- 当前情景：' + current.scene)
-        statusLines.push('- 风格层：' + (current.style?.on ? '开' : '关') + '（来源：' + styleLayerSourceText(current.style?.source) + '；表情包 ' + (current.style?.stickerCount ?? 0) + ' 张／图库 ' + (current.style?.galleryCount ?? 0) + ' 张）')
+        statusLines.push(
+          '- 风格层：' +
+            (current.style?.dialog ? '对话体（只说话不演）' : current.style?.on ? '开（只带语气）' : '关') +
+            '（来源：' +
+            styleLayerSourceText(current.style?.source) +
+            '；表情包 ' +
+            (current.style?.stickerCount ?? 0) +
+            ' 张／图库 ' +
+            (current.style?.galleryCount ?? 0) +
+            ' 张）',
+        )
         statusLines.push('- 已注册形态：' + modes.length + ' 个')
         for (const mode of modes) {
           const flags = []
@@ -2012,7 +2075,13 @@ function createPlugin() {
         scene: s.scene,
         footerEnabled: s.footerEnabled,
         footerLabel: s.footerLabel,
-        style: { on: s.style.on, source: s.style.source, stickerCount: s.style.stickerCount, galleryCount: s.style.galleryCount },
+        style: {
+          on: s.style.on,
+          dialog: s.style.dialog,
+          source: s.style.source,
+          stickerCount: s.style.stickerCount,
+          galleryCount: s.style.galleryCount,
+        },
         triggers: asArray(s.triggers).map((trigger) => ({ id: trigger.id, injectText: trigger.injectText })),
         characterBlock,
         directive,
@@ -2550,6 +2619,7 @@ module.exports = {
   normalizeStyleLayerFlag,
   resolveStyleLayer,
   styleLayerSourceText,
+  styleLayerFlagText,
   stickerDirOf,
   galleryDirOf,
   scanStickerLibrary,

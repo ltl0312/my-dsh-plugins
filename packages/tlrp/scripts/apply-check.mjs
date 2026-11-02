@@ -267,6 +267,49 @@ const statusHandler = h.services.commands.defs.find((definition) => definition.n
 const status = await statusHandler({ agent: h.agent, rawInput: 'status' })
 check('/tlrp status 返回汇总', status?.kind === 'success' && status.text.includes('已注册形态'), status?.text?.split('\n')[1])
 
+/* ── 4b. 风格层开关（/style） ── */
+const styleHandler = h.services.commands.defs.find((definition) => definition.name === 'style')?.handler
+const styleIdle = await styleHandler({ agent: h.agent, rawInput: '' })
+check('/style 无参汇报开关状态', styleIdle?.kind === 'success' && styleIdle.text.includes('风格层'), styleIdle?.text?.split('\n')[0])
+const styleOn = await styleHandler({ agent: h.agent, rawInput: 'on' })
+check('/style on 打开会话级风格层', styleOn?.kind === 'success' && styleOn.text.includes('只带语气'), styleOn?.text)
+const styled = await h.run('这一版跑得怎么样')
+check('风格层打开后尾部 context 声明来源', styled.contexts.includes('风格层：开'), styled.contexts.match(/- 风格层：[^\n]+/)?.[0])
+check('风格层打开后准则里出现风格块', styled.prompt.includes('### 风格层（本轮生效'))
+const styleDialogRp = await styleHandler({ agent: h.agent, rawInput: 'dialog' })
+check('/style dialog 在陪伴态生效', styleDialogRp?.kind === 'success' && styleDialogRp.text.includes('对话体'), styleDialogRp?.text)
+const rpDialogRun = await h.run('陪我坐一会儿')
+check('陪伴态对话体取消斜体动作要求', !rpDialogRun.prompt.includes('自然穿插 *斜体包裹的微动作'), rpDialogRun.prompt.includes('本轮是对话体') ? '已改为只说话' : '未命中')
+check('陪伴态对话体红线改口径', rpDialogRun.contexts.includes('格式红线（陪伴族 · 对话体）'))
+await styleHandler({ agent: h.agent, rawInput: 'on' })
+const workStyle = createHarness({ mode: 'work' })
+const workStyleHandler = workStyle.services.commands.defs.find((definition) => definition.name === 'style')?.handler
+await workStyleHandler({ agent: workStyle.agent, rawInput: 'on' })
+const workStyleRun = await workStyle.run('这一版跑得怎么样')
+check('WORK 形态下风格块补齐语言风格', workStyleRun.prompt.includes('#### 语言风格与禁用项（照此执行）'))
+const styleDialog = await workStyleHandler({ agent: workStyle.agent, rawInput: 'dialog' })
+check('/style dialog 切到对话体', styleDialog?.kind === 'success' && styleDialog.text.includes('对话体'), styleDialog?.text)
+const dialogRun = await workStyle.run('这一版跑得怎么样')
+check(
+  '对话体在状态块里写明只说话',
+  dialogRun.contexts.includes('对话体：只说话，不写旁白'),
+  dialogRun.contexts.includes('对话体') ? 'context 已声明对话体' : String(dialogRun.contexts).slice(0, 80),
+)
+check('对话体标题替换默认标题', dialogRun.prompt.includes('### 风格层（本轮生效：对话体，只说话不演）'))
+check('对话体给出表演强度红线', dialogRun.prompt.includes('#### 本轮的表演强度'))
+check('对话体禁止旁白与环境描写', dialogRun.prompt.includes('禁止环境与天气描写'))
+await workStyleHandler({ agent: workStyle.agent, rawInput: 'default' })
+const afterDialog = await workStyle.run('这一版跑得怎么样')
+check('交回后不再要求对话体', !afterDialog.prompt.includes('#### 本轮的表演强度'))
+const styleOff = await styleHandler({ agent: h.agent, rawInput: 'off' })
+check('/style off 关闭会话级风格层', styleOff?.kind === 'success' && styleOff.text.includes('「关」'), styleOff?.text)
+const withoutStyle = await h.run('这一版跑得怎么样')
+check('关闭后不再注入风格块', !withoutStyle.prompt.includes('### 风格层（本轮生效'))
+const styleBack = await styleHandler({ agent: h.agent, rawInput: 'default' })
+check('/style default 交回形态与全局', styleBack?.kind === 'success' && styleBack.text.includes('交回'), styleBack?.text)
+const styleBad = await styleHandler({ agent: h.agent, rawInput: 'maybe' })
+check('/style 非法参数给用法', styleBad?.kind === 'error' && styleBad.text.includes('用法'), styleBad?.text)
+
 /* ── 5. 触发映射 ── */
 const triggered = await h.run('好想吃橡木蛋糕卷啊')
 check('命中橡木蛋糕卷触发器', triggered.contexts.includes('两万信用点'), triggered.contexts.match(/\[oak-cake\][^\n]{0,40}/)?.[0])

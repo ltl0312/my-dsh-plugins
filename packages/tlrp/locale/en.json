@@ -14,7 +14,7 @@
     "scene": "Override the current scene",
     "title": "Rename how the active character addresses you",
     "trigger": "Add a keyword trigger mapping",
-    "style": "Toggle the style layer: character voice, emoji and local sticker library only (/style on|off|default|status)",
+    "style": "Toggle the style layer: character voice plus emoji/stickers; dialog means speech only, no narration, actions or environment (/style on|dialog|off|default|status)",
     "tlrp": "Show tlrp status: current mode, routing chain, character, scene, enabled triggers"
   }
 }

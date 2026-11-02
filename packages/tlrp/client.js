@@ -93,6 +93,17 @@ window.__ModuleLoader__.load({
     /** 工具策略下拉项：与 core.cjs 的 TOOL_POLICIES 一一对应。 */
     const TOOL_POLICY_OPTIONS = ["allow_all", "whitelist_only", "block_all"];
 
+    /** 风格层三态：与 lib/schema.cjs 的 modeShape.styleLayer 一一对应。 */
+    const STYLE_LAYER_OPTIONS = ["inherit", "on", "dialog", "off"];
+
+    /** 形态风格层三态的显示文案。 */
+    function styleLayerLabel(t, flag) {
+      if (flag === "on") return t("styleOn");
+      if (flag === "dialog") return t("styleDialog");
+      if (flag === "off") return t("styleOff");
+      return t("styleInherit");
+    }
+
     /** 新建形态用的空骨架：字段名与 lib/schema.cjs 的 modeShape 一一对应。 */
     const EMPTY_MODE = {
       id: "",
@@ -108,6 +119,7 @@ window.__ModuleLoader__.load({
       statusFooterOverride: "",
       bindCharacterId: "",
       isDefaultFallback: false,
+      styleLayer: "inherit",
     };
 
     /** 形态 id 的合法字符：与宿主注册斜杠指令时用的正则保持一致。 */
@@ -261,6 +273,23 @@ window.__ModuleLoader__.load({
 
       modeSection: "形态矩阵工作室 Mode Studio",
       modeSectionHint: "运行形态可以像角色一样自由增删改：每个形态有自己的行为准则、工具策略、状态面板模板与触发指令；auto 按优先级与关键词自动分流。",
+      styleSection: "风格层（轻量注入）",
+      styleSectionHint: "只把角色的语言风格、表情与本地贴纸追加进上下文，不演微动作；人设是否完整注入仍由形态的「注入完整人设」决定。对话里可用 /style on|off|default|status 临时开关。",
+      field_styleLayerDefault: "全局默认",
+      hint_styleLayerDefault: "形态设为「跟随全局默认」时用这里。只带语气=口吻像角色但仍可演；对话体=只说话，禁旁白、动作、环境与外貌描写。",
+      field_styleEmojiHint: "表情（emoji）用量",
+      hint_styleEmojiHint: "写进上下文的 emoji 使用规则；留空则声明本轮不用 emoji。",
+      field_stickerDir: "表情包目录",
+      hint_stickerDir: "留空则用 ~/.dsh/stickers/<角色 ID>；只读该目录顶层，文件名即标签，支持 png/jpg/jpeg/webp/gif。",
+      field_galleryDir: "图库目录",
+      hint_galleryDir: "留空则用 ~/.dsh/gallery；同样只读顶层，文件名即标签。",
+      field_maxStickersPerTurn: "每轮最多贴图",
+      hint_maxStickersPerTurn: "表情包与图库共用这个上限；0 表示整轮禁止贴图。",
+      styleSwatch: "当前判定",
+      sectionsToolbarExpand: "全部展开",
+      sectionsToolbarCollapse: "全部收起",
+      sectionsSummaryModes: "{count} 个形态",
+      sectionsSummaryTriggers: "{count} 条触发",
       mode: "当前模式",
       modeHint: "点顶部按钮直接锁定；选「自动路由」则按关键词与优先级每轮判定。",
       modeAuto: "自动路由 (auto)",
@@ -303,6 +332,12 @@ window.__ModuleLoader__.load({
       hint_mode_statusFooterOverride: "留空则使用角色自己的状态面板模板；可用 {label}{scene}{dress}{os}{heat}{shield}{vocoder}{entropy}。",
       field_mode_bindCharacterId: "联动角色",
       hint_mode_bindCharacterId: "切到该形态时自动切换到的角色；留空表示保持当前角色。",
+      field_mode_styleLayer: "风格层",
+      hint_mode_styleLayer: "跟随全局／强制开／强制关；对话里的 /style 优先级最高。",
+      styleInherit: "跟随全局默认",
+      styleOn: "只带语气",
+      styleDialog: "对话体（只说话不演）",
+      styleOff: "强制关",
       policyAllowAll: "放行全部工具",
       policyWhitelist: "仅白名单",
       policyBlockAll: "禁用全部工具",
@@ -424,6 +459,23 @@ window.__ModuleLoader__.load({
 
       modeSection: "Mode Studio",
       modeSectionHint: "Runtime modes are as editable as characters: each one carries its own directive, tool policy, status-footer template and trigger aliases; auto routes by priority and keywords.",
+      styleSection: "Style layer (lightweight injection)",
+      styleSectionHint: "Appends only the character's speech style, emoji rules and local stickers to the context, with no action roleplay; whether the full persona is injected stays controlled by the mode's Inject full persona switch. Toggle it in chat with /style on|off|default|status.",
+      field_styleLayerDefault: "Global default",
+      hint_styleLayerDefault: "Used by modes set to Follow global default. Tone only keeps acting; Dialogue only forbids narration, actions, environment and appearance.",
+      field_styleEmojiHint: "Emoji allowance",
+      hint_styleEmojiHint: "Emoji rule injected into the context; empty means this turn uses no emoji.",
+      field_stickerDir: "Sticker directory",
+      hint_stickerDir: "Empty uses ~/.dsh/stickers/<character id>; only its top level is read and each file name is the tag (png/jpg/jpeg/webp/gif).",
+      field_galleryDir: "Gallery directory",
+      hint_galleryDir: "Empty uses ~/.dsh/gallery; likewise top level only, file name is the tag.",
+      field_maxStickersPerTurn: "Max images per turn",
+      hint_maxStickersPerTurn: "Shared by stickers and gallery; 0 forbids any image for the turn.",
+      styleSwatch: "Resolved",
+      sectionsToolbarExpand: "Expand all",
+      sectionsToolbarCollapse: "Collapse all",
+      sectionsSummaryModes: "{count} modes",
+      sectionsSummaryTriggers: "{count} triggers",
       mode: "Mode",
       modeHint: "Click a button to lock a mode; Auto routes every turn from keywords and priority.",
       modeAuto: "Auto route (auto)",
@@ -466,6 +518,12 @@ window.__ModuleLoader__.load({
       hint_mode_statusFooterOverride: "Empty uses the character template; supports {label}{scene}{dress}{os}{heat}{shield}{vocoder}{entropy}.",
       field_mode_bindCharacterId: "Bound character",
       hint_mode_bindCharacterId: "Character switched to when this mode activates; empty keeps the current one.",
+      field_mode_styleLayer: "Style layer",
+      hint_mode_styleLayer: "Follow global default / force on / force off; a /style command in chat wins over both.",
+      styleInherit: "Follow global default",
+      styleOn: "Tone only",
+      styleDialog: "Dialogue only",
+      styleOff: "Force off",
       policyAllowAll: "Allow every tool",
       policyWhitelist: "Allowlist only",
       policyBlockAll: "Block every tool",
@@ -583,6 +641,16 @@ window.__ModuleLoader__.load({
 .tlrp-section-head { display: flex; flex-direction: column; gap: 3px; }
 .tlrp-section-title { font-size: 13px; font-weight: 600; color: var(--dsw-alias-text-primary, #e8eaf0); }
 .tlrp-section-hint { font-size: 11.5px; line-height: 1.55; color: var(--dsw-alias-text-secondary, #9aa3b2); }
+.tlrp-section-toggle { display: flex; align-items: flex-start; gap: 8px; width: 100%; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.tlrp-section-toggle:focus-visible { outline: 2px solid var(--dsw-alias-border-accent, #66e0c2); outline-offset: 3px; border-radius: 6px; }
+.tlrp-section-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.tlrp-section-chevron { flex: 0 0 12px; margin-top: 3px; color: var(--dsw-alias-text-secondary, #9aa3b2); transition: transform .16s ease; }
+.tlrp-section[data-open="true"] .tlrp-section-chevron { transform: rotate(90deg); }
+.tlrp-section-summary { display: flex; flex-wrap: wrap; gap: 6px; }
+.tlrp-section[data-open="true"] .tlrp-section-summary { display: none; }
+.tlrp-section-body { display: flex; flex-direction: column; gap: 12px; }
+.tlrp-section[data-open="false"] .tlrp-section-body { display: none; }
+.tlrp-sections-toolbar { display: flex; justify-content: flex-end; gap: 8px; }
 .tlrp-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .tlrp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
 .tlrp-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
@@ -638,20 +706,97 @@ window.__ModuleLoader__.load({
 
     /* ─────────────────────── 基础控件 ─────────────────────── */
 
-    /** 一行标题 + 说明的分区容器。 */
+    /* ── 分区收起状态：默认只展开第一块，用户的选择记在 localStorage ── */
+
+    const SECTION_IDS = ["mode", "style", "studio", "triggers", "presets"];
+    const SECTION_STORAGE_KEY = "tlrp.sections.open";
+
+    function mapSections(open) {
+      const next = {};
+      for (const id of SECTION_IDS) next[id] = open === true;
+      return next;
+    }
+
+    function persistSectionState(state) {
+      try {
+        window.localStorage.setItem(SECTION_STORAGE_KEY, JSON.stringify(state));
+      } catch (error) {
+        /* 隐私模式或存储配额：只丢记忆，不影响本次收展 */
+      }
+      return state;
+    }
+
+    function loadSectionState() {
+      try {
+        const raw = window.localStorage.getItem(SECTION_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : null;
+        if (parsed && typeof parsed === "object") {
+          const next = {};
+          let anyOpen = false;
+          for (const id of SECTION_IDS) {
+            next[id] = parsed[id] === true;
+            if (next[id]) anyOpen = true;
+          }
+          if (anyOpen) return next;
+        }
+      } catch (error) {
+        /* 读不到就用默认 */
+      }
+      return { mode: true };
+    }
+
+    /** 分区容器：可收起卡片（标题行是按钮，收起后留一行状态摘要）。 */
     function Section(props) {
-      return h(
-        "section",
-        { className: "tlrp-section" },
+      const open = props.open === undefined ? true : props.open === true;
+      const header = h(
+        "button",
+        {
+          className: "tlrp-section-toggle",
+          type: "button",
+          "aria-expanded": open ? "true" : "false",
+          onClick: props.onToggle ? () => props.onToggle(props.id) : undefined,
+        },
+        h(
+          "svg",
+          {
+            className: "tlrp-section-chevron",
+            width: 12,
+            height: 12,
+            viewBox: "0 0 12 12",
+            fill: "none",
+            stroke: "currentColor",
+            strokeWidth: 1.6,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+            "aria-hidden": "true",
+            focusable: "false",
+          },
+          h("path", { d: "M4.5 2.5 L8 6 L4.5 9.5" })
+        ),
         h(
           "div",
-          { className: "tlrp-section-head" },
+          { className: "tlrp-section-main" },
           h("div", { className: "tlrp-section-title" }, props.title),
           props.hint ? h("div", { className: "tlrp-section-hint" }, props.hint) : null
-        ),
-        props.children
+        )
       );
-    }
+      return h(
+        "section",
+        { className: "tlrp-section", "data-open": open ? "true" : "false" },
+        header,
+        props.summary && props.summary.length > 0
+          ? h(
+              "div",
+              { className: "tlrp-section-summary" },
+              props.summary.map((text, index) => h("span", { key: String(index), className: "tlrp-chip" }, text))
+            )
+          : null,
+        h(
+          "div",
+          { className: "tlrp-section-body", hidden: open ? undefined : true },
+          ...(Array.isArray(props.children) ? props.children : [props.children])
+        )
+      );    }
 
     /** 字段容器：标签 + 控件 + 提示。 */
     function Field(props) {
@@ -1110,6 +1255,16 @@ window.__ModuleLoader__.load({
       );
       const [importText, setImportText] = useState("");
       const [notice, setNotice] = useState("");
+      const [openSections, setOpenSections] = useState(loadSectionState);
+      const toggleSection = useCallback(
+        (id) => {
+          if (typeof id !== "string") return;
+          setOpenSections((prev) => persistSectionState({ ...prev, [id]: prev?.[id] !== true }));
+        },
+        []
+      );
+      const setAllSections = useCallback((open) => setOpenSections(persistSectionState(mapSections(open))), []);
+      const sectionProps = (id) => ({ id, open: openSections?.[id] === true, onToggle: toggleSection });
 
       const applyImport = () => {
         let parsed;
@@ -1191,6 +1346,15 @@ window.__ModuleLoader__.load({
       }
 
       const disabled = writable !== true;
+      const modeStyleLayer =
+        activeMode?.styleLayer === "on" || activeMode?.styleLayer === "dialog" || activeMode?.styleLayer === "off"
+          ? activeMode.styleLayer
+          : null;
+      const effectiveStyleLayer =
+        modeStyleLayer ??
+        (STYLE_LAYER_OPTIONS.includes(value.styleLayerDefault) && value.styleLayerDefault !== "inherit"
+          ? value.styleLayerDefault
+          : "off");
 
       return h(
         "div",
@@ -1205,11 +1369,25 @@ window.__ModuleLoader__.load({
         ),
         disabled ? h("p", { className: "tlrp-warn" }, t("readOnly")) : null,
         notice ? h("p", { className: "tlrp-note" }, notice) : null,
+        h(
+          "div",
+          { className: "tlrp-sections-toolbar" },
+          h(Button, { onClick: () => setAllSections(true) }, t("sectionsToolbarExpand")),
+          h(Button, { onClick: () => setAllSections(false) }, t("sectionsToolbarCollapse"))
+        ),
 
         /* ── A：形态矩阵工作室 Mode Studio ── */
         h(
           Section,
-          { title: t("modeSection"), hint: t("modeSectionHint") },
+          {
+            ...sectionProps("mode"),
+            title: t("modeSection"),
+            hint: t("modeSectionHint"),
+            summary: [
+              `${t("mode")}：${mode === "auto" ? t("modeAuto") : activeMode?.name ?? mode}`,
+              t("sectionsSummaryModes", { count: modes.length }),
+            ],
+          },
           /* 顶部全局切换栏：自动路由 + 配置里的每一个形态 */
           h(
             "div",
@@ -1358,6 +1536,16 @@ window.__ModuleLoader__.load({
           ),
           h(
             Field,
+            { label: t("field_mode_styleLayer"), hint: t("hint_mode_styleLayer") },
+            h(Select, {
+              value: modeDraft.styleLayer ?? "inherit",
+              disabled,
+              options: STYLE_LAYER_OPTIONS.map((flag) => ({ value: flag, label: styleLayerLabel(t, flag) })),
+              onChange: (next) => patchMode("styleLayer", next),
+            })
+          ),
+          h(
+            Field,
             { label: t("field_mode_autoKeywords"), hint: t("hint_mode_autoKeywords") },
             h(TextArea, { rows: 3, value: modeDraft.autoKeywords, disabled, onChange: (next) => patchMode("autoKeywords", next) })
           ),
@@ -1415,10 +1603,111 @@ window.__ModuleLoader__.load({
           )
         ),
 
+        /* ── A2：风格层（语言风格轻量注入） ── */
+        h(
+          Section,
+          {
+            ...sectionProps("style"),
+            title: t("styleSection"),
+            hint: t("styleSectionHint"),
+            summary: [`${t("styleSwatch")}：${styleLayerLabel(t, effectiveStyleLayer)}`],
+          },
+          h(
+            "div",
+            { className: "tlrp-row" },
+            h(
+              "span",
+              { className: "tlrp-chip" },
+              t("styleSwatch"),
+              " ",
+              h(
+                "b",
+                null,
+                activeMode?.styleLayer === "on" ||
+                activeMode?.styleLayer === "dialog" ||
+                activeMode?.styleLayer === "off"
+                  ? styleLayerLabel(t, activeMode.styleLayer)
+                  : styleLayerLabel(
+                      t,
+                      STYLE_LAYER_OPTIONS.includes(value.styleLayerDefault) && value.styleLayerDefault !== "inherit"
+                        ? value.styleLayerDefault
+                        : "off"
+                    )
+              )
+            ),
+            h("span", { className: "tlrp-chip" }, t("mode"), " ", h("b", null, activeMode?.name ?? "—"))
+          ),
+          h(
+            "div",
+            { className: "tlrp-grid" },
+            h(
+              Field,
+              { label: t("field_styleLayerDefault"), hint: t("hint_styleLayerDefault") },
+              h(Select, {
+                value: ["on", "dialog", "off"].includes(value.styleLayerDefault) ? value.styleLayerDefault : "off",
+                disabled,
+                options: [
+                  { value: "on", label: t("styleOn") },
+                  { value: "dialog", label: t("styleDialog") },
+                  { value: "off", label: t("styleOff") },
+                ],
+                onChange: (next) => write("styleLayerDefault", next),
+              })
+            ),
+            h(
+              Field,
+              { label: t("field_maxStickersPerTurn"), hint: t("hint_maxStickersPerTurn") },
+              h(TextInput, {
+                value: String(value.maxStickersPerTurn ?? 2),
+                disabled,
+                onChange: (next) => {
+                  const parsed = Number(next);
+                  write("maxStickersPerTurn", Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0);
+                },
+              })
+            ),
+            h(
+              Field,
+              { label: t("field_stickerDir"), hint: t("hint_stickerDir") },
+              h(TextInput, {
+                value: typeof value.stickerDir === "string" ? value.stickerDir : "",
+                placeholder: "C:/Users/<you>/.dsh/stickers/<角色 ID>",
+                disabled,
+                onChange: (next) => write("stickerDir", next),
+              })
+            ),
+            h(
+              Field,
+              { label: t("field_galleryDir"), hint: t("hint_galleryDir") },
+              h(TextInput, {
+                value: typeof value.galleryDir === "string" ? value.galleryDir : "",
+                placeholder: "C:/Users/<you>/.dsh/gallery",
+                disabled,
+                onChange: (next) => write("galleryDir", next),
+              })
+            )
+          ),
+          h(
+            Field,
+            { label: t("field_styleEmojiHint"), hint: t("hint_styleEmojiHint") },
+            h(TextArea, {
+              rows: 3,
+              value: typeof value.styleEmojiHint === "string" ? value.styleEmojiHint : "",
+              disabled,
+              onChange: (next) => write("styleEmojiHint", next),
+            })
+          )
+        ),
+
         /* ── B：角色工作室 ── */
         h(
           Section,
-          { title: t("studio"), hint: t("studioHint") },
+          {
+            ...sectionProps("studio"),
+            title: t("studio"),
+            hint: t("studioHint"),
+            summary: [`${t("character")}：${activeCharacter?.name || activeCharacter?.id || t("unknownCharacter")}`],
+          },
           h(
             "div",
             { className: "tlrp-row" },
@@ -1465,7 +1754,12 @@ window.__ModuleLoader__.load({
         /* ── C：触发词映射表 ── */
         h(
           Section,
-          { title: t("triggers"), hint: t("triggersHint") },
+          {
+            ...sectionProps("triggers"),
+            title: t("triggers"),
+            hint: t("triggersHint"),
+            summary: [t("sectionsSummaryTriggers", { count: localTriggers.length })],
+          },
           h(
             "div",
             { className: "tlrp-row" },
@@ -1555,7 +1849,7 @@ window.__ModuleLoader__.load({
         /* ── D：预设导入导出与调试探针 ── */
         h(
           Section,
-          { title: t("presets"), hint: t("presetsHint") },
+          { ...sectionProps("presets"), title: t("presets"), hint: t("presetsHint") },
           h(
             "div",
             { className: "tlrp-grid" },
