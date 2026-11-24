@@ -2171,3 +2171,7 @@ export class MemoryDB {
     }
   }
 }
+    // 驱动默认 1000 页（约 4MB）才触发自动 checkpoint，长期存活的宿主会让 -wal
+    // 无限膨胀（实测 10.3MB 主库配 6.9MB 未合并 -wal）。收紧到 256 页（约 1MB），
+    // 让合并更早发生，避免每次打开只读连接都要重放一整份滞后的 WAL 索引。
+    this.db.pragma('wal_autocheckpoint = 256')

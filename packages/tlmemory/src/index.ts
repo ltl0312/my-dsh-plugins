@@ -643,3 +643,14 @@ export function apply(ctx: Context, config: Config): () => void {
       })
   }
 }
+    // 热路径早退：本插件只消费这四类事件，其余（step/*、tool/*、诊断日志）
+    // 连 resolveSessionScope 都不该跑 —— 它挂在根上下文上，看得到全部会话的全部事件。
+    const eventType = (event as { type?: string } | undefined)?.type
+    if (
+      eventType !== 'user/message' &&
+      eventType !== 'assistant/message' &&
+      eventType !== 'turn/start' &&
+      eventType !== 'turn/end'
+    ) {
+      return
+    }
