@@ -2399,13 +2399,37 @@ function createPlugin() {
           const value = Number(live(config.coreSectionOrder, 10150))
           return Number.isFinite(value) ? value : 10150
         })()
-        const template = asString(
-          live(config.coreSectionText, undefined),
-          ['## tlrp 角色与形态装配', '当前时间：{{now}}', '工作目录：{{cwd}}', '', '{{tlrp_character}}', '', '{{tlrp_directive}}'].join('\n'),
-        )
-        const safeTemplate = sanitizeTemplate(template)
+        const template = asString(live(config.coreSectionText, undefined), '')
+        // 函数式 text：宿主 assemble 时先求值、再走插值（见 dsh-system-prompt renderPrompt），
+        // 因此不必依赖 {{variable}} 的注册时序，也不会残留未替换的字面占位符。
+        const renderCoreSection = (context) => {
+          const current = snap(context?.agent)
+          const characterBlock = renderCharacterBlock(current.character, {
+            scene: current.scene,
+            footerLabel: current.footerLabel,
+            full: current.mode === 'off' ? true : current.injectCharacterPersona !== false,
+          })
+          const directiveBlock = current.mode === 'off' ? renderOffDirective() : renderModeDirective(current)
+          const body =
+            template ||
+            [
+              '## tlrp 角色与形态装配',
+              '当前时间：' + formatNow(asString(read('timeZone'), 'Asia/Shanghai')),
+              '工作目录：' + safeCwd(),
+              '',
+              characterBlock,
+              '',
+              directiveBlock,
+            ].join('\n')
+          return sanitizeTemplate(body)
+        }
         child.effect(
-          () => sp.section({ name: 'deployment:tlrp-core', order, text: safeTemplate }),
+          () =>
+            sp.section({
+              name: 'deployment:tlrp-core',
+              order,
+              text: renderCoreSection,
+            }),
           'tlrp.section.core',
         )
       }
