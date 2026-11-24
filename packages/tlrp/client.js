@@ -43,6 +43,127 @@ window.__ModuleLoader__.load({
     /** 栏目排序：在 plugins(15) / 记忆类(30~31) 之后，通知(60) 之前。 */
     const SECTION_ORDER = 45;
 
+    // >> tl-settings-tab (GENERATED)
+// 由 tools/sync-settings-tab.mjs 从
+// packages/tlsettings/src/client/settings-tab.ts 转译内联；不要手改这一块。
+const tlSettingsTabApi = (() => {
+  const TL_SETTINGS_TABS_KEY = "__DSH_TL_SETTINGS_TABS__";
+  function createTlSettingsTabs() {
+    const globalObject = globalThis;
+    const existing = globalObject[TL_SETTINGS_TABS_KEY];
+    if (existing && existing.version === 1) return existing;
+    const records = /* @__PURE__ */ new Map();
+    const listeners = /* @__PURE__ */ new Set();
+    const hub = { active: false };
+    let failureCount = 0;
+    let snapshot = [];
+    function rebuild() {
+      snapshot = [...records.values()].map((record) => ({
+        id: record.id,
+        order: record.order,
+        label: record.label,
+        render: record.render
+      })).sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
+    }
+    function notify() {
+      rebuild();
+      for (const listener of [...listeners]) {
+        try {
+          listener();
+        } catch {
+        }
+      }
+    }
+    function unmountOwn(record) {
+      const off = record.off;
+      record.off = null;
+      if (!off) return;
+      try {
+        off();
+      } catch {
+        failureCount += 1;
+      }
+    }
+    function mountOwn(record) {
+      if (record.off || hub.active) return;
+      try {
+        const off = record.mountOwnSection();
+        record.off = typeof off === "function" ? off : null;
+      } catch {
+        record.off = null;
+        failureCount += 1;
+      }
+    }
+    const api = {
+      version: 1,
+      publish(entry) {
+        if (!entry || typeof entry.id !== "string" || entry.id.length === 0) {
+          throw new Error("[tl-settings] publishTlSettingsTab: entry.id \u5FC5\u586B");
+        }
+        if (typeof entry.render !== "function") {
+          throw new Error(`[tl-settings] publishTlSettingsTab(${entry.id}): entry.render \u5FC5\u987B\u662F\u51FD\u6570`);
+        }
+        const previous = records.get(entry.id);
+        if (previous) unmountOwn(previous);
+        const record = {
+          id: entry.id,
+          order: typeof entry.order === "number" ? entry.order : 0,
+          label: typeof entry.label === "function" ? entry.label : () => entry.id,
+          render: entry.render,
+          mountOwnSection: typeof entry.mountOwnSection === "function" ? entry.mountOwnSection : () => void 0,
+          off: null
+        };
+        records.set(record.id, record);
+        mountOwn(record);
+        notify();
+        let disposed = false;
+        return () => {
+          if (disposed) return;
+          disposed = true;
+          unmountOwn(record);
+          if (records.get(record.id) === record) records.delete(record.id);
+          notify();
+        };
+      },
+      activateHub() {
+        hub.active = true;
+        for (const record of records.values()) unmountOwn(record);
+        notify();
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          hub.active = false;
+          for (const record of records.values()) mountOwn(record);
+          notify();
+        };
+      },
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      getSnapshot() {
+        return snapshot;
+      },
+      isHubActive() {
+        return hub.active;
+      },
+      failures() {
+        return failureCount;
+      }
+    };
+    rebuild();
+    globalObject[TL_SETTINGS_TABS_KEY] = api;
+    return api;
+  }
+  const tlSettingsTabs = createTlSettingsTabs();
+
+  return tlSettingsTabs
+})()
+// << tl-settings-tab
+
     /* ─────────────────────── 角色字段定义 ─────────────────────── */
 
     /**
@@ -1964,6 +2085,46 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), "tlrp: settings dictionaries");
       const t = ctx.locale.bind(NS);
 
+      // 设置侧边栏的注入面（hooks/set/unset）。configForms 就位后由 registerCard
+      // 换成真正读写配置的那份；未就位时留一组空实现，页面照常能开。
+      let sectionFace = () => ({ hooks: {}, set: () => {}, unset: () => {} });
+
+      // 设置侧边栏：**与 configForms 无关**，一律交给 TL 工具箱（dsh-plugin-tlsettings）
+      // 合流 —— hub 装了就变成一个页签；没装（单独安装 tlrp）时 mountOwnSection 照旧
+      // 自挂一个独立栏目。插件页那两处槽位只长在「插件管理」里，这条才是「点设置就能
+      // 看见」的那条。
+      try {
+        const sectionOff = tlSettingsTabApi.publish({
+          id: SECTION_ID,
+          order: SECTION_ORDER,
+          label: () => t("sectionLabel"),
+          // hub 不经过宿主槽位，`t` 得自己补上（槽位那条由 locale: NS 注入）。
+          render: () => h(TlrpSettingsSection, Object.assign({}, sectionFace(), { t })),
+          mountOwnSection: () =>
+            ctx.slots.inject("settings.section", () =>
+              ctx.slots.register(
+                {
+                  name: "settings.section",
+                  id: SECTION_ID,
+                  order: SECTION_ORDER,
+                  label: () => t("sectionLabel"),
+                  locale: NS,
+                  inject: () => sectionFace(),
+                },
+                TlrpSettingsSection
+              )
+            ),
+        });
+        ctx.effect(
+          () => () => {
+            if (typeof sectionOff === "function") sectionOff();
+          },
+          "tlrp: settings section"
+        );
+      } catch (error) {
+        ctxLog(error);
+      }
+
       /**
        * 一旦宿主服出任一候选命名空间，就注册配置卡。
        * @param forms - configForms 服务。
@@ -2012,26 +2173,9 @@ window.__ModuleLoader__.load({
               ctxLog(error);
             }
           }
-          // 设置侧边栏的独立栏目：插件页那两处槽位只长在「插件管理」里，
-          // 想让用户点一下「设置」就能看见，必须自己占一个 settings.section。
-          try {
-            const off = ctx.slots.inject("settings.section", () =>
-              ctx.slots.register(
-                {
-                  name: "settings.section",
-                  id: SECTION_ID,
-                  order: SECTION_ORDER,
-                  label: () => t("sectionLabel"),
-                  locale: NS,
-                  inject: face,
-                },
-                TlrpSettingsSection
-              )
-            );
-            if (typeof off === "function") offs.push(off);
-          } catch (error) {
-            ctxLog(error);
-          }
+          // 设置侧边栏那条已经在 apply 里发布（与 configForms 解耦），这里只把
+          // 真正的配置读写面接上去，页签内容随 configForms 就位而具备数据。
+          sectionFace = face;
           return () => offs.forEach((off) => off());
         };
       }
